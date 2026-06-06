@@ -67,7 +67,12 @@ components/                  # SHARED  (both targets)
   screen_manager/            #   Screen base + screen stack
 esp32p4/                     # DEVICE build root (IDF project)
   main/                      #   entry point + on-device pf_port impl
-  components/m5tab5-bsp/     #   DEVICE-only board support (auto-discovered by IDF)
+  components/m5stack-bsp/    #   DEVICE-only board support (auto-discovered by IDF)
+    inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_types.h
+    inc_private/             #     internal driver interfaces (bsp_display.h / bsp_touch.h vtables)
+    src/                     #     shared layer: bsp_display.c/bsp_touch.c (public API), audio_eq.c
+    devices/                 #     reusable chip drivers (ili9881c/st7123/gt911/es8388/pi4io)
+    boards/<model>/          #     per-model bring-up; tab5/ implements bsp_init()
 simulator/                   # SIMULATOR build root (see below)
   platform/                  #   SIM-only entry + pf_port impl (SDL)
   idf_compat/                #   SIM-only ESP-IDF compat component (see its README.md)
@@ -123,6 +128,40 @@ question: **does Espressif already define this API?**
 Ambiguous-looking cases resolve cleanly under this rule: `nvs_flash` is an
 ESP-IDF API → it's `idf_compat` and app code calls the C API directly (see the
 NVS section), **not** a per-platform `pf_port`-style seam.
+
+### The `m5stack-bsp` component (device-side board support)
+
+Structured so non-Tab5 M5Stack models can be added later without reworking the
+drivers. Three layers:
+
+- **Public API (`inc/bsp.h`)** — model-agnostic: `bsp_init(const bsp_config_t*)`,
+  `bsp_restart()`, `bsp_display_*`, `bsp_touch_*` (touch points are the BSP's own
+  `bsp_touch_point_t`, defined in `bsp_types.h` — no `esp_lcd_touch` type leaks
+  into the public API). The model-agnostic `bsp_display_*`/`bsp_touch_*`
+  functions are implemented **once** in the shared layer (`src/bsp_display.c`,
+  `src/bsp_touch.c`): they hold the active provider and dispatch through its
+  vtable, so a board never re-implements this glue. `bsp_init()` and
+  `bsp_restart()` are the only per-model pieces, under `boards/<model>/` (build
+  selects one board). Tab5's `boards/tab5/tab5.c` brings up the buses, resolves
+  the panel generation (ST7123 vs ILI9881C/GT911) by **I2C probe + plain `if`**
+  (board-internal, not abstracted), creates the matching providers, and
+  registers them with `bsp_display_set_active()` / `bsp_touch_set_active()`.
+- **Internal driver interfaces (`inc_private/bsp_display.h`, `bsp_touch.h`)** —
+  struct-inheritance vtables (esp_lcd style): a driver embeds `bsp_display_t` /
+  `bsp_touch_t` as its **first** struct member and returns `&state->base` from a
+  `*_create()` factory; the board calls through the members directly
+  (`disp->flush(disp, i)` — single indirection). The portable base op is
+  `draw_bitmap`; **host-side framebuffers (`get_framebuffers`+`flush`) and
+  backlight (`set_brightness`) are optional** — a driver leaves the pointer NULL
+  when the panel lacks the capability, so EPD / SPI-with-GRAM panels fit without
+  the MIPI framebuffer-swap model baked into the contract. (Today only the
+  framebuffer path is wired; the app assumes it.)
+- **Drivers (`devices/`)** — reusable chip drivers, each a `bsp_display`/
+  `bsp_touch` provider. They include only `bsp_display.h`/`bsp_touch.h`
+  (+`bsp_types.h`), not `bsp_private.h`.
+
+Audio (`bsp_tab5_audio_*` in `inc/bsp_audio.h`) is Tab5-specific with no
+cross-model contract yet, so it keeps its name and lives in the tab5 board.
 
 ### The `pf_port` seam
 

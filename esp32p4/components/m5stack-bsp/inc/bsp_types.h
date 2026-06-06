@@ -36,6 +36,11 @@ typedef enum {
     BSP_PIXEL_FORMAT_RGB888,
 } bsp_pixel_format_t;
 
+typedef struct {
+    int x, y;
+    int strength;   /*!< touch pressure; 0 when the controller doesn't report it */
+} bsp_touch_point_t;
+
 #ifdef __cplusplus
 }
 #endif

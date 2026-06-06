@@ -1,10 +1,18 @@
 /*
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Hiroki Kawakami
+ *
+ * M5Stack Tab5 board: brings up the bus + IO expanders, resolves the panel
+ * generation (ST7123 vs ILI9881C/GT911) by I2C probe, and wires the resulting
+ * bsp_display / bsp_touch providers. Display/touch are accessed through the
+ * provider vtables; audio stays Tab5-specific (bsp_tab5_audio_*).
  */
 
 #include "bsp_private.h"
-#include "bsp_tab5.h"
+#include "bsp.h"
+#include "bsp_audio.h"
+#include "bsp_display.h"
+#include "bsp_touch.h"
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -33,11 +41,6 @@ static const char *TAG = "BSP_TAB5";
 static i2c_master_bus_handle_t i2c0;
 static pi4io_t pi4ioe1, pi4ioe2;
 
-static void **frame_buffers;
-static ili9881c_lcd_t ili9881c;
-static gt911_touch_t gt911;
-static st7123_lcd_t st7123_lcd;
-static st7123_touch_t st7123_touch;
 static es8388_t es8388;
 static audio_eq_t audio_eq;
 /* User-facing volume tracked here; hardware codec volume stays at max after
@@ -117,11 +120,11 @@ static esp_err_t start_speaker_task_once(void) {
         ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
-esp_err_t bsp_tab5_init(const bsp_tab5_config_t *config) {
+esp_err_t bsp_init(const bsp_config_t *config) {
     esp_err_t err;
 
     // Check config values
-    bsp_tab5_config_t tmp_config = *config;
+    bsp_config_t tmp_config = *config;
     if (!tmp_config.display.fb_num) tmp_config.display.fb_num = 1;
     config = &tmp_config;
 
@@ -177,51 +180,40 @@ esp_err_t bsp_tab5_init(const bsp_tab5_config_t *config) {
     pi4io_set_output(pi4ioe1, 5, true);   // TP_RST = High
     vTaskDelay(pdMS_TO_TICKS(100));
 
+    // Display + touch are panel-generation dependent. Probe the touch
+    // controller address to pick the generation, then bring up the matching
+    // bsp_display / bsp_touch providers.
+    bsp_display_config_t display_config = {
+        .backlight_gpio = GPIO_NUM_22,
+        .size = (bsp_size_t){ 720, 1280 },
+        .pixel_format = config->display.pixel_format,
+        .fb_num = config->display.fb_num,
+    };
+    bsp_touch_config_t touch_config = {
+        .i2c_bus = i2c0,
+        .size = (bsp_size_t){ 720, 1280 },
+        .int_gpio = GPIO_NUM_23,
+        .rst_gpio = GPIO_NUM_NC,
+        .scl_speed_hz = 100000,
+        .interrupt = config->touch.interrupt,
+    };
+    bsp_display_t *display = NULL;
+    bsp_touch_t *touch = NULL;
     if (i2c_master_probe(i2c0, 0x55, 10) == ESP_OK) {
-        // Initialize ST7123 LCD
-        err = st7123_lcd_init(&(st7123_lcd_config_t){
-            .backlight_gpio = GPIO_NUM_22,
-            .size = (bsp_size_t){ 720, 1280 },
-            .pixel_format = config->display.pixel_format,
-            .fb_num = config->display.fb_num,
-        }, &st7123_lcd);
+        err = st7123_lcd_create(&display_config, &display);
         BSP_RETURN_ERR(err);
-        frame_buffers = st7123_lcd_get_frame_buffers(st7123_lcd);
-
-        // Initialize ST7123 Touch Panel
-        err = st7123_touch_init(&(st7123_touch_config_t){
-            .i2c_bus = i2c0,
-            .size = (bsp_size_t){ 720, 1280 },
-            .int_gpio = GPIO_NUM_23,
-            .rst_gpio = GPIO_NUM_NC,
-            .scl_speed_hz = 100000,
-            .interrupt = config->touch.interrupt,
-        }, &st7123_touch);
+        err = st7123_touch_create(&touch_config, &touch);
         BSP_RETURN_ERR(err);
     } else if (i2c_master_probe(i2c0, 0x14, 10) == ESP_OK) {
-        // Initialize ILI9881C LCD
-        err = ili9881c_lcd_init(&(ili9881c_lcd_config_t){
-            .backlight_gpio = GPIO_NUM_22,
-            .size = (bsp_size_t){ 720, 1280 },
-            .pixel_format = config->display.pixel_format,
-            .fb_num = config->display.fb_num,
-        }, &ili9881c);
+        err = ili9881c_lcd_create(&display_config, &display);
         BSP_RETURN_ERR(err);
-        frame_buffers = ili9881c_lcd_get_frame_buffers(ili9881c);
-
-        // Initialize GT911 Touch Panel
-        err = gt911_touch_init(&(gt911_touch_config_t){
-            .i2c_bus = i2c0,
-            .size = (bsp_size_t){ 720, 1280 },
-            .int_gpio = GPIO_NUM_23,
-            .rst_gpio = GPIO_NUM_NC,
-            .scl_speed_hz = 100000,
-            .interrupt = config->touch.interrupt,
-        }, &gt911);
+        err = gt911_touch_create(&touch_config, &touch);
         BSP_RETURN_ERR(err);
     } else {
         return ESP_ERR_NOT_FOUND;
     }
+    bsp_display_set_active(display);
+    bsp_touch_set_active(touch);
 
     // ES8388 audio codec (speaker output)
     if (!config->audio.disable) {
@@ -332,7 +324,7 @@ esp_err_t bsp_tab5_init(const bsp_tab5_config_t *config) {
     return ESP_OK;
 }
 
-void bsp_tab5_restart(void) {
+void bsp_restart(void) {
     /* Codec runs pinned at vol=100 (SW gain delivers the user volume), so
      * cutting the analog output through the codec's own mute register is the
      * direct way to silence the DAC before the I2S clocks die. */
@@ -343,34 +335,10 @@ void bsp_tab5_restart(void) {
     if (pi4ioe1) pi4io_set_output(pi4ioe1, SPK_EN_PIN, false);
     /* Black out the panel so the brief reset window doesn't flash whatever
      * happens to be in the framebuffer. */
-    bsp_tab5_display_set_brightness(0);
+    bsp_display_set_brightness(0);
     /* Let the I2C writes complete and the DAC analog stage settle. */
     vTaskDelay(pdMS_TO_TICKS(50));
     esp_restart();
-}
-
-// MARK: Display
-void bsp_tab5_display_set_brightness(int brightness) {
-    if (ili9881c) ili9881c_lcd_set_brightness(ili9881c, brightness);
-    if (st7123_lcd) st7123_lcd_set_brightness(st7123_lcd, brightness);
-}
-void *bsp_tab5_display_get_frame_buffer(int fb_index) {
-    return frame_buffers[fb_index];
-}
-void bsp_tab5_display_flush(int fb_index) {
-    if (ili9881c) ili9881c_lcd_flush(ili9881c, fb_index);
-    if (st7123_lcd) st7123_lcd_flush(st7123_lcd, fb_index);
-}
-
-// MARK: Touch Panel
-int bsp_tab5_touch_read(esp_lcd_touch_point_data_t *points, uint8_t max_points) {
-    if (gt911) return gt911_touch_read(gt911, points, max_points);
-    if (st7123_touch) return st7123_touch_read(st7123_touch, points, max_points);
-    return 0;
-}
-void bsp_tab5_touch_wait_interrupt(void) {
-    if (gt911) gt911_touch_wait_interrupt(gt911);
-    if (st7123_touch) st7123_touch_wait_interrupt(st7123_touch);
 }
 
 // MARK: Audio

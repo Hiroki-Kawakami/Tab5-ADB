@@ -12,29 +12,75 @@
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_st7123.h"
 
-struct st7123_lcd_state {
+typedef struct {
+    bsp_display_t base;                 /* must be first — struct-inheritance vtable */
     ledc_timer_config_t ledc_timer;
     ledc_channel_config_t ledc_channel;
     esp_ldo_channel_handle_t phy_power_channel;
     esp_lcd_dsi_bus_handle_t mipi_dsi_bus;
     esp_lcd_panel_io_handle_t io;
     esp_lcd_panel_handle_t panel;
-    bsp_size_t size;
-    bsp_pixel_format_t pixel_format;
     uint8_t fb_num;
     void *frame_buffers[3];
-};
+} st7123_lcd_t;
 
-esp_err_t st7123_lcd_init(const st7123_lcd_config_t *config, st7123_lcd_t *lcd) {
+static esp_err_t set_brightness(bsp_display_t *self, int brightness) {
+    st7123_lcd_t *d = (st7123_lcd_t *)self;
+    if (brightness < 0) brightness = 0;
+    if (brightness > 100) brightness = 100;
+
+    uint32_t duty = (uint32_t)(((float)brightness / 100.0f) * ((1 << 12) - 1));
+    esp_err_t ret = ledc_set_duty(d->ledc_channel.speed_mode, d->ledc_channel.channel, duty);
+    if (ret != ESP_OK) return ret;
+    return ledc_update_duty(d->ledc_channel.speed_mode, d->ledc_channel.channel);
+}
+
+static esp_err_t draw_bitmap(bsp_display_t *self, bsp_rect_t rect, const void *data) {
+    st7123_lcd_t *d = (st7123_lcd_t *)self;
+    return esp_lcd_panel_draw_bitmap(d->panel,
+        bsp_rect_min_x(rect), bsp_rect_min_y(rect),
+        bsp_rect_max_x(rect), bsp_rect_max_y(rect), data);
+}
+
+static esp_err_t flush(bsp_display_t *self, int fb_index) {
+    st7123_lcd_t *d = (st7123_lcd_t *)self;
+    if (fb_index < 0 || fb_index >= d->fb_num) return ESP_ERR_INVALID_ARG;
+    if (d->frame_buffers[fb_index] == NULL) return ESP_ERR_INVALID_STATE;
+    return esp_lcd_panel_draw_bitmap(d->panel, 0, 0,
+        self->size.width, self->size.height, d->frame_buffers[fb_index]);
+}
+
+static void **get_framebuffers(bsp_display_t *self) {
+    return ((st7123_lcd_t *)self)->frame_buffers;
+}
+
+static esp_err_t deinit(bsp_display_t *self) {
+    st7123_lcd_t *d = (st7123_lcd_t *)self;
+    esp_lcd_panel_del(d->panel);
+    esp_lcd_panel_io_del(d->io);
+    esp_lcd_del_dsi_bus(d->mipi_dsi_bus);
+    esp_ldo_release_channel(d->phy_power_channel);
+    free(d);
+    return ESP_OK;
+}
+
+esp_err_t st7123_lcd_create(const bsp_display_config_t *config, bsp_display_t **out) {
     esp_err_t ret;
 
-    struct st7123_lcd_state *state = calloc(1, sizeof(struct st7123_lcd_state));
+    st7123_lcd_t *state = calloc(1, sizeof(st7123_lcd_t));
     if (state == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
-    state->size = config->size;
-    state->pixel_format = config->pixel_format;
+    state->base = (bsp_display_t){
+        .size = config->size,
+        .format = config->pixel_format,
+        .draw_bitmap = draw_bitmap,
+        .deinit = deinit,
+        .get_framebuffers = get_framebuffers,
+        .flush = flush,
+        .set_brightness = set_brightness,
+    };
     state->fb_num = config->fb_num > 0 ? config->fb_num : 1;
     if (state->fb_num > 3) state->fb_num = 3;
 
@@ -147,7 +193,7 @@ esp_err_t st7123_lcd_init(const st7123_lcd_config_t *config, st7123_lcd_t *lcd) 
     state->frame_buffers[1] = fb1;
     state->frame_buffers[2] = fb2;
 
-    *lcd = state;
+    *out = &state->base;
     return ESP_OK;
 
 err_panel:
@@ -161,40 +207,4 @@ err_ldo:
 err_free:
     free(state);
     return ret;
-}
-
-esp_err_t st7123_lcd_deinit(st7123_lcd_t lcd) {
-    esp_lcd_panel_del(lcd->panel);
-    esp_lcd_panel_io_del(lcd->io);
-    esp_lcd_del_dsi_bus(lcd->mipi_dsi_bus);
-    esp_ldo_release_channel(lcd->phy_power_channel);
-    free(lcd);
-    return ESP_OK;
-}
-
-esp_err_t st7123_lcd_set_brightness(st7123_lcd_t lcd, int brightness) {
-    if (brightness < 0) brightness = 0;
-    if (brightness > 100) brightness = 100;
-
-    uint32_t duty = (uint32_t)(((float)brightness / 100.0f) * ((1 << 12) - 1));
-    esp_err_t ret = ledc_set_duty(lcd->ledc_channel.speed_mode, lcd->ledc_channel.channel, duty);
-    if (ret != ESP_OK) return ret;
-    return ledc_update_duty(lcd->ledc_channel.speed_mode, lcd->ledc_channel.channel);
-}
-
-esp_err_t st7123_lcd_draw_bitmap(st7123_lcd_t lcd, bsp_rect_t rect, const void *data) {
-    return esp_lcd_panel_draw_bitmap(lcd->panel,
-        bsp_rect_min_x(rect), bsp_rect_min_y(rect),
-        bsp_rect_max_x(rect), bsp_rect_max_y(rect), data);
-}
-
-esp_err_t st7123_lcd_flush(st7123_lcd_t lcd, int fb_index) {
-    if (fb_index < 0 || fb_index >= lcd->fb_num) return ESP_ERR_INVALID_ARG;
-    if (lcd->frame_buffers[fb_index] == NULL) return ESP_ERR_INVALID_STATE;
-
-    return esp_lcd_panel_draw_bitmap(lcd->panel, 0, 0, lcd->size.width, lcd->size.height, lcd->frame_buffers[fb_index]);
-}
-
-void **st7123_lcd_get_frame_buffers(st7123_lcd_t lcd) {
-    return lcd->frame_buffers;
 }

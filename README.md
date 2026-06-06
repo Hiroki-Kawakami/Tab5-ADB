@@ -47,8 +47,9 @@ Notes:
   `pf_port` interface), `lvgl++/` (C++ helpers over LVGL), `screen_manager/`
   (screen stack / navigation).
 - `esp32p4/` — device build root (IDF project): `main/` is the entry point +
-  on-device `pf_port` impl; `components/m5tab5-bsp/` is board support (display,
-  touch, audio, power).
+  on-device `pf_port` impl; `components/m5stack-bsp/` is board support (display,
+  touch, audio, power) — model-agnostic `bsp.h` API over per-model bring-up in
+  `boards/<model>/` and reusable chip drivers in `devices/`.
 - `simulator/` — host SDL2/LVGL + FreeRTOS-POSIX build of `app/`: `platform/`
   is the SDL entry + host `pf_port` impl; `idf_compat/` is the host compat
   component (ESP-IDF API shims + vendored FreeRTOS-Kernel — see its `README.md`).

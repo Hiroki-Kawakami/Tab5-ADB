@@ -4,32 +4,71 @@
  */
 
 #include "st7123_touch.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_lcd_touch_st7123.h"
 
 static const char *TAG = "ST7123_TP";
 
-struct st7123_touch_state {
+typedef struct {
+    bsp_touch_t base;                 /* must be first — struct-inheritance vtable */
     esp_lcd_panel_io_handle_t io_handle;
     esp_lcd_touch_handle_t handle;
     SemaphoreHandle_t interrupt_semaphore;
-};
+} st7123_touch_t;
 
 static void st7123_touch_interrupt_callback(esp_lcd_touch_handle_t tp) {
-    struct st7123_touch_state *state = tp->config.user_data;
+    st7123_touch_t *state = tp->config.user_data;
     BaseType_t pxHigherPriorityTaskWoken;
     xSemaphoreGiveFromISR(state->interrupt_semaphore, &pxHigherPriorityTaskWoken);
     portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
 }
 
-esp_err_t st7123_touch_init(const st7123_touch_config_t *config, st7123_touch_t *touch) {
+static int read(bsp_touch_t *self, bsp_touch_point_t *points, uint8_t max_points) {
+    st7123_touch_t *d = (st7123_touch_t *)self;
+    if (max_points == 0) return 0;
+    if (max_points > 5) max_points = 5;
+
+    esp_err_t ret = esp_lcd_touch_read_data(d->handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read touch data: %s", esp_err_to_name(ret));
+        return 0;
+    }
+
+    esp_lcd_touch_point_data_t raw[5];
+    uint8_t count = 0;
+    esp_lcd_touch_get_data(d->handle, raw, &count, max_points);
+    for (uint8_t i = 0; i < count; i++) {
+        points[i].x = raw[i].x;
+        points[i].y = raw[i].y;
+        points[i].strength = raw[i].strength;
+    }
+    return count;
+}
+
+static void wait_interrupt(bsp_touch_t *self) {
+    st7123_touch_t *d = (st7123_touch_t *)self;
+    xSemaphoreTake(d->interrupt_semaphore, portMAX_DELAY);
+}
+
+static esp_err_t deinit(bsp_touch_t *self) {
+    st7123_touch_t *d = (st7123_touch_t *)self;
+    esp_lcd_touch_del(d->handle);
+    esp_lcd_panel_io_del(d->io_handle);
+    free(d);
+    return ESP_OK;
+}
+
+esp_err_t st7123_touch_create(const bsp_touch_config_t *config, bsp_touch_t **out) {
     esp_err_t ret;
 
-    struct st7123_touch_state *state = calloc(1, sizeof(struct st7123_touch_state));
+    st7123_touch_t *state = calloc(1, sizeof(st7123_touch_t));
     if (state == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for touch state");
         return ESP_ERR_NO_MEM;
     }
+    state->base = (bsp_touch_t){ .read = read, .wait_interrupt = wait_interrupt, .deinit = deinit };
 
     // Setup IO
     esp_lcd_panel_io_i2c_config_t io_config = ESP_LCD_TOUCH_IO_I2C_ST7123_CONFIG();
@@ -88,32 +127,6 @@ esp_err_t st7123_touch_init(const st7123_touch_config_t *config, st7123_touch_t 
         }
     }
 
-    *touch = state;
+    *out = &state->base;
     return ESP_OK;
-}
-
-esp_err_t st7123_touch_deinit(st7123_touch_t touch) {
-    esp_lcd_touch_del(touch->handle);
-    esp_lcd_panel_io_del(touch->io_handle);
-    free(touch);
-    return ESP_OK;
-}
-
-int st7123_touch_read(st7123_touch_t touch, esp_lcd_touch_point_data_t *points, uint8_t max_points) {
-    if (max_points == 0) return 0;
-    if (max_points > 5) max_points = 5;
-
-    esp_err_t ret = esp_lcd_touch_read_data(touch->handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read touch data: %s", esp_err_to_name(ret));
-        return 0;
-    }
-
-    uint8_t count = 0;
-    esp_lcd_touch_get_data(touch->handle, points, &count, max_points);
-    return count;
-}
-
-void st7123_touch_wait_interrupt(st7123_touch_t touch) {
-    xSemaphoreTake(touch->interrupt_semaphore, portMAX_DELAY);
 }

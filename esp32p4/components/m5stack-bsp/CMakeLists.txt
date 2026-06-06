@@ -1,6 +1,8 @@
 idf_component_register(
     SRCS
-        "src/bsp_tab5.c"
+        "boards/tab5/tab5.c"
+        "src/bsp_display.c"
+        "src/bsp_touch.c"
         "src/audio_eq.c"
         "devices/pi4io/pi4io.c"
         "devices/ili9881c/ili9881c.c"
