@@ -5,9 +5,9 @@ the `Tab5-UVC-Display` project (build system, BSP, LVGL infra) with a host
 simulator modeled on `NameCardKnot`.
 
 > **Keep this file current.** When you change the build flow, the simulator
-> architecture, the `pf_port` surface, add a target, or hit a non-obvious gotcha
-> worth remembering, update CLAUDE.md in the same change. It is the handoff to
-> the next session.
+> architecture, the BSP surface (`bsp_*`), add a target/board, or hit a
+> non-obvious gotcha worth remembering, update CLAUDE.md in the same change. It is
+> the handoff to the next session.
 >
 > **Keep `README.md` current too.** It is the human-facing overview (build /
 > flash / simulator commands, the layout tree). When a change makes it stale —
@@ -62,23 +62,28 @@ Runs `app/` on the desktop so UI / app logic can be developed without a board.
 ```
 app/                         # SHARED  app logic / screens (a single component)
 components/                  # SHARED  (both targets)
-  platform_port/             #   pf_port interface (platform_port.hpp), header-only
+  m5stack-bsp/               #   board support (bsp_*) — device drivers + SDL sim backend
+    inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_types.h
+    inc_private/             #     internal driver interfaces (bsp_display.h / bsp_touch.h vtables)
+    src/                     #     shared dispatch: bsp_display.c/bsp_touch.c (+ audio_eq.c, device)
+    devices/                 #     DEVICE reusable chip drivers (ili9881c/st7123/gt911/es8388/pi4io)
+    simulator/               #     SIM reusable SDL backend (sdl_backend.cpp -> display/touch provider)
+    boards/<model>/          #     per-model bring-up: <model>.c (device) + <model>_sim.cpp (sim)
   lvgl++/                    #   C++ helpers (lv_async_call, lv_obj_add_event_fn)
   screen_manager/            #   Screen base + screen stack
 esp32p4/                     # DEVICE build root (IDF project)
-  main/                      #   entry point + on-device pf_port impl
-  components/m5stack-bsp/    #   DEVICE-only board support (auto-discovered by IDF)
-    inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_types.h
-    inc_private/             #     internal driver interfaces (bsp_display.h / bsp_touch.h vtables)
-    src/                     #     shared layer: bsp_display.c/bsp_touch.c (public API), audio_eq.c
-    devices/                 #     reusable chip drivers (ili9881c/st7123/gt911/es8388/pi4io)
-    boards/<model>/          #     per-model bring-up; tab5/ implements bsp_init()
+  main/                      #   entry point (app_main + device LVGL runtime via esp_lvgl_port)
 simulator/                   # SIMULATOR build root (see below)
-  platform/                  #   SIM-only entry + pf_port impl (SDL)
+  platform/                  #   SIM-only entry (main.cpp: SDL/LVGL + FreeRTOS loop)
   idf_compat/                #   SIM-only ESP-IDF compat component (see its README.md)
     include/  src/           #     hand-written shims (esp_err/esp_log/esp_check/esp_timer/nvs)
     freertos_kernel/         #     vendored FreeRTOS-Kernel (Posix port + macOS fixes)
 ```
+
+`m5stack-bsp` is the worked example of a target-divergent shared component: its
+one `CMakeLists.txt` branches on `ESP_PLATFORM` (set only under ESP-IDF) to build
+the device drivers + tab5 board on device and the SDL backend + tab5 sim board on
+the host. No more device-only `esp32p4/components/`.
 
 Rule of thumb: **shared → top-level `components/` (or `app/`); target-only →
 under that target's build root.** Adding a shared component = a new dir under
@@ -106,8 +111,12 @@ source of truth** consumed by both builds:
   components and the **simulator-only `idf_compat` component** (its own
   `CMakeLists.txt`) are consumed this way — so growing `idf_compat` just means
   adding `SRCS` to that file, not editing `simulator/CMakeLists.txt`. Only
-  `simulator/platform/` (the SDL/LVGL entry + pf_port impl) stays a direct
-  `target_sources` — it's the executable's "main", not a component.
+  `simulator/platform/` (the SDL/LVGL + FreeRTOS entry) stays a direct
+  `target_sources` — it's the executable's "main", not a component. A shared
+  component that builds differently per target (like `m5stack-bsp`) branches on
+  `ESP_PLATFORM` inside its own `CMakeLists.txt`; guard anything that touches
+  `${COMPONENT_LIB}` (e.g. `-flto`) in the device branch, since the shim doesn't
+  define it.
 
 ### Where a device/simulator-divergent API goes — the rule
 
@@ -116,20 +125,28 @@ question: **does Espressif already define this API?**
 
 - **Yes** (e.g. `esp_err`, `esp_log`, `nvs_flash`, FreeRTOS, `esp_timer`,
   `esp_heap_caps`) → implement the *ESP-IDF API itself* on the host in
-  `simulator/idf_compat/`. Don't wrap it in `pf_port` — that would re-abstract
-  something already abstracted, and app code stays standard ESP-IDF. One
-  canonical home: never let an ESP-IDF compat shim grow inside the BSP or another
-  component. (PSRAM allocation is `heap_caps_malloc(size, MALLOC_CAP_SPIRAM)` —
-  an ESP-IDF API, so app code calls it directly on both targets.)
+  `simulator/idf_compat/`. Don't re-abstract something already abstracted, and
+  app code stays standard ESP-IDF. One canonical home: never let an ESP-IDF compat
+  shim grow inside the BSP or another component. (PSRAM allocation is
+  `heap_caps_malloc(size, MALLOC_CAP_SPIRAM)` — an ESP-IDF API, so app code calls
+  it directly on both targets.)
 - **No** — it's this board's own hardware concern with no standard contract
-  (framebuffer, touch point, brightness) → put it behind `pf_port`. Keep
-  `pf_port` small and demand-driven; don't pre-build a speculative surface.
+  (framebuffer, touch point, brightness) → put it behind the **BSP** (`bsp_*`),
+  which already has both a device and a simulator implementation. App code calls
+  `bsp_*` on both targets; the per-target split lives inside the BSP (device chip
+  driver vs SDL backend), selected per board. Keep the `bsp_*` surface small and
+  demand-driven; don't pre-build a speculative one.
 
 Ambiguous-looking cases resolve cleanly under this rule: `nvs_flash` is an
 ESP-IDF API → it's `idf_compat` and app code calls the C API directly (see the
-NVS section), **not** a per-platform `pf_port`-style seam.
+NVS section), **not** a BSP seam.
 
-### The `m5stack-bsp` component (device-side board support)
+### The `m5stack-bsp` component (shared board support — the platform seam)
+
+`bsp_*` **is** the cross-platform hardware seam: `app/` calls `bsp_*` directly on
+both targets (there is no separate `pf_port` layer). The component is shared
+(`components/m5stack-bsp/`) and builds device drivers or the SDL simulator backend
+from its own `ESP_PLATFORM`-branched `CMakeLists.txt`.
 
 Structured so non-Tab5 M5Stack models can be added later without reworking the
 drivers. Three layers:
@@ -156,27 +173,48 @@ drivers. Three layers:
   when the panel lacks the capability, so EPD / SPI-with-GRAM panels fit without
   the MIPI framebuffer-swap model baked into the contract. (Today only the
   framebuffer path is wired; the app assumes it.)
-- **Drivers (`devices/`)** — reusable chip drivers, each a `bsp_display`/
+- **Device drivers (`devices/`)** — reusable chip drivers, each a `bsp_display`/
   `bsp_touch` provider. They include only `bsp_display.h`/`bsp_touch.h`
-  (+`bsp_types.h`), not `bsp_private.h`.
+  (+`bsp_types.h`), not `bsp_private.h`. Device-only (need `driver/i2c`, `gpio`, …).
+- **Simulator backend (`simulator/`)** — the host-side analogue of `devices/`: a
+  reusable SDL backend (`sdl_backend.cpp`) that turns one SDL window into a
+  `bsp_display` + `bsp_touch` provider. Per-model differences (window title, panel
+  geometry, pixel format, frame-buffer count, on-screen scale) are passed via
+  `sdl_backend_config_t`, so every model's simulator board shares the same SDL
+  plumbing. SDL events are pumped inside `bsp_touch_read` (mouse → touch);
+  `set_brightness` is a no-op. SDL2 is linked to the `simulator` executable by
+  `simulator/CMakeLists.txt`, so the backend just `#include <SDL2/SDL.h>`.
+- **Boards (`boards/<model>/`)** — `bsp_init()`/`bsp_restart()`, the only per-model
+  pieces, with a device variant (`<model>.c`) and a simulator variant
+  (`<model>_sim.c`); the `ESP_PLATFORM` branch in the component `CMakeLists.txt`
+  selects one. Tab5's `tab5.c` probes the panel generation and wires the device
+  providers; `tab5_sim.c` hands Tab5's geometry to `sdl_backend_create()` and
+  registers the SDL providers.
+
+Everything in the BSP is **C** (both targets, like the device drivers). In the
+vtable header `inc_private/bsp_touch.h`, `bsp_touch_config_t` (device bus/GPIO
+wiring) is `#ifdef ESP_PLATFORM` so the host build never pulls in `driver/*`.
 
 Audio (`bsp_tab5_audio_*` in `inc/bsp_audio.h`) is Tab5-specific with no
 cross-model contract yet, so it keeps its name and lives in the tab5 board.
+`audio_eq.c` is device-only for now (it pulls in FreeRTOS and the host has no
+audio path); it moves into the shared sources once a simulator audio board exists.
 
-### The `pf_port` seam
+### App entry & the LVGL runtime (not in the BSP)
 
-`app/` is platform-agnostic; the seam is the `pf_port` namespace
-(`components/platform_port/platform_port.hpp` — interface only):
+`bsp_*` covers hardware; the LVGL **runtime** (the task/loop that drives
+`lv_timer_handler`) is a per-target runtime concern and stays out of the BSP:
 
-- Device implementation: `esp32p4/main/main.cpp` (BSP + esp_lvgl_port).
-- Simulator implementation: `simulator/platform/platform_port_sim.cpp`
-  (SDL window/texture for display, mouse for touch). Same header, so `app/`
-  compiles unchanged.
+- Device: `esp32p4/main/main.cpp` `app_main()` starts esp_lvgl_port
+  (`lvgl_port_init`) then calls `adb_app()`.
+- Simulator: `simulator/platform/main.cpp` `main()` runs `lv_init`, sets the LVGL
+  tick/delay to SDL, then calls `adb_app()` and runs the `lv_timer_handler` loop
+  on the main thread (scheduler on a background pthread — see below).
 
-`app_main()` lives in each platform's port file (device `main.cpp`; simulator
-`platform_port_sim.cpp`) and just calls `adb_app()` in `app/adb_app.cpp`, which
-sets up the LVGL display on the two `pf_port` frame buffers and pushes the first
-screen. Panel is 720×1280 portrait RGB565 (`PANEL_W`/`PANEL_H` in `app/adb_app.hpp`).
+`adb_app()` in `app/adb_app.cpp` is the shared entry: it calls `bsp_init()`, sets
+up the LVGL display on the two `bsp_display` frame buffers + an indev on
+`bsp_touch_read`, and pushes the first screen. Panel is 720×1280 portrait RGB565
+(`PANEL_W`/`PANEL_H` in `app/adb_app.hpp`).
 
 ### NVS — the `nvs_flash` C API, used directly
 
@@ -211,9 +249,9 @@ Hard constraints — violate these and it hangs/crashes:
    cannot run there.
 2. **Spawn FreeRTOS tasks only post-boot** — from an `lv_async_call` or a screen
    callback (which run on the main thread after the scheduler thread is up),
-   **never from `app_main()` before `vTaskStartScheduler()`**. Creating a task
-   before the scheduler makes the port's one-time signal setup (`pthread_once`)
-   run on the wrong thread and corrupts it.
+   **never from `adb_app()`/`bsp_init()` before `vTaskStartScheduler()`**. Creating
+   a task before the scheduler makes the port's one-time signal setup
+   (`pthread_once`) run on the wrong thread and corrupts it.
 3. **Two macOS/arm64 POSIX-port bugs — both fixed inline** in the vendored
    `freertos_kernel/portable/ThirdParty/GCC/Posix/port.c` (grep `macOS/arm64`).
    These are the only edits to the vendored kernel; re-apply them on upgrade (the

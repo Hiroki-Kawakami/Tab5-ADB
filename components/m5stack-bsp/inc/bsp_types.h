@@ -36,6 +36,10 @@ typedef enum {
     BSP_PIXEL_FORMAT_RGB888,
 } bsp_pixel_format_t;
 
+static inline size_t bsp_pixel_format_bytes(bsp_pixel_format_t format) {
+    return (format == BSP_PIXEL_FORMAT_RGB888) ? 3 : 2;
+}
+
 typedef struct {
     int x, y;
     int strength;   /*!< touch pressure; 0 when the controller doesn't report it */

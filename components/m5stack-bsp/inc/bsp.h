@@ -64,6 +64,7 @@ esp_err_t bsp_init(const bsp_config_t *config);
 void bsp_restart(void);
 
 // MARK: Display
+bsp_pixel_format_t bsp_display_get_pixel_format(void);
 void  bsp_display_set_brightness(int brightness);
 void *bsp_display_get_frame_buffer(int fb_index);
 void  bsp_display_flush(int fb_index);

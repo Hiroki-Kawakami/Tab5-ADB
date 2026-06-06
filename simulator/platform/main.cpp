@@ -1,14 +1,15 @@
 #include "lvgl.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "adb_app.hpp"
+
+#include <SDL2/SDL.h>
 
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-extern "C" void app_main(void);
 
 static void *freertos_scheduler_thread(void *) {
     // vTaskStartScheduler() blocks for the lifetime of the program on the
@@ -31,7 +32,15 @@ extern "C" int main(void) {
     pthread_sigmask(SIG_BLOCK, &mask, nullptr);
 
     lv_init();
-    app_main();
+    // LVGL runtime time source on the host (the device gets this from
+    // esp_lvgl_port). SDL is initialised later by bsp_init via the SDL backend;
+    // these callbacks are only invoked from the lv_timer_handler loop below,
+    // which runs after app_main() has brought SDL up.
+    lv_tick_set_cb(SDL_GetTicks);
+    lv_delay_set_cb(SDL_Delay);
+    // The simulator's app entry: bsp_init (SDL display/touch) + LVGL display
+    // setup live in adb_app(). On device the equivalent is app_main().
+    adb_app();
 
     pthread_t freertos_tid;
     if (pthread_create(&freertos_tid, nullptr, freertos_scheduler_thread, nullptr) != 0) {

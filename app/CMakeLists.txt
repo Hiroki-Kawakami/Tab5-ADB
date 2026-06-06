@@ -4,4 +4,4 @@
 idf_component_register(
     SRCS "adb_app.cpp" "home_screen.cpp"
     INCLUDE_DIRS "."
-    REQUIRES platform_port "lvgl++" screen_manager lvgl)
+    REQUIRES m5stack-bsp "lvgl++" screen_manager lvgl)

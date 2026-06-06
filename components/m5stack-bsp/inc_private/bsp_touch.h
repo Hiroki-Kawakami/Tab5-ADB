@@ -10,6 +10,12 @@
 
 #pragma once
 #include "bsp_types.h"
+
+/* bsp_touch_config_t carries the device-side bus/GPIO wiring a real touch
+ * controller needs, so it pulls in IDF driver headers — device-only. The
+ * portable vtable below (struct bsp_touch + bsp_touch_set_active) has no such
+ * dependency, so a simulator backend can implement it without the driver layer. */
+#ifdef ESP_PLATFORM
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 
@@ -21,6 +27,7 @@ typedef struct {
     uint32_t                scl_speed_hz;
     bool                    interrupt;
 } bsp_touch_config_t;
+#endif
 
 typedef struct bsp_touch bsp_touch_t;
 

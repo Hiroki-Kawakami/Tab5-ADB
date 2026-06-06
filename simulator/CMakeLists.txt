@@ -37,12 +37,12 @@ target_compile_definitions(simulator PRIVATE
     SDL_MAIN_HANDLED)
 target_link_libraries(simulator SDL2::SDL2 lvgl cjson Threads::Threads ${CMAKE_DL_LIBS})
 
-# The executable's own entry: SDL/LVGL main loop + host pf_port impl. This is
-# the simulator's "main" (analogous to esp32p4/main on device), so it stays a
-# direct source rather than a component.
+# The executable's own entry: the SDL/LVGL + FreeRTOS main loop. This is the
+# simulator's "main" (analogous to esp32p4/main on device) — it owns the host
+# LVGL runtime, while the hardware seam (display/touch) lives in the m5stack-bsp
+# simulator backend below. It stays a direct source rather than a component.
 target_sources(simulator PRIVATE
-    platform/main.cpp
-    platform/platform_port_sim.cpp)
+    platform/main.cpp)
 target_include_directories(simulator PRIVATE platform)
 
 # ---------------------------------------------------------------------------
@@ -82,9 +82,10 @@ endfunction()
 # Simulator-only components (host shims for ESP-IDF APIs).
 add_subdirectory(idf_compat "${CMAKE_BINARY_DIR}/sim/idf_compat")
 
-# Shared components (built for both targets).
+# Shared components (built for both targets). m5stack-bsp's CMakeLists.txt picks
+# its simulator backend (SDL) here since ESP_PLATFORM is unset.
 set(SHARED_COMPONENTS
-    ${CMAKE_CURRENT_SOURCE_DIR}/../components/platform_port
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/m5stack-bsp
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/lvgl++
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/screen_manager
     ${CMAKE_CURRENT_SOURCE_DIR}/../app)

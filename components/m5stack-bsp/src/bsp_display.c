@@ -21,6 +21,10 @@ void bsp_display_set_active(bsp_display_t *display) {
         : NULL;
 }
 
+bsp_pixel_format_t bsp_display_get_pixel_format(void) {
+    return s_display ? s_display->format : BSP_PIXEL_FORMAT_RGB565;
+}
+
 void bsp_display_set_brightness(int brightness) {
     if (s_display && s_display->set_brightness) s_display->set_brightness(s_display, brightness);
 }
