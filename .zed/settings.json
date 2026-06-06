@@ -1,0 +1,15 @@
+{
+  "lsp": {
+    "clangd": {
+      "binary": {
+        "arguments": [
+          "--header-insertion=never",
+          "--clang-tidy",
+          "--enable-config",
+          "--query-driver=/nix/store/rwcpgjaxmg0r6vl2caq2d7wi5svangcy-riscv32-esp-elf-esp-idf-v5.4.3/bin/riscv32-esp-elf-*",
+          "--compile-commands-dir=esp32p4/build",
+        ],
+      },
+    },
+  },
+}
