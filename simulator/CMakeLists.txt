@@ -18,6 +18,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ---------------------------------------------------------------------------
 find_package(SDL2 REQUIRED)
 find_package(CJSON REQUIRED)
+find_package(Threads REQUIRED)   # FreeRTOS POSIX port (vendored in idf_compat) uses pthreads
 
 # LVGL (lv_conf.h is picked up from this directory via LV_CONF_INCLUDE_SIMPLE)
 FetchContent_Declare(
@@ -27,21 +28,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(lvgl)
 
-# FreeRTOS-Kernel (POSIX port) so app/ code can use FreeRTOS primitives.
-# Config header + the macOS/arm64 deadlock patch live under freertos/.
-set(FREERTOS_PORT GCC_POSIX CACHE STRING "" FORCE)
-set(FREERTOS_HEAP 3         CACHE STRING "" FORCE)
-add_library(freertos_config INTERFACE)
-target_include_directories(freertos_config SYSTEM INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/freertos)
-FetchContent_Declare(
-    freertos_kernel
-    GIT_REPOSITORY https://github.com/FreeRTOS/FreeRTOS-Kernel.git
-    GIT_TAG        V11.1.0
-    PATCH_COMMAND  python3 ${CMAKE_CURRENT_SOURCE_DIR}/freertos/patches/freertos_posix_macos.py
-)
-FetchContent_MakeAvailable(freertos_kernel)
-
 # ---------------------------------------------------------------------------
 # Executable
 # ---------------------------------------------------------------------------
@@ -49,7 +35,7 @@ add_executable(simulator)
 target_compile_definitions(simulator PRIVATE
     SDL_DISABLE_ARM_NEON_H
     SDL_MAIN_HANDLED)
-target_link_libraries(simulator SDL2::SDL2 lvgl freertos_kernel cjson ${CMAKE_DL_LIBS})
+target_link_libraries(simulator SDL2::SDL2 lvgl cjson Threads::Threads ${CMAKE_DL_LIBS})
 
 # The executable's own entry: SDL/LVGL main loop + host pf_port impl. This is
 # the simulator's "main" (analogous to esp32p4/main on device), so it stays a

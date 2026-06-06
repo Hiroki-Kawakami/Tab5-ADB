@@ -35,10 +35,10 @@ Notes:
   from the main thread on macOS.
 - Spawn FreeRTOS tasks from post-boot code (e.g. an `lv_async_call` or a screen
   callback), never from `app_main()` before the scheduler starts.
-- `simulator/freertos/patches/freertos_posix_macos.py` patches the fetched
-  FreeRTOS kernel for two macOS/arm64 POSIX-port bugs in task pthread creation
-  (an all-signals-masked deadlock and a sub-page stack-size underflow), applied
-  automatically via the CMake `PATCH_COMMAND`.
+- The FreeRTOS-Kernel is vendored under `simulator/idf_compat/freertos_kernel/`
+  (GCC/Posix port), with two macOS/arm64 fixes to task pthread creation applied
+  inline (an all-signals-masked deadlock and a sub-page stack-size underflow).
+  See `simulator/idf_compat/README.md` for vendoring/upgrade details.
 
 ## Layout
 
@@ -50,5 +50,5 @@ Notes:
   on-device `pf_port` impl; `components/m5tab5-bsp/` is board support (display,
   touch, audio, power).
 - `simulator/` — host SDL2/LVGL + FreeRTOS-POSIX build of `app/`: `platform/`
-  is the SDL entry + host `pf_port` impl, `idf_compat/` holds host shims for
-  ESP-IDF APIs, `freertos/` holds the POSIX config + macOS patch.
+  is the SDL entry + host `pf_port` impl; `idf_compat/` is the host compat
+  component (ESP-IDF API shims + vendored FreeRTOS-Kernel — see its `README.md`).

@@ -31,7 +31,4 @@ void *display_get_frame_buffer(int fb_index);
 void display_flush(int fb_index);
 std::optional<std::tuple<int, int>> touch_get_point();
 
-void *psram_malloc(size_t size);
-void *psram_malloc_dma(size_t size);
-
 }

@@ -66,12 +66,13 @@ components/                  # SHARED  (both targets)
   lvgl++/                    #   C++ helpers (lv_async_call, lv_obj_add_event_fn)
   screen_manager/            #   Screen base + screen stack
 esp32p4/                     # DEVICE build root (IDF project)
-  main/                      #   entry point + on-device pf_port impl + nvs.hpp
+  main/                      #   entry point + on-device pf_port impl
   components/m5tab5-bsp/     #   DEVICE-only board support (auto-discovered by IDF)
 simulator/                   # SIMULATOR build root (see below)
-  platform/                  #   SIM-only entry + pf_port impl (SDL) + nvs.hpp
-  idf_compat/                #   SIM-only ESP-IDF API shims (esp_err/esp_log/freertos)
-  freertos/                  #   SIM-only FreeRTOS POSIX config + macOS patch
+  platform/                  #   SIM-only entry + pf_port impl (SDL)
+  idf_compat/                #   SIM-only ESP-IDF compat component (see its README.md)
+    include/  src/           #     hand-written shims (esp_err/esp_log/esp_check/esp_timer/nvs)
+    freertos_kernel/         #     vendored FreeRTOS-Kernel (Posix port + macOS fixes)
 ```
 
 Rule of thumb: **shared → top-level `components/` (or `app/`); target-only →
@@ -103,6 +104,26 @@ source of truth** consumed by both builds:
   `simulator/platform/` (the SDL/LVGL entry + pf_port impl) stays a direct
   `target_sources` — it's the executable's "main", not a component.
 
+### Where a device/simulator-divergent API goes — the rule
+
+When an API needs different device vs simulator implementations, decide by one
+question: **does Espressif already define this API?**
+
+- **Yes** (e.g. `esp_err`, `esp_log`, `nvs_flash`, FreeRTOS, `esp_timer`,
+  `esp_heap_caps`) → implement the *ESP-IDF API itself* on the host in
+  `simulator/idf_compat/`. Don't wrap it in `pf_port` — that would re-abstract
+  something already abstracted, and app code stays standard ESP-IDF. One
+  canonical home: never let an ESP-IDF compat shim grow inside the BSP or another
+  component. (PSRAM allocation is `heap_caps_malloc(size, MALLOC_CAP_SPIRAM)` —
+  an ESP-IDF API, so app code calls it directly on both targets.)
+- **No** — it's this board's own hardware concern with no standard contract
+  (framebuffer, touch point, brightness) → put it behind `pf_port`. Keep
+  `pf_port` small and demand-driven; don't pre-build a speculative surface.
+
+Ambiguous-looking cases resolve cleanly under this rule: `nvs_flash` is an
+ESP-IDF API → it's `idf_compat` and app code calls the C API directly (see the
+NVS section), **not** a per-platform `pf_port`-style seam.
+
 ### The `pf_port` seam
 
 `app/` is platform-agnostic; the seam is the `pf_port` namespace
@@ -118,17 +139,30 @@ source of truth** consumed by both builds:
 sets up the LVGL display on the two `pf_port` frame buffers and pushes the first
 screen. Panel is 720×1280 portrait RGB565 (`PANEL_W`/`PANEL_H` in `app/adb_app.hpp`).
 
-`nvs.hpp` is a **per-platform seam like `pf_port`** (not shared): two different
-header-only implementations of the same `NVS` API live with each port
-(`esp32p4/main/nvs.hpp` = nvs_flash; `simulator/platform/nvs.hpp` = JSON file).
-It is not on `app/`'s include path today; if shared code needs NVS, promote it to
-a shared interface component first.
+### NVS — the `nvs_flash` C API, used directly
+
+NVS is the worked example of the `idf_compat` rule. The seam is the ESP-IDF
+`nvs.h`/`nvs_flash.h` **C API** itself, so shared code calls that C API directly
+on both targets.
+
+- Device: the real flash-backed `nvs_flash` component (whatever needs it lists
+  `REQUIRES nvs_flash`).
+- Simulator: the JSON-backed compat impl in `simulator/idf_compat/`
+  (`nvs.h` + `nvs_flash.h` + `nvs.c`). The JSON file defaults to `nvs_data.json`
+  in the cwd; override with the sim-only `nvs_flash_sim_set_path()` before the
+  first open.
+
+Keep NVS as the C API on both sides. A C++ convenience layer, if wanted, belongs
+in a shared component on top of the C API — not as a per-target file.
 
 ## Simulator details (FreeRTOS POSIX port)
 
-The simulator links the **FreeRTOS-Kernel GCC/Posix port** so app code can use
-real FreeRTOS primitives (`xTaskCreate`, `vTaskDelay`, queues, semaphores) on the
-host. Verified working end-to-end (task entry → `vTaskDelay` ticks → `vTaskDelete`).
+The simulator compiles in the **FreeRTOS-Kernel GCC/Posix port**, vendored under
+`simulator/idf_compat/freertos_kernel/` (see `simulator/idf_compat/README.md`
+for the vendoring/upgrade details), so app code
+can use real FreeRTOS primitives (`xTaskCreate`, `vTaskDelay`, queues,
+semaphores) on the host. Verified working end-to-end (scheduler + idle + timer
+task come up; task entry → `vTaskDelay` ticks → `vTaskDelete`).
 
 Hard constraints — violate these and it hangs/crashes:
 
@@ -141,19 +175,16 @@ Hard constraints — violate these and it hangs/crashes:
    **never from `app_main()` before `vTaskStartScheduler()`**. Creating a task
    before the scheduler makes the port's one-time signal setup (`pthread_once`)
    run on the wrong thread and corrupts it.
-3. **Two macOS/arm64 POSIX-port bugs — both patched** by
-   `simulator/freertos/patches/freertos_posix_macos.py`, applied via the
-   `PATCH_COMMAND` on the `freertos_kernel` `FetchContent_Declare` in
-   `simulator/CMakeLists.txt`. The script applies independent hunks, each guarded
-   by its own marker, so it self-skips per-hunk and warns if an anchor moved.
-   **If you bump the FreeRTOS-Kernel `GIT_TAG`, re-check both still apply.**
+3. **Two macOS/arm64 POSIX-port bugs — both fixed inline** in the vendored
+   `freertos_kernel/portable/ThirdParty/GCC/Posix/port.c` (grep `macOS/arm64`).
+   These are the only edits to the vendored kernel; re-apply them on upgrade (the
+   procedure is in `simulator/idf_compat/README.md`). What they fix:
    - **Task-creation deadlock** (marker `macOS/arm64 workaround`): the port
      creates each task pthread inside a critical section that masks every signal;
      on macOS that deadlocks in libsystem once another task thread is parked in
      `pthread_cond_wait`, so `vTaskStartScheduler()` hangs creating the timer
      task (symptom: `xTaskCreate` returns pdPASS but the task body never runs).
      Fix: create the task thread with a clean signal mask, then restore.
-     NameCardKnot has the same latent bug (its sim FreeRTOS never actually ran).
    - **Sub-page stack-size underflow** (marker `macOS/arm64 stack-size fix`):
      `pxPortInitialiseStack()` rounds the stack *end pointer* up to a page, but
      arm64 pages are 16 KB while a task stack (`configMINIMAL_STACK_SIZE` words ×
@@ -169,11 +200,22 @@ Other simulator notes:
 - LVGL config is `simulator/lv_conf.h` (found via `LV_CONF_INCLUDE_SIMPLE` +
   the project source dir). `LV_COLOR_DEPTH 16` (RGB565, matches the panel) and
   `LV_USE_THEME_DEFAULT 1` (the e-paper-derived base config had it off).
-- ESP-IDF API shims for shared code all live in the `simulator/idf_compat/`
-  component (`CMakeLists.txt` registers them; see the build section above):
-  `esp_err.h`/`esp_err.c`, `esp_log.h`, and the `freertos/` include-path shims
-  (`freertos/FreeRTOS.h` → real `<FreeRTOS.h>`). The component registers
-  `INCLUDE_DIRS "."`, so `idf_compat/` is on the include path but
-  `idf_compat/freertos/` is **not** (so the shim's `#include <task.h>` reaches
-  the kernel, not itself). Add new shims here as `SRCS` in that `CMakeLists.txt`.
-- Build artifacts (`build/`, `simulator/.deps/`) are gitignored.
+- Host compat for shared code lives in the `simulator/idf_compat/` component.
+  **`simulator/idf_compat/README.md` is the source of truth** (layout, the
+  include-path rules, how to add a shim, FreeRTOS vendoring/upgrade). In short:
+  `include/` = shim headers, `src/` = shim sources, `freertos_kernel/` = vendored
+  upstream FreeRTOS. Current shim surface:
+  - `esp_err` — `esp_err_t`, `ESP_ERR_*`, `esp_err_to_name()`, `ESP_ERROR_CHECK[_WITHOUT_ABORT]`.
+  - `esp_log` — `ESP_LOGx` to stderr, level enum, `esp_log_level_set` (no-op).
+  - `esp_check` — `ESP_RETURN_ON_ERROR` / `ESP_GOTO_ON_*` / `ESP_RETURN_ON_FALSE`.
+  - `esp_timer` — `esp_timer_get_time()` (monotonic µs) only.
+  - `esp_heap_caps` — `heap_caps_malloc`/`calloc`/`realloc`/`aligned_alloc`/`free`
+    (host malloc; `MALLOC_CAP_*` flags accepted and ignored).
+  - `nvs`/`nvs_flash` — JSON-backed NVS C API (see the NVS section).
+  - `include/freertos/` — bridge headers (`freertos/FreeRTOS.h` → real `<FreeRTOS.h>`).
+  `INCLUDE_DIRS` is `include` + the vendored kernel dirs; `include/freertos/` is
+  deliberately **not** on the path (so the bridge's `#include <task.h>` reaches
+  the kernel, not itself). Add a shim: header in `include/`, source in `src/` +
+  its `SRCS` entry — nothing else to wire.
+- Build artifacts (`build/`, `simulator/.deps/`) are gitignored. LVGL is fetched
+  into `.deps`; FreeRTOS is vendored in-tree.

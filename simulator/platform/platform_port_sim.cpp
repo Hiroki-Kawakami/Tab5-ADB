@@ -141,9 +141,6 @@ std::optional<std::tuple<int, int>> touch_get_point() {
     return s_touch;
 }
 
-void *psram_malloc(size_t size)     { return malloc(size); }
-void *psram_malloc_dma(size_t size) { return malloc(size); }
-
 }  // namespace pf_port
 
 // On device, app_main lives in idf-components/main/main.cpp (not compiled for

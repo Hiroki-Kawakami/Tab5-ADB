@@ -61,13 +61,6 @@ std::optional<std::tuple<int, int>> touch_get_point() {
     return std::nullopt;
 }
 
-void *psram_malloc(size_t size) {
-    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-}
-void *psram_malloc_dma(size_t size) {
-    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-}
-
 }
 
 extern "C" void app_main() {
