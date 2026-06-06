@@ -129,16 +129,29 @@ Hard constraints — violate these and it hangs/crashes:
    **never from `app_main()` before `vTaskStartScheduler()`**. Creating a task
    before the scheduler makes the port's one-time signal setup (`pthread_once`)
    run on the wrong thread and corrupts it.
-3. **macOS/arm64 port deadlock — patched.** The port creates each task pthread
-   inside a critical section that masks every signal; on macOS that deadlocks in
-   libsystem once another task thread is parked in `pthread_cond_wait`, so
-   `vTaskStartScheduler()` hangs creating the timer task (symptom: `xTaskCreate`
-   returns pdPASS but the task body never runs). Fixed by
-   `simulator/freertos/patches/freertos_posix_macos.py`, applied automatically via the
+3. **Two macOS/arm64 POSIX-port bugs — both patched** by
+   `simulator/freertos/patches/freertos_posix_macos.py`, applied via the
    `PATCH_COMMAND` on the `freertos_kernel` `FetchContent_Declare` in
-   `simulator/CMakeLists.txt`. NameCardKnot has the same latent bug (its sim
-   FreeRTOS never actually ran). If you bump the FreeRTOS-Kernel `GIT_TAG`,
-   re-check this patch still applies (it self-skips and warns if the anchor moved).
+   `simulator/CMakeLists.txt`. The script applies independent hunks, each guarded
+   by its own marker, so it self-skips per-hunk and warns if an anchor moved.
+   **If you bump the FreeRTOS-Kernel `GIT_TAG`, re-check both still apply.**
+   - **Task-creation deadlock** (marker `macOS/arm64 workaround`): the port
+     creates each task pthread inside a critical section that masks every signal;
+     on macOS that deadlocks in libsystem once another task thread is parked in
+     `pthread_cond_wait`, so `vTaskStartScheduler()` hangs creating the timer
+     task (symptom: `xTaskCreate` returns pdPASS but the task body never runs).
+     Fix: create the task thread with a clean signal mask, then restore.
+     NameCardKnot has the same latent bug (its sim FreeRTOS never actually ran).
+   - **Sub-page stack-size underflow** (marker `macOS/arm64 stack-size fix`):
+     `pxPortInitialiseStack()` rounds the stack *end pointer* up to a page, but
+     arm64 pages are 16 KB while a task stack (`configMINIMAL_STACK_SIZE` words ×
+     8 B ≈ 2 KB for idle) is smaller than one page. The rounding pushes the end
+     past the top of stack, the size subtraction underflows to a huge `size_t`,
+     and `pthread_create()` faults (`EXC_BAD_ACCESS`, surfaces as `Bus error: 10`)
+     while `vTaskStartScheduler()` creates the idle task. **Non-deterministic** —
+     depends on each stack buffer's malloc alignment, so it can appear to "work"
+     on lucky runs. Fix: round the *size* up to a page instead (never underflows);
+     `PTHREAD_STACK_MIN` is the floor.
 
 Other simulator notes:
 - LVGL config is `simulator/lv_conf.h` (found via `LV_CONF_INCLUDE_SIMPLE` +
