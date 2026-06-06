@@ -4,7 +4,12 @@
  */
 
 #pragma once
-#include "bsp_private.h"
+#include "bsp_types.h"
+#include "driver/i2c_master.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef enum {
     PI4IO_PIN_MODE_NONE,
@@ -26,7 +31,6 @@ typedef struct {
 } pi4io_pin_config_t;
 
 typedef struct pi4io_state *pi4io_t;
-typedef struct i2c_master_bus_t *i2c_master_bus_handle_t;
 
 esp_err_t pi4io_init(i2c_master_bus_handle_t i2c_bus, uint8_t address, pi4io_pin_config_t config[8], pi4io_t *pi4io);
 esp_err_t pi4io_deinit(pi4io_t pi4io);
@@ -34,3 +38,7 @@ esp_err_t pi4io_set_output(pi4io_t pi4io, uint8_t pin, bool value);
 esp_err_t pi4io_get_input(pi4io_t pi4io, uint8_t pin, bool *value);
 esp_err_t pi4io_get_all_inputs(pi4io_t pi4io, uint8_t *value);
 esp_err_t pi4io_get_irq_status(pi4io_t pi4io, uint8_t *status);
+
+#ifdef __cplusplus
+}
+#endif

@@ -4,7 +4,6 @@
  */
 
 #include "ili9881c.h"
-#include "misc/bsp_display.h"
 #include "ili9881c_init_data.h"
 #include "driver/ledc.h"
 #include "esp_ldo_regulator.h"

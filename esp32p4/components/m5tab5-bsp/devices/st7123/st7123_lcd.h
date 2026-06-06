@@ -4,8 +4,11 @@
  */
 
 #pragma once
-#include "bsp_private.h"
-#include "misc/bsp_display.h"
+#include "bsp_types.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct {
     int backlight_gpio;
@@ -22,3 +25,7 @@ BSP_NONNULL(1) esp_err_t st7123_lcd_set_brightness(st7123_lcd_t lcd, int brightn
 BSP_NONNULL(1, 3) esp_err_t st7123_lcd_draw_bitmap(st7123_lcd_t lcd, bsp_rect_t rect, const void *data);
 BSP_NONNULL(1) esp_err_t st7123_lcd_flush(st7123_lcd_t lcd, int fb_index);
 BSP_NONNULL(1) void **st7123_lcd_get_frame_buffers(st7123_lcd_t lcd);
+
+#ifdef __cplusplus
+}
+#endif

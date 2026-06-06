@@ -1,14 +1,24 @@
 /*
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Hiroki Kawakami
+ *
+ * Shared vocabulary for the BSP and its internal device drivers: geometry
+ * primitives, pixel format, esp_err, and the nonnull annotation. This is the
+ * one header a device driver needs to speak the BSP's types — it deliberately
+ * pulls in nothing heavy (no esp_log / stdio).
  */
 
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define BSP_NONNULL(...) __attribute__((nonnull(__VA_ARGS__)))
 
 typedef struct { int x, y; } bsp_point_t;
 typedef struct { int width, height; } bsp_size_t;

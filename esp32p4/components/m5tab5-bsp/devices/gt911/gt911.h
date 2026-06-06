@@ -4,10 +4,13 @@
  */
 
 #pragma once
-#include "bsp_private.h"
-#include "misc/bsp_display.h"
+#include "bsp_types.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_touch.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct {
     i2c_master_bus_handle_t i2c_bus;
@@ -24,3 +27,7 @@ BSP_NONNULL(1, 2) esp_err_t gt911_touch_init(const gt911_touch_config_t *config,
 BSP_NONNULL(1) esp_err_t gt911_touch_deinit(gt911_touch_t touch);
 BSP_NONNULL(1, 2) int gt911_touch_read(gt911_touch_t touch, esp_lcd_touch_point_data_t *points, uint8_t max_points);
 BSP_NONNULL(1) void gt911_touch_wait_interrupt(gt911_touch_t touch);
+
+#ifdef __cplusplus
+}
+#endif

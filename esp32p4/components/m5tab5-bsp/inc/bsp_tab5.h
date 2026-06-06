@@ -4,13 +4,19 @@
  */
 
 #pragma once
-#include "bsp_common.h"
+#include "bsp_types.h"
 #include "audio_eq.h"
 #include "esp_lcd_touch.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef enum {
+    BSP_WIFI_MODE_NONE = 0,
+    BSP_WIFI_MODE_STA  = 1 << 0,
+    BSP_WIFI_MODE_AP   = 1 << 1,
+} bsp_wifi_mode_t;
 
 typedef enum {
     BSP_SPEAKER_MODE_ON       = 0,  /*!< amp always on (default — matches zero-init) */

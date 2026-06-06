@@ -6,6 +6,7 @@
 #include "es8388.h"
 #include <string.h>
 #include <stdlib.h>
+#include "esp_log.h"
 #include "driver/i2s_std.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"

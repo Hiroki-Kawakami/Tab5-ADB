@@ -10,7 +10,6 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
-#include "misc/bsp_display.h"
 #include "pi4io/pi4io.h"
 #include "ili9881c/ili9881c.h"
 #include "gt911/gt911.h"

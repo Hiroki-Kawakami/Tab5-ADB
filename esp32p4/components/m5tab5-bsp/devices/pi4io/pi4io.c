@@ -4,7 +4,7 @@
  */
 
 #include "pi4io.h"
-#include "driver/i2c_master.h"
+#include "esp_log.h"
 
 static const char *TAG = "PI4IO";
 

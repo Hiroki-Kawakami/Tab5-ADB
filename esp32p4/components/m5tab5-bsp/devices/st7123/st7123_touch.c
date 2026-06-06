@@ -4,6 +4,7 @@
  */
 
 #include "st7123_touch.h"
+#include "esp_log.h"
 #include "esp_lcd_touch_st7123.h"
 
 static const char *TAG = "ST7123_TP";

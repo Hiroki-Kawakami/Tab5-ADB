@@ -4,7 +4,6 @@
  */
 
 #include "st7123_lcd.h"
-#include "misc/bsp_display.h"
 #include "st7123_init_data.h"
 #include "driver/ledc.h"
 #include "esp_ldo_regulator.h"

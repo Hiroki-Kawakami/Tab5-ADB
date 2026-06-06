@@ -4,6 +4,7 @@
  */
 
 #include "gt911.h"
+#include "esp_log.h"
 #include "esp_lcd_touch_gt911.h"
 
 static const char *TAG = "GT911";

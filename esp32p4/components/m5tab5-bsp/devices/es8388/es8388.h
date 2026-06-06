@@ -4,16 +4,16 @@
  */
 
 #pragma once
-#include "bsp_private.h"
+#include "bsp_types.h"
 #include "driver/gpio.h"
 #include "driver/i2s_types.h"
+#include "driver/i2c_master.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct es8388_state *es8388_t;
-typedef struct i2c_master_bus_t *i2c_master_bus_handle_t;
 
 typedef struct {
     i2c_master_bus_handle_t i2c_bus;

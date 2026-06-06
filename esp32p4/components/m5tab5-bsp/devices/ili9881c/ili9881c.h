@@ -4,8 +4,11 @@
  */
 
 #pragma once
-#include "bsp_private.h"
-#include "misc/bsp_display.h"
+#include "bsp_types.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct {
     int backlight_gpio;
@@ -22,3 +25,7 @@ BSP_NONNULL(1) esp_err_t ili9881c_lcd_set_brightness(ili9881c_lcd_t lcd, int bri
 BSP_NONNULL(1, 3) esp_err_t ili9881c_lcd_draw_bitmap(ili9881c_lcd_t lcd, bsp_rect_t rect, const void *data);
 BSP_NONNULL(1) esp_err_t ili9881c_lcd_flush(ili9881c_lcd_t lcd, int fb_index);
 BSP_NONNULL(1) void **ili9881c_lcd_get_frame_buffers(ili9881c_lcd_t lcd);
+
+#ifdef __cplusplus
+}
+#endif
