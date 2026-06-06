@@ -50,11 +50,54 @@ Runs `app/` on the desktop so UI / app logic can be developed without a board.
 
 ## Architecture
 
-`app/`, `components/`, and `idf-components/` are **shared** between device and
-simulator. The seam is the `pf_port` namespace (`idf-components/main/platform_port.hpp`):
+### Component layout — one directory per category
 
-- Device implementation: `idf-components/main/main.cpp` (BSP + esp_lvgl_port).
-- Simulator implementation: `simulator/tab5-bsp_simulator/platform_port_sim.cpp`
+```
+app/                         # SHARED  app logic / screens (a single component)
+components/                  # SHARED  (both targets)
+  platform_port/             #   pf_port interface (platform_port.hpp), header-only
+  lvgl++/                    #   C++ helpers (lv_async_call, lv_obj_add_event_fn)
+  screen_manager/            #   Screen base + screen stack
+esp32p4/                     # DEVICE build root (IDF project)
+  main/                      #   entry point + on-device pf_port impl + nvs.hpp
+  components/m5tab5-bsp/     #   DEVICE-only board support (auto-discovered by IDF)
+simulator/                   # SIMULATOR build root (see below)
+  platform/                  #   SIM-only entry + pf_port impl (SDL) + nvs.hpp
+  idf_compat/                #   SIM-only ESP-IDF API shims (esp_err/esp_log/freertos)
+  freertos/                  #   SIM-only FreeRTOS POSIX config + macOS patch
+```
+
+Rule of thumb: **shared → top-level `components/` (or `app/`); target-only →
+under that target's build root.** Adding a shared component = a new dir under
+`components/` with its own `CMakeLists.txt` (see below). No build file reaches
+into another tree.
+
+### Components are self-describing (`idf_component_register`)
+
+Every shared component owns one `CMakeLists.txt` that declares its sources /
+includes / deps with the ESP-IDF `idf_component_register()` call — the **single
+source of truth** consumed by both builds:
+
+- **Device:** `esp32p4/CMakeLists.txt` sets
+  `EXTRA_COMPONENT_DIRS = ../components ../app` (`../components` is a container of
+  components; `../app` is itself one component because it has a `CMakeLists.txt`).
+  Device-only components in `esp32p4/components/` are auto-discovered. The IDF
+  `main` component implicitly depends on all others, so `esp32p4/main` needs **no
+  `REQUIRES`** (adding one suppresses that implicit dep and breaks transitive
+  BSP/LCD includes).
+- **Simulator:** `simulator/CMakeLists.txt` defines a small `idf_component_register`
+  **shim** (a CMake function) and `add_subdirectory`s each shared component; the
+  shim folds the component's `SRCS`/`INCLUDE_DIRS` straight into the `simulator`
+  executable. `REQUIRES` are ignored (one binary → includes are global; IDF-only
+  requirements like `esp_lvgl_port` have no host counterpart).
+
+### The `pf_port` seam
+
+`app/` is platform-agnostic; the seam is the `pf_port` namespace
+(`components/platform_port/platform_port.hpp` — interface only):
+
+- Device implementation: `esp32p4/main/main.cpp` (BSP + esp_lvgl_port).
+- Simulator implementation: `simulator/platform/platform_port_sim.cpp`
   (SDL window/texture for display, mouse for touch). Same header, so `app/`
   compiles unchanged.
 
@@ -63,14 +106,11 @@ simulator. The seam is the `pf_port` namespace (`idf-components/main/platform_po
 sets up the LVGL display on the two `pf_port` frame buffers and pushes the first
 screen. Panel is 720×1280 portrait RGB565 (`PANEL_W`/`PANEL_H` in `app/adb_app.hpp`).
 
-Layout:
-- `idf-components/main/` — entry point + `pf_port` (device), `nvs.hpp`.
-- `idf-components/m5tab5-bsp/` — board support (display/touch/audio/power). Copied
-  wholesale from Tab5-UVC-Display.
-- `components/lvgl++/` — C++ helpers (`lv_async_call`, `lv_obj_add_event_fn`).
-- `components/screen_manager/` — `Screen` base + screen stack (`screen_manager`).
-- `app/` — screens and app logic.
-- `simulator/` — host build (see below).
+`nvs.hpp` is a **per-platform seam like `pf_port`** (not shared): two different
+header-only implementations of the same `NVS` API live with each port
+(`esp32p4/main/nvs.hpp` = nvs_flash; `simulator/platform/nvs.hpp` = JSON file).
+It is not on `app/`'s include path today; if shared code needs NVS, promote it to
+a shared interface component first.
 
 ## Simulator details (FreeRTOS POSIX port)
 
@@ -80,7 +120,7 @@ host. Verified working end-to-end (task entry → `vTaskDelay` ticks → `vTaskD
 
 Hard constraints — violate these and it hangs/crashes:
 
-1. **SDL/LVGL own the main thread.** `simulator/src/main.cpp` runs the LVGL/SDL
+1. **SDL/LVGL own the main thread.** `simulator/platform/main.cpp` runs the LVGL/SDL
    loop on the main thread and starts `vTaskStartScheduler()` on a *background
    pthread*. SDL must be driven from the main thread on macOS, so the scheduler
    cannot run there.
@@ -94,7 +134,7 @@ Hard constraints — violate these and it hangs/crashes:
    libsystem once another task thread is parked in `pthread_cond_wait`, so
    `vTaskStartScheduler()` hangs creating the timer task (symptom: `xTaskCreate`
    returns pdPASS but the task body never runs). Fixed by
-   `simulator/patches/freertos_posix_macos.py`, applied automatically via the
+   `simulator/freertos/patches/freertos_posix_macos.py`, applied automatically via the
    `PATCH_COMMAND` on the `freertos_kernel` `FetchContent_Declare` in
    `simulator/CMakeLists.txt`. NameCardKnot has the same latent bug (its sim
    FreeRTOS never actually ran). If you bump the FreeRTOS-Kernel `GIT_TAG`,
@@ -104,6 +144,9 @@ Other simulator notes:
 - LVGL config is `simulator/lv_conf.h` (found via `LV_CONF_INCLUDE_SIMPLE` +
   the project source dir). `LV_COLOR_DEPTH 16` (RGB565, matches the panel) and
   `LV_USE_THEME_DEFAULT 1` (the e-paper-derived base config had it off).
-- ESP-IDF API shims for shared code: `simulator/tab5-bsp_simulator/inc/esp_err.h`,
-  `esp_log.h`; FreeRTOS include-path shims in `simulator/freertos_shim/`.
+- ESP-IDF API shims for shared code all live in `simulator/idf_compat/`:
+  `esp_err.h`/`esp_err.c`, `esp_log.h`, and the `freertos/` include-path shims
+  (`freertos/FreeRTOS.h` → real `<FreeRTOS.h>`). `idf_compat/` is on the include
+  path; `idf_compat/freertos/` is **not** (so the shim's `#include <task.h>`
+  reaches the kernel, not itself).
 - Build artifacts (`build/`, `simulator/.deps/`) are gitignored.

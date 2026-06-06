@@ -1,5 +1,5 @@
 // Host (SDL2) implementation of the `pf_port` platform abstraction used by the
-// Tab5 app. Mirrors the on-device implementation in idf-components/main/main.cpp
+// Tab5 app. Mirrors the on-device implementation in esp32p4/main/main.cpp
 // so app/ code (adb_app, screens) compiles and runs unchanged on the desktop.
 //
 // The Tab5 panel is 720x1280 portrait RGB565. The app sets up its own LVGL
