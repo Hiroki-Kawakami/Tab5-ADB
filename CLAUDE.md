@@ -8,6 +8,13 @@ simulator modeled on `NameCardKnot`.
 > architecture, the `pf_port` surface, add a target, or hit a non-obvious gotcha
 > worth remembering, update CLAUDE.md in the same change. It is the handoff to
 > the next session.
+>
+> **Keep `README.md` current too.** It is the human-facing overview (build /
+> flash / simulator commands, the layout tree). When a change makes it stale —
+> moved/renamed paths, changed commands, a new top-level directory — update
+> `README.md` in the same change. CLAUDE.md is the detailed handoff; README.md
+> is the short public summary, so keep README concise and don't duplicate the
+> deep gotchas here into it.
 
 ## Build environment
 
@@ -86,10 +93,15 @@ source of truth** consumed by both builds:
   `REQUIRES`** (adding one suppresses that implicit dep and breaks transitive
   BSP/LCD includes).
 - **Simulator:** `simulator/CMakeLists.txt` defines a small `idf_component_register`
-  **shim** (a CMake function) and `add_subdirectory`s each shared component; the
-  shim folds the component's `SRCS`/`INCLUDE_DIRS` straight into the `simulator`
+  **shim** (a CMake function) and `add_subdirectory`s each component; the shim
+  folds the component's `SRCS`/`INCLUDE_DIRS` straight into the `simulator`
   executable. `REQUIRES` are ignored (one binary → includes are global; IDF-only
-  requirements like `esp_lvgl_port` have no host counterpart).
+  requirements like `esp_lvgl_port` have no host counterpart). Both the shared
+  components and the **simulator-only `idf_compat` component** (its own
+  `CMakeLists.txt`) are consumed this way — so growing `idf_compat` just means
+  adding `SRCS` to that file, not editing `simulator/CMakeLists.txt`. Only
+  `simulator/platform/` (the SDL/LVGL entry + pf_port impl) stays a direct
+  `target_sources` — it's the executable's "main", not a component.
 
 ### The `pf_port` seam
 
@@ -157,9 +169,11 @@ Other simulator notes:
 - LVGL config is `simulator/lv_conf.h` (found via `LV_CONF_INCLUDE_SIMPLE` +
   the project source dir). `LV_COLOR_DEPTH 16` (RGB565, matches the panel) and
   `LV_USE_THEME_DEFAULT 1` (the e-paper-derived base config had it off).
-- ESP-IDF API shims for shared code all live in `simulator/idf_compat/`:
+- ESP-IDF API shims for shared code all live in the `simulator/idf_compat/`
+  component (`CMakeLists.txt` registers them; see the build section above):
   `esp_err.h`/`esp_err.c`, `esp_log.h`, and the `freertos/` include-path shims
-  (`freertos/FreeRTOS.h` → real `<FreeRTOS.h>`). `idf_compat/` is on the include
-  path; `idf_compat/freertos/` is **not** (so the shim's `#include <task.h>`
-  reaches the kernel, not itself).
+  (`freertos/FreeRTOS.h` → real `<FreeRTOS.h>`). The component registers
+  `INCLUDE_DIRS "."`, so `idf_compat/` is on the include path but
+  `idf_compat/freertos/` is **not** (so the shim's `#include <task.h>` reaches
+  the kernel, not itself). Add new shims here as `SRCS` in that `CMakeLists.txt`.
 - Build artifacts (`build/`, `simulator/.deps/`) are gitignored.

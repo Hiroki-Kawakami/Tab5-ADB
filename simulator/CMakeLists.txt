@@ -51,24 +51,22 @@ target_compile_definitions(simulator PRIVATE
     SDL_MAIN_HANDLED)
 target_link_libraries(simulator SDL2::SDL2 lvgl freertos_kernel cjson ${CMAKE_DL_LIBS})
 
-# Simulator-only sources: SDL/LVGL entry, host pf_port impl, IDF API shims.
-# (idf_compat is on the include path so app/ code can use "esp_err.h",
-# "esp_log.h" and the "freertos/*.h" ESP-IDF header paths on the host too.)
+# The executable's own entry: SDL/LVGL main loop + host pf_port impl. This is
+# the simulator's "main" (analogous to esp32p4/main on device), so it stays a
+# direct source rather than a component.
 target_sources(simulator PRIVATE
     platform/main.cpp
-    platform/platform_port_sim.cpp
-    idf_compat/esp_err.c)
-target_include_directories(simulator PRIVATE
-    platform
-    idf_compat)
+    platform/platform_port_sim.cpp)
+target_include_directories(simulator PRIVATE platform)
 
 # ---------------------------------------------------------------------------
-# Shared components
+# Components (idf_component_register shim)
 # ---------------------------------------------------------------------------
-# Every shared component (../components/*, ../app) describes itself with the
-# ESP-IDF idf_component_register() call in its own CMakeLists.txt. On device
-# that is the real IDF function; here we shim it to fold the component's
-# sources / include dirs straight into the `simulator` executable.
+# Both the simulator-only layer (idf_compat) and the shared components
+# (../components/*, ../app) describe themselves with the ESP-IDF
+# idf_component_register() call in their own CMakeLists.txt. On device that is
+# the real IDF function; here we shim it to fold the component's sources /
+# include dirs straight into the `simulator` executable.
 #
 # REQUIRES are intentionally ignored: everything links into a single binary so
 # include dirs are global, and IDF-only requirements (esp_lvgl_port, driver,
@@ -95,6 +93,10 @@ endfunction()
 function(idf_component_set_property)
 endfunction()
 
+# Simulator-only components (host shims for ESP-IDF APIs).
+add_subdirectory(idf_compat "${CMAKE_BINARY_DIR}/sim/idf_compat")
+
+# Shared components (built for both targets).
 set(SHARED_COMPONENTS
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/platform_port
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/lvgl++
