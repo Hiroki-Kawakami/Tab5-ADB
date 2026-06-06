@@ -6,3 +6,4 @@ sdkconfig.old
 .deps
 .direnv
 .DS_Store
+nvs_data.json

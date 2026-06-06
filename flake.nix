@@ -30,9 +30,17 @@
           inputsFrom = [ esp-idf ];
           packages = [
             esp-idf
+            # Host simulator toolchain (simulator/)
+            pkgs.cmake
+            pkgs.ninja
+            pkgs.gcc
+            pkgs.ccache
+            pkgs.cjson
+            pkgs.SDL2
           ];
           shellHook = ''
             export ESP_IDF_VERSION="5.4"
+            export HOST_GCC="${pkgs.gcc}"
           '';
         };
       }
