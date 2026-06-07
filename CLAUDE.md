@@ -370,8 +370,27 @@ a **per-Shell writer task** that owns the blocking `AdbStream::write()` (one
 spends a FreeRTOS task on it. Backpressure → `Error::QueueFull` past a ~64 KB
 per-stream cap; `detach()` synchronizes with the reader thread (takes the dispatch
 lock) so no callback touches the listener after it returns. See `docs/shell.md`;
-verified by `test/test_shell.cpp` (libusb vs a real phone). Later slices add
-`screencap` and `Sync`.
+verified by `test/test_shell.cpp` (libusb vs a real phone). **Slice 5** (in
+progress): the `Sync` session for the FileManager — `Client::open_sync(listener)`
+returns a `shared_ptr<Sync>` over the `sync:` service; built **direction by
+direction** (each is its own UI), starting with **Tab5→Android `push` (SEND)**
+plus `stat` (STAT) as its verifier — `list`/`pull`/preview are the next
+directions. The `sync:` sub-protocol is request/response and **serial** (one
+request at a time on the one stream), so unlike `Shell`, `Sync` owns a private
+**worker task** that drives it synchronously: it writes requests and *blocks for
+responses* over an internal **byte pipe** (`std::condition_variable`) fed by the
+reader thread's `on_data`. **Threading refinement (documented divergence from the
+"callbacks fire on the reader thread" rule):** `Sync` op completions and
+`on_sync_close` fire on this **worker thread**, never the reader thread — still
+never the LVGL thread, so the app marshals as usual. Two wire gotchas baked into
+the impl: (1) `AdbConnection::send_write()` does **not** split, so each sync
+`DATA` `A_WRTE` is capped to the negotiated `max_payload` (16 KB on device) — a
+64 KB sync chunk is chopped to fit; (2) SEND v1 sends the request path as
+`"<path>,<st_mode decimal>"` (mode = `perm | S_IFREG`) and terminates with a
+`DONE` whose length field carries the mtime. Sync sub-protocol ids are pure wire
+format in `embedded_adb/inc/adb_sync_protocol.hpp` (alongside `adb_protocol.hpp`,
+no I/O). See `docs/sync.md`; verified by `test/test_sync.cpp` (libusb vs a real
+phone: push a buffer → stat it back). Later slices add `screencap`.
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 

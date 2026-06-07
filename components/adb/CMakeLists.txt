@@ -9,6 +9,7 @@ idf_component_register(
     SRCS "src/adb_client.cpp"
          "src/adb_error.cpp"
          "src/adb_shell.cpp"
+         "src/adb_sync.cpp"
     INCLUDE_DIRS "inc"
     REQUIRES embedded_adb
     PRIV_REQUIRES freertos)

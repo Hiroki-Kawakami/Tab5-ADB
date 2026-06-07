@@ -20,6 +20,7 @@
 #include "adb_connection.hpp"  // adb::ConnectionState, adb::AdbConnection
 #include "adb_error.hpp"       // adb::Error
 #include "adb_shell.hpp"       // adb::Shell, adb::ShellListener
+#include "adb_sync.hpp"        // adb::Sync, adb::SyncListener
 
 namespace adb {
 
@@ -69,6 +70,13 @@ public:
     // See docs/shell.md.
     std::shared_ptr<Shell> open_shell(ShellListener* listener,
                                       const std::string& cmd = "");
+
+    // Session: open the device's `sync:` filesystem service. Returns a
+    // shared_ptr immediately (before the device's A_OKAY); use Sync::stat()/
+    // push()/... to transfer files and SyncListener for the session close.
+    // nullptr if the client is not Online. detach the listener before destroying
+    // it. See docs/sync.md.
+    std::shared_ptr<Sync> open_sync(SyncListener* listener);
 
     // Stop the reader task and release the connection. Idempotent. Blocks until
     // the reader task has exited (so no callback fires after it returns) — except

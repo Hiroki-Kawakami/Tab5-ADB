@@ -116,6 +116,16 @@ std::shared_ptr<Shell> Client::open_shell(ShellListener* listener,
     return Shell::create(conn, cmd, listener);
 }
 
+std::shared_ptr<Sync> Client::open_sync(SyncListener* listener) {
+    AdbConnection* conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(life_mtx_);
+        if (!closing_) conn = conn_.get();
+    }
+    if (!conn || conn->state() != ConnectionState::Online) return nullptr;
+    return Sync::create(conn, listener);
+}
+
 void Client::close() {
     SemaphoreHandle_t done = nullptr;
     {
