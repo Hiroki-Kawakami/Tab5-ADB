@@ -260,10 +260,13 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   pattern as `m5stack-bsp`. It lives inside `embedded_adb`, not the BSP: the
   `usb_host` API is too large to reimplement on the host and the need (find iface,
   open bulk IN/OUT eps, transfer) is ADB-specific, not a generic board seam.
-- `adb_connection` / `adb_stream` / `adb_client` — CNXN handshake + AUTH state
-  machine, `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing, and the high-level API. A
-  read task + write queue drives packet dispatch (FreeRTOS on both targets; on the
-  host these are pthreads, so tasks spawn anywhere — no post-boot restriction).
+- `adb_connection` / `adb_stream` — CNXN handshake + AUTH state machine, and
+  `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing (`open_stream()` + `run_service()`
+  for one-shot commands, classic per-OKAY flow control). The packet read loop is
+  `run_blocking()` — the *caller* owns the thread (a `std::thread` in the host
+  tests, a FreeRTOS task in the app); the library only relies on a thread-safe
+  `send()` + stream registry, so it stays thread-model-agnostic. (`start()` /
+  `adb_client` high-level API land with P7.)
 
 Dev strategy: the simulator's **libusb transport talks to a real Android device
 plugged into the PC**, so the protocol/auth/stream layers are developed and
@@ -271,6 +274,21 @@ debugged on the desktop against a real phone; only `transport_usbhost.cpp` needs
 on-device validation. (Run `adb kill-server` first so the host adb-server doesn't
 hold the interface.) SDL2/libusb/mbedTLS are linked to the `simulator` exe in
 `simulator/CMakeLists.txt`; `flake.nix` provides `libusb1` + `mbedtls` for the host.
+
+`components/embedded_adb/test/` has two host harnesses (build commands in each
+file's header comment):
+- `test_crypto.cpp` — no phone needed: DER round trip, token signature verify, and
+  the Android public-key blob invariants (modulus/exponent/n0inv/rr).
+- `test_connect.cpp` — **needs a phone** (USB debugging on, `adb kill-server`
+  first): runs the real CNXN+AUTH handshake over libusb. Compile the idf_compat
+  `.c` deps (`nvs.c`, `esp_err.c`) with `gcc` (not `g++` — they use C void* casts)
+  into `.o`, then link with the C++ sources + `libcjson`/`mbedtls`/`libusb-1.0`.
+  Verified end-to-end against a real Android device: first run prompts "Allow USB debugging?",
+  the key persists to NVS, and the second run reconnects with no prompt.
+- `test_shell.cpp` — needs a phone (already authorized): runs the read loop on a
+  `std::thread` and executes `shell:` commands via `run_service()`. Verified on a
+  real Android device (`getprop`/`echo`/`id` return correct output). The read loop is started
+  with `std::thread` here; the app (P7) wraps `run_blocking()` in a FreeRTOS task.
 
 ## Simulator details
 

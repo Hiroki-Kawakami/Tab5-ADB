@@ -19,6 +19,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(SDL2 REQUIRED)
 find_package(CJSON REQUIRED)
 find_package(Threads REQUIRED)   # host FreeRTOS API (idf_compat) is built on pthreads
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MBEDTLS REQUIRED IMPORTED_TARGET mbedtls mbedcrypto mbedx509)  # embedded_adb RSA auth
+pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)  # embedded_adb USB transport
 
 # LVGL (lv_conf.h is picked up from this directory via LV_CONF_INCLUDE_SIMPLE)
 FetchContent_Declare(
@@ -35,7 +38,7 @@ add_executable(simulator)
 target_compile_definitions(simulator PRIVATE
     SDL_DISABLE_ARM_NEON_H
     SDL_MAIN_HANDLED)
-target_link_libraries(simulator SDL2::SDL2 lvgl cjson Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(simulator SDL2::SDL2 lvgl cjson Threads::Threads PkgConfig::MBEDTLS PkgConfig::LIBUSB ${CMAKE_DL_LIBS})
 
 # The executable's own entry: the SDL/LVGL + FreeRTOS main loop. This is the
 # simulator's "main" (analogous to esp32p4/main on device) — it owns the host
