@@ -55,10 +55,10 @@ ADBShellScreen::ADBShellScreen() = default;
 
 ADBShellScreen::~ADBShellScreen() {
     // onExit normally runs first (pop()/load()), but guard against a destroy
-    // without it: close()+detach() must happen before the listener (this) dies.
+    // without it: close() stops I/O. The shell holds the listener weakly, so the
+    // weak ref simply expires as this screen dies.
     if (shell_) {
         shell_->close();
-        shell_->detach();
         shell_.reset();
     }
 }
@@ -125,8 +125,13 @@ void ADBShellScreen::build() {
                         [this](lv_event_t *) { send_input(); });
 
     // --- open the shell (the screen is its listener) ---
+    // The shell holds the listener weakly. Hand it a shared_ptr aliasing this
+    // screen's control block (via shared_from_this) so the weak ref expires when
+    // the screen is freed.
     adb::Client *client = app::adb_client();
-    shell_ = client ? client->open_shell(this) : nullptr;
+    std::shared_ptr<adb::ShellListener> self(
+        shared_from_this(), static_cast<adb::ShellListener *>(this));
+    shell_ = client ? client->open_shell(self) : nullptr;
     if (!shell_) {
         append_output("(not connected)\n");
         lv_obj_add_state(input_, LV_STATE_DISABLED);
@@ -135,11 +140,11 @@ void ADBShellScreen::build() {
 
 void ADBShellScreen::onExit() {
     // Runs on the LVGL thread before the screen object is destroyed (exited() is
-    // already set). close()+detach() so no Shell callback outlives `this`; any
+    // already set). close() stops the shell I/O; the shell's weak listener ref
+    // expires when this screen is freed, so no callback outlives `this`. Any
     // update already marshalled sees exited() and skips the freed widgets.
     if (shell_) {
         shell_->close();
-        shell_->detach();
         shell_.reset();
     }
 }

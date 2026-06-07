@@ -52,15 +52,17 @@ namespace {
 // Single-device holder: the Client must outlive the screens (they are pushed/
 // popped, the connection is not), so it lives at file scope. The holder is the
 // app's ClientListener — on_state fires on the reader thread, so everything
-// UI-facing is marshalled to LVGL with lv_async_call.
+// UI-facing is marshalled to LVGL with lv_async_call. The Client holds the
+// listener weakly, so the holder is owned by a shared_ptr it hands in.
 std::shared_ptr<adb::Client> g_client;
 
 class Holder : public adb::ClientListener {
 public:
-    void start(std::function<void(bool)> on_result) {
+    void start(std::weak_ptr<adb::ClientListener> self,
+               std::function<void(bool)> on_result) {
         on_result_ = std::move(on_result);
         reported_ = false;
-        g_client = adb::Client::connect_usb(this);
+        g_client = adb::Client::connect_usb(std::move(self));
     }
 
     void on_state(adb::Client* /*c*/, adb::ConnectionState s) override {
@@ -83,12 +85,12 @@ private:
     bool reported_ = false;
 };
 
-Holder g_holder;
+std::shared_ptr<Holder> g_holder = std::make_shared<Holder>();
 
 }  // namespace
 
 void adb_connect_async(std::function<void(bool)> on_result) {
-    g_holder.start(std::move(on_result));
+    g_holder->start(g_holder, std::move(on_result));
 }
 
 adb::Client* adb_client() { return g_client.get(); }

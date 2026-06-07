@@ -83,17 +83,14 @@ public:
     // completion (runs on the worker thread, only signals there — no self-join).
     void close();
 
-    // Stop referencing the listener; call before destroying it. Not from a
-    // callback.
-    void detach();
-
 private:
     friend class Client;
-    explicit Sync(SyncListener* listener);
+    explicit Sync(std::weak_ptr<SyncListener> listener);
 
     // Factory used by Client::open_sync: opens "sync:" and starts the worker.
     // nullptr if the stream can't open.
-    static std::shared_ptr<Sync> create(AdbConnection* conn, SyncListener* listener);
+    static std::shared_ptr<Sync> create(AdbConnection* conn,
+                                        std::weak_ptr<SyncListener> listener);
 
     // One queued operation. run(true) executes it on the worker; run(false) is
     // the "session already gone" path — it fires the op's completion with
@@ -125,8 +122,9 @@ private:
     std::shared_ptr<AdbStream> stream_;
     size_t chunk_cap_ = 0;  // max sync DATA bytes per A_WRTE (fits max_payload)
 
-    std::mutex listener_mtx_;  // held during dispatch; detach() takes it too
-    SyncListener* listener_;
+    // Held weakly: the app owns the listener's lifetime. fire_close_once() lock()s
+    // it; if the listener is gone the close callback is skipped.
+    std::weak_ptr<SyncListener> listener_;
     std::atomic<bool> close_notified_{false};  // on_sync_close fires once
 
     // Worker + byte pipe, all under mtx_/cv_.

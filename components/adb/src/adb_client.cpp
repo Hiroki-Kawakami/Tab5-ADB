@@ -11,8 +11,7 @@ namespace adb {
 namespace {
 
 // usb_host DMA-allocs per payload on device, so keep the advertised CNXN maxdata
-// modest there; the simulator (libusb) can afford the full ADB max. (Same split
-// as the retired app/adb_session.cpp.)
+// modest there; the simulator (libusb) can afford the full ADB max.
 #ifdef ESP_PLATFORM
 constexpr uint32_t kMaxPayload = 16 * 1024;
 #else
@@ -24,10 +23,11 @@ constexpr uint32_t kReaderStack = 16384;
 
 }  // namespace
 
-Client::Client(ClientListener* listener) : listener_(listener) {}
+Client::Client(std::weak_ptr<ClientListener> listener)
+    : listener_(std::move(listener)) {}
 
-std::shared_ptr<Client> Client::connect_usb(ClientListener* listener) {
-    auto c = std::shared_ptr<Client>(new Client(listener));
+std::shared_ptr<Client> Client::connect_usb(std::weak_ptr<ClientListener> listener) {
+    auto c = std::shared_ptr<Client>(new Client(std::move(listener)));
     c->done_ = xSemaphoreCreateBinary();
     TaskHandle_t task = nullptr;
     // The reader task takes a raw pointer; ~Client -> close() joins it, so the
@@ -73,7 +73,7 @@ void Client::run() {
 void Client::set_state(ConnectionState s) {
     if (state_.exchange(s) == s) return;  // dedupe repeated states
     if (s == ConnectionState::Online && conn_) banner_ = conn_->banner();
-    if (listener_) listener_->on_state(this, s);
+    if (auto l = listener_.lock()) l->on_state(this, s);
 }
 
 void Client::exec(const std::string& cmd, ExecCb cb) {
@@ -105,7 +105,7 @@ void Client::exec(const std::string& cmd, ExecCb cb) {
     }
 }
 
-std::shared_ptr<Shell> Client::open_shell(ShellListener* listener,
+std::shared_ptr<Shell> Client::open_shell(std::weak_ptr<ShellListener> listener,
                                           const std::string& cmd) {
     AdbConnection* conn = nullptr;
     {
@@ -113,17 +113,17 @@ std::shared_ptr<Shell> Client::open_shell(ShellListener* listener,
         if (!closing_) conn = conn_.get();
     }
     if (!conn || conn->state() != ConnectionState::Online) return nullptr;
-    return Shell::create(conn, cmd, listener);
+    return Shell::create(conn, cmd, std::move(listener));
 }
 
-std::shared_ptr<Sync> Client::open_sync(SyncListener* listener) {
+std::shared_ptr<Sync> Client::open_sync(std::weak_ptr<SyncListener> listener) {
     AdbConnection* conn = nullptr;
     {
         std::lock_guard<std::mutex> lk(life_mtx_);
         if (!closing_) conn = conn_.get();
     }
     if (!conn || conn->state() != ConnectionState::Online) return nullptr;
-    return Sync::create(conn, listener);
+    return Sync::create(conn, std::move(listener));
 }
 
 void Client::close() {

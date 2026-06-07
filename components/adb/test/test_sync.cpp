@@ -32,6 +32,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -69,19 +70,19 @@ void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms
 int main() {
     nvs_flash_sim_set_path("/tmp/adb_test_nvs.json");
 
-    Listener listener;
-    auto client = adb::Client::connect_usb(&listener);
+    auto listener = std::make_shared<Listener>();  // held weakly by Client/Sync
+    auto client = adb::Client::connect_usb(listener);
 
-    for (int i = 0; i < 200 && !listener.online(); ++i) {
+    for (int i = 0; i < 200 && !listener->online(); ++i) {
         if (client->state() == adb::ConnectionState::Closed) break;
         sleep_ms(100);
     }
-    if (!listener.online()) {
+    if (!listener->online()) {
         std::printf("FAIL: did not reach Online\n");
         return 1;
     }
 
-    auto sync = client->open_sync(&listener);
+    auto sync = client->open_sync(listener);
     if (!sync) {
         std::printf("FAIL: open_sync returned nullptr\n");
         return 1;
@@ -126,15 +127,14 @@ int main() {
                 st.exists(), st.size, payload.size());
 
     sync->close();
-    sync->detach();
-    sync.reset();
+    sync.reset();   // drop the sync; the weak listener ref expires with it
     client->close();
 
-    bool one_close = listener.closes() == 1;
+    bool one_close = listener->closes() == 1;
     bool ok = pushed && landed && one_close;
     std::printf("%s (closes=%d)\n",
                 ok ? "PASSED: push lands on the device and sync closes once"
                    : "FAILED",
-                listener.closes());
+                listener->closes());
     return ok ? 0 : 1;
 }

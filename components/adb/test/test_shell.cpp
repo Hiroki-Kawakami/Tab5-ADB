@@ -16,6 +16,7 @@
 //       -I$cc/include
 //   g++ -std=c++17 -Iinc -I../embedded_adb/inc -I$cc/include \
 //       test/test_shell.cpp src/adb_client.cpp src/adb_error.cpp src/adb_shell.cpp \
+//       src/adb_sync.cpp \
 //       ../embedded_adb/src/adb_protocol.cpp ../embedded_adb/src/adb_crypto.cpp \
 //       ../embedded_adb/src/adb_keystore.cpp ../embedded_adb/src/adb_connection.cpp \
 //       ../embedded_adb/src/adb_stream.cpp ../embedded_adb/src/transport_libusb.cpp \
@@ -29,6 +30,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -79,20 +81,20 @@ void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms
 int main() {
     nvs_flash_sim_set_path("/tmp/adb_test_nvs.json");
 
-    Listener listener;
-    auto client = adb::Client::connect_usb(&listener);
+    auto listener = std::make_shared<Listener>();  // held weakly by Client/Shell
+    auto client = adb::Client::connect_usb(listener);
 
-    for (int i = 0; i < 200 && !listener.online(); ++i) {
+    for (int i = 0; i < 200 && !listener->online(); ++i) {
         if (client->state() == adb::ConnectionState::Closed) break;
         sleep_ms(100);
     }
-    if (!listener.online()) {
+    if (!listener->online()) {
         std::printf("FAIL: did not reach Online\n");
         return 1;
     }
 
     // Open an interactive PTY shell and drive it with a couple of commands.
-    auto shell = client->open_shell(&listener);
+    auto shell = client->open_shell(listener);
     if (!shell) {
         std::printf("FAIL: open_shell returned nullptr\n");
         return 1;
@@ -103,23 +105,22 @@ int main() {
 
     // Wait for the device to close the stream after `exit` (fall back to an
     // explicit close() if it lingers).
-    for (int i = 0; i < 50 && !listener.closed(); ++i) sleep_ms(100);
+    for (int i = 0; i < 50 && !listener->closed(); ++i) sleep_ms(100);
     shell->close();  // idempotent; no-op if the peer already closed
 
-    std::string out = listener.output();
+    std::string out = listener->output();
     std::printf("\n--- shell output ---\n%s--------------------\n", out.c_str());
 
     bool got_output = out.find("hello from tab5") != std::string::npos;
-    bool one_close = listener.closes() == 1;
+    bool one_close = listener->closes() == 1;
 
-    shell->detach();
-    shell.reset();
+    shell.reset();   // drop the shell; the weak listener ref expires with it
     client->close();
 
     bool ok = got_output && one_close;
     std::printf("%s (output=%d, closes=%d)\n",
                 ok ? "PASSED: shell streams I/O and closes exactly once"
                    : "FAILED",
-                got_output, listener.closes());
+                got_output, listener->closes());
     return ok ? 0 : 1;
 }

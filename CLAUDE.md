@@ -90,7 +90,7 @@ simulator/                   # SIMULATOR build root (see below)
 `m5stack-bsp` is the worked example of a target-divergent shared component: its
 one `CMakeLists.txt` branches on `ESP_PLATFORM` (set only under ESP-IDF) to build
 the device drivers + tab5 board on device and the SDL backend + tab5 sim board on
-the host. No more device-only `esp32p4/components/`.
+the host.
 
 Rule of thumb: **shared → top-level `components/` (or `app/`); target-only →
 under that target's build root.** Adding a shared component = a new dir under
@@ -345,22 +345,26 @@ implementing.** The agreed design (read the docs for the full contract):
   `adb::Error`; backpressure → `Error::QueueFull`).
 - **Lifetime:** sessions are `shared_ptr`; every terminal callback (`on_*_close`
   / one-shot completion) fires **exactly once** (incl. `Error::Cancelled` from
-  `Client::close()`); detach the listener before destroying it.
+  `Client::close()`). The library holds the **listener as a `weak_ptr`** and
+  `lock()`s it before each dispatch, so there is **no `detach()`**: `close()`
+  stops I/O, and simply dropping the listener's `shared_ptr` detaches (an expired
+  `lock()` skips the callback racelessly). A session's `on_*_close` is delivered
+  through the weak listener, so it is skipped if the listener was already dropped.
 
 Built incrementally in commit-sized slices (see the roadmap in the component
 `README.md`). **Slice 1** (done): `Client::connect_usb()` + `state()`/`banner()` +
-`close()` — replaces the setup half of the old `app/adb_session.cpp`; verified by
+`close()`; verified by
 `test/test_client.cpp` (libusb vs a real phone, same harness pattern as
 `embedded_adb/test`). `Client` runs the read loop on an internal FreeRTOS task and
 joins it in `close()`/dtor; this relies on `AdbConnection::stop()` being honored
 even **before** `run_blocking()` starts (a `stop_requested_` gate added for
 race-free teardown). **Slice 2** (done): the `exec` one-shot
 (`Client::exec(cmd, cb)` → collects `shell:<cmd>` output, completion on the reader
-thread, see `docs/one-shots.md`) plus rewiring the UI onto `Client` —
-`app/adb_session.*` is **retired** (the holder folded into `adb_app`; getprops go
-through `exec`, so `adb` no longer leaks an `AdbConnection`). To make a one-shot
-completion fire **exactly once**, `AdbConnection::run_blocking()` teardown now
-closes outstanding streams (and `AdbStream::mark_closed()` is idempotent).
+thread, see `docs/one-shots.md`) plus wiring the UI onto `Client` (the app-global
+holder lives in `adb_app`; getprops go through `exec`, so `adb` doesn't leak an
+`AdbConnection`). To make a one-shot completion fire **exactly once**,
+`AdbConnection::run_blocking()` teardown closes outstanding streams (and
+`AdbStream::mark_closed()` is idempotent).
 **Slice 3** (done): the `Shell` session — `Client::open_shell(listener, cmd="")`
 returns a `shared_ptr<Shell>` (an interactive PTY `shell:` when `cmd` is empty,
 `shell:<cmd>` otherwise); `ShellListener` delivers `on_shell_data`/`on_shell_close`
@@ -368,8 +372,9 @@ returns a `shared_ptr<Shell>` (an interactive PTY `shell:` when `cmd` is empty,
 a **per-Shell writer task** that owns the blocking `AdbStream::write()` (one
 `A_WRTE` per `A_OKAY`) — so the engine stays thread-agnostic while the `adb` layer
 spends a FreeRTOS task on it. Backpressure → `Error::QueueFull` past a ~64 KB
-per-stream cap; `detach()` synchronizes with the reader thread (takes the dispatch
-lock) so no callback touches the listener after it returns. See `docs/shell.md`;
+per-stream cap; the listener is held as a `weak_ptr` (`lock()`ed before each
+dispatch), so dropping the listener's `shared_ptr` detaches. See
+`docs/shell.md`;
 verified by `test/test_shell.cpp` (libusb vs a real phone). **Slice 5** (in
 progress): the `Sync` session for the FileManager — `Client::open_sync(listener)`
 returns a `shared_ptr<Sync>` over the `sync:` service; built **direction by
@@ -404,10 +409,8 @@ the reader-thread `on_state` callbacks to the LVGL thread with `lv_async_call`
 Online it pushes `ADBDeviceScreen`, which shows banner-derived fields
 (model/name/device) and fetches a few live `getprop`s via a single
 `app::adb_client()->exec(...)` one-shot (its completion fires on the reader thread,
-so the label update is marshalled back to LVGL). This holder replaced the earlier
-`app/adb_session.*` (a bespoke reader task + `AdbConnection` marshalling) once
-`Client` took over the lifecycle — the app pulls in no protocol/transport details,
-only the `adb` component's typed surface.
+so the label update is marshalled back to LVGL). The app pulls in no
+protocol/transport details, only the `adb` component's typed surface.
 
 `ADBDeviceScreen` has an **Open Terminal** button that pushes **`ADBShellScreen`**
 (`app/adb_shell_screen.*`) — an interactive terminal over `Client::open_shell()`.
@@ -419,11 +422,16 @@ concerns the screen handles, both from the cross-cutting `adb` contract: (1) She
 callbacks fire on the **reader thread**, so `on_shell_data`/`on_shell_close`
 sanitize (strip CR + ANSI/VT escapes the bitmap font can't render) and marshal the
 widget update with `lv_async_call`; (2) the screen (the listener) can be destroyed
-on `pop()`, so `onExit()` runs `shell_->close()` **then** `detach()` before the
-object dies (per the lifetime rule), and every marshalled lambda captures a
-`shared_ptr<bool> alive_` (set false in `onExit`) so an update already queued
-before teardown skips the freed widgets — race-free because teardown and the
-`lv_async_call` body both run on the LVGL thread. `LV_FONT_UNSCII_16` is enabled
+on `pop()`, so `onExit()` just runs `shell_->close()` (the shell holds the
+listener as a `weak_ptr` — the screen passes a `shared_ptr` aliasing
+`shared_from_this()`, and the weak ref expires when the screen frees).
+Each marshalled lambda captures `self = shared_from_this()` (keeping the screen
+alive until it drains on the LVGL thread) and skips when the base
+`Screen::exited()` flag is set, so an update already queued before teardown skips
+the freed widgets — race-free because teardown and the `lv_async_call` body both run
+on the LVGL thread. (`ScreenManager` owns screens via `shared_ptr` and sets
+`exited_` right before `onExit()` — see the screen_manager component.)
+`LV_FONT_UNSCII_16` is enabled
 on both targets for the terminal (sim `lv_conf.h`; device `sdkconfig`/
 `sdkconfig.defaults`). v1 is line-oriented (touch keyboard), not a raw VT.
 
@@ -438,19 +446,18 @@ contract, don't port the implementation" philosophy as the `esp_*` shims. A task
 **is** a detached pthread scheduled by the host OS; there is no scheduler to
 start, no tick ISR, no POSIX-signal machinery.
 
-This is deliberate: the previous vendored FreeRTOS-Kernel GCC/Posix port
-emulated a single-core, signal-driven scheduler on pthreads, which forced a pile
-of fragile constraints (SDL had to own the main thread *and* the scheduler had to
-run on a background thread because `vTaskStartScheduler()` blocks forever; tasks
-could only be spawned post-boot or the port's `pthread_once` signal setup
-corrupted; two macOS/arm64 port bugs). The host OS already has a scheduler, so
-running a second one bought scheduling fidelity this UI/app-logic simulator does
-not need. The compat layer deletes all of that.
+This is deliberate: the host OS already has a scheduler, so emulating a
+single-core, signal-driven FreeRTOS scheduler on pthreads would buy scheduling
+fidelity this UI/app-logic simulator does not need — at the cost of fragile
+constraints (SDL must own the main thread *and* the scheduler would have to run
+on a background thread because `vTaskStartScheduler()` blocks forever; tasks
+spawnable only post-boot or the port's `pthread_once` signal setup corrupts;
+macOS/arm64 port bugs). The pthread-backed API contract avoids all of it.
 
 What this means for app code:
 - **`xTaskCreate()` works anywhere, anytime** — including directly from
   `adb_app()` / `bsp_init()`. No "spawn only post-boot", no `lv_async_call`
-  dance for non-LVGL FreeRTOS work. The device and simulator entry points are now
+  dance for non-LVGL FreeRTOS work. The device and simulator entry points are
   symmetric: `app_main()` (device) and `main()` (sim) both just call `adb_app()`.
 - The **one** semantic gap: real hardware runs one task at a time per core, so a
   critical section is atomic against all other tasks. With pthreads tasks run
@@ -463,12 +470,12 @@ What this means for app code:
 - Tick rate matches the device (`configTICK_RATE_HZ = 100`) so `pdMS_TO_TICKS()`
   and raw tick delays behave the same on both targets.
 
-Still true: **SDL/LVGL own the main thread** (`SDL_PollEvent`/Cocoa on macOS), so
+**SDL/LVGL own the main thread** (`SDL_PollEvent`/Cocoa on macOS), so
 `simulator/platform/main.cpp` runs the `lv_timer_handler` loop on the main thread.
-But that is now the *only* main-thread rule — it no longer interacts with task
-creation. LVGL itself is single-threaded on both targets, so a FreeRTOS task that
-needs to touch LVGL still marshals via `lv_async_call` (device: `lvgl_port_lock`),
-exactly as on hardware.
+That is the *only* main-thread rule, and it is independent of task creation. LVGL
+itself is single-threaded on both targets, so a FreeRTOS task that needs to touch
+LVGL marshals via `lv_async_call` (device: `lvgl_port_lock`), the same on both
+targets.
 
 ### Other simulator notes
 - LVGL config is `simulator/lv_conf.h` (found via `LV_CONF_INCLUDE_SIMPLE` +

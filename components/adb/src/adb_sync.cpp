@@ -31,10 +31,11 @@ uint32_t get_le32(const uint8_t* p) {
 
 }  // namespace
 
-Sync::Sync(SyncListener* listener) : listener_(listener) {}
+Sync::Sync(std::weak_ptr<SyncListener> listener) : listener_(std::move(listener)) {}
 
-std::shared_ptr<Sync> Sync::create(AdbConnection* conn, SyncListener* listener) {
-    auto sy = std::shared_ptr<Sync>(new Sync(listener));
+std::shared_ptr<Sync> Sync::create(AdbConnection* conn,
+                                   std::weak_ptr<SyncListener> listener) {
+    auto sy = std::shared_ptr<Sync>(new Sync(std::move(listener)));
     std::weak_ptr<Sync> weak = sy;
 
     // Stream callbacks hold only a weak ref so the connection's stream map does
@@ -277,13 +278,7 @@ bool Sync::is_open() const { return stream_ && stream_->is_open(); }
 
 void Sync::fire_close_once(Error err) {
     if (close_notified_.exchange(true)) return;  // exactly once
-    std::lock_guard<std::mutex> lk(listener_mtx_);
-    if (listener_) listener_->on_sync_close(this, err);
-}
-
-void Sync::detach() {
-    std::lock_guard<std::mutex> lk(listener_mtx_);
-    listener_ = nullptr;
+    if (auto l = listener_.lock()) l->on_sync_close(this, err);
 }
 
 void Sync::close() {

@@ -21,11 +21,12 @@ constexpr uint32_t kWriterStack = 4096;
 
 }  // namespace
 
-Shell::Shell(ShellListener* listener) : listener_(listener) {}
+Shell::Shell(std::weak_ptr<ShellListener> listener)
+    : listener_(std::move(listener)) {}
 
 std::shared_ptr<Shell> Shell::create(AdbConnection* conn, const std::string& cmd,
-                                     ShellListener* listener) {
-    auto sh = std::shared_ptr<Shell>(new Shell(listener));
+                                     std::weak_ptr<ShellListener> listener) {
+    auto sh = std::shared_ptr<Shell>(new Shell(std::move(listener)));
     std::weak_ptr<Shell> weak = sh;
 
     // The stream callbacks fire on the reader thread. They hold only a weak ref
@@ -112,8 +113,7 @@ bool Shell::is_open() const {
 }
 
 void Shell::handle_data(const uint8_t* d, size_t n) {
-    std::lock_guard<std::mutex> lk(listener_mtx_);
-    if (listener_) listener_->on_shell_data(this, d, n);
+    if (auto l = listener_.lock()) l->on_shell_data(this, d, n);
 }
 
 void Shell::handle_close() {
@@ -126,13 +126,7 @@ void Shell::handle_close() {
     if (wake_) xSemaphoreGive(static_cast<SemaphoreHandle_t>(wake_));
 
     if (close_notified_.exchange(true)) return;  // exactly once
-    std::lock_guard<std::mutex> lk(listener_mtx_);
-    if (listener_) listener_->on_shell_close(this, Error::Ok);
-}
-
-void Shell::detach() {
-    std::lock_guard<std::mutex> lk(listener_mtx_);
-    listener_ = nullptr;
+    if (auto l = listener_.lock()) l->on_shell_close(this, Error::Ok);
 }
 
 void Shell::close() {

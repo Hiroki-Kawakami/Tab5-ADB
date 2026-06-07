@@ -39,7 +39,6 @@ public:
   bool is_open() const;   // opened (first A_OKAY seen) and not yet closed
 
   void close();   // send A_CLSE, stop the writer task. Idempotent.
-  void detach();  // stop referencing the listener (see Lifetime below)
 };
 ```
 
@@ -48,7 +47,8 @@ A `Shell` is created by the factory on `Client`:
 ```cpp
 // Open an interactive shell (empty cmd -> a PTY shell) or a single command
 // (cmd = "ls -l" -> shell:ls -l). Returns nullptr if the client is not Online.
-std::shared_ptr<Shell> Client::open_shell(ShellListener* listener,
+// The listener is held weakly (drop its shared_ptr to detach).
+std::shared_ptr<Shell> Client::open_shell(std::weak_ptr<ShellListener> listener,
                                           const std::string& cmd = "");
 ```
 
@@ -82,12 +82,14 @@ std::shared_ptr<Shell> Client::open_shell(ShellListener* listener,
   signals there — no self-join). The destructor calls `close()`.
 - `on_shell_close` fires **exactly once** — on peer exit, on `close()`, or when
   `Client::close()` tears the connection down (the engine closes outstanding
-  streams on teardown).
-- Before destroying the listener, call `close()` **and** `detach()`. `detach()`
-  synchronizes with the reader thread (it takes the same lock callback dispatch
-  holds), so once it returns no further callback will reference the listener.
-  Don't call `detach()` from within a callback (self-deadlock); detach from the
-  thread that owns the listener.
+  streams on teardown) — *provided the listener is still alive* (it is delivered
+  through the weak listener ref).
+- The `Shell` holds the listener as a `weak_ptr`. To detach, just **drop the
+  listener's `shared_ptr`**: each callback `lock()`s the weak ref first and skips
+  if it has expired, so there is no `detach()` and no dispatch-lock to deadlock
+  on. Typical teardown: `close()` to stop I/O, then let the listener (e.g. a
+  screen) be destroyed — a screen passes a `shared_ptr` aliasing
+  `shared_from_this()`, so the weak ref expires exactly when the screen is freed.
 
 ## v1 limitations (intentional)
 

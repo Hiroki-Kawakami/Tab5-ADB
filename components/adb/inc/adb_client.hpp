@@ -3,7 +3,7 @@
 // The app-facing entry point of the `adb` component. Owns the whole connection
 // lifecycle (RSA identity, USB transport, the reader task that runs the CNXN +
 // AUTH handshake and the packet read loop) on top of embedded_adb's
-// AdbConnection. Replaces the provisional app/adb_session.cpp.
+// AdbConnection.
 //
 // Threading: all callbacks fire on the internal reader thread; marshalling to
 // the UI/LVGL thread is the app's job. Methods are callable from any thread.
@@ -43,8 +43,9 @@ public:
     // Asynchronously connect to the first USB Android device: load/create the RSA
     // identity, open the transport, run CNXN + AUTH on an internal reader task.
     // Returns immediately; progress arrives via ClientListener::on_state.
-    // `listener` must outlive the returned Client.
-    static std::shared_ptr<Client> connect_usb(ClientListener* listener);
+    // The listener is held weakly: the app owns its lifetime (drop the listener's
+    // shared_ptr to detach — no callback fires after the weak ref expires).
+    static std::shared_ptr<Client> connect_usb(std::weak_ptr<ClientListener> listener);
 
     ~Client();
 
@@ -66,17 +67,17 @@ public:
     // single command (cmd = "ls" -> shell:ls). Returns a shared_ptr immediately
     // (before the device's A_OKAY); use Shell::write()/close() to interact and
     // ShellListener for output/close. nullptr if the client is not Online.
-    // `listener` may serve several shells; detach it before destroying it.
-    // See docs/shell.md.
-    std::shared_ptr<Shell> open_shell(ShellListener* listener,
+    // The listener is held weakly (drop its shared_ptr to detach); it may serve
+    // several shells. See docs/shell.md.
+    std::shared_ptr<Shell> open_shell(std::weak_ptr<ShellListener> listener,
                                       const std::string& cmd = "");
 
     // Session: open the device's `sync:` filesystem service. Returns a
     // shared_ptr immediately (before the device's A_OKAY); use Sync::stat()/
     // push()/... to transfer files and SyncListener for the session close.
-    // nullptr if the client is not Online. detach the listener before destroying
-    // it. See docs/sync.md.
-    std::shared_ptr<Sync> open_sync(SyncListener* listener);
+    // nullptr if the client is not Online. The listener is held weakly (drop its
+    // shared_ptr to detach). See docs/sync.md.
+    std::shared_ptr<Sync> open_sync(std::weak_ptr<SyncListener> listener);
 
     // Stop the reader task and release the connection. Idempotent. Blocks until
     // the reader task has exited (so no callback fires after it returns) — except
@@ -85,12 +86,13 @@ public:
     void close();
 
 private:
-    explicit Client(ClientListener* listener);
+    explicit Client(std::weak_ptr<ClientListener> listener);
     static void reader_trampoline(void* arg);
     void run();                       // the reader task body
     void set_state(ConnectionState s);  // dedupe + notify the listener
 
-    ClientListener* listener_;
+    // Held weakly; lock()ed before each on_state dispatch (see connect_usb).
+    std::weak_ptr<ClientListener> listener_;
     std::unique_ptr<AdbConnection> conn_;  // created inside run()
     std::atomic<ConnectionState> state_{ConnectionState::Offline};
     std::string banner_;  // set on the reader thread before Online is notified

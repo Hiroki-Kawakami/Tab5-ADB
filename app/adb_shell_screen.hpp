@@ -23,7 +23,7 @@ public:
     ~ADBShellScreen() override;
 
     void build() override;
-    void onExit() override;  // close()+detach() the shell before destruction
+    void onExit() override;  // close() the shell before destruction
 
     // adb::ShellListener — both fire on the reader thread.
     void on_shell_data(adb::Shell *sh, const uint8_t *data, size_t len) override;

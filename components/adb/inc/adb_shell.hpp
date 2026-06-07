@@ -65,19 +65,15 @@ public:
     // on_shell_close), where it only signals the stop.
     void close();
 
-    // Stop referencing the listener; after it returns no callback touches the
-    // listener. Call before destroying the listener. Not from within a callback.
-    void detach();
-
 private:
     friend class Client;
-    explicit Shell(ShellListener* listener);
+    explicit Shell(std::weak_ptr<ShellListener> listener);
 
     // Factory used by Client::open_shell: opens "shell:<cmd>" and wires the
     // stream callbacks + writer task. nullptr if the stream can't open.
     static std::shared_ptr<Shell> create(AdbConnection* conn,
                                           const std::string& cmd,
-                                          ShellListener* listener);
+                                          std::weak_ptr<ShellListener> listener);
 
     static void writer_trampoline(void* arg);
     void writer_loop();          // drains queue_ via the blocking AdbStream::write
@@ -86,8 +82,10 @@ private:
 
     std::shared_ptr<AdbStream> stream_;
 
-    std::mutex listener_mtx_;  // held during dispatch; detach() takes it too
-    ShellListener* listener_;
+    // Held weakly: the app owns the listener's lifetime (e.g. a screen). Each
+    // dispatch lock()s it; if the listener is gone the callback is skipped, and
+    // close() never has to race the listener's destruction.
+    std::weak_ptr<ShellListener> listener_;
 
     std::mutex q_mtx_;  // guards queue_/queued_bytes_/closing_ + the close bookkeeping
     std::deque<std::vector<uint8_t>> queue_;

@@ -79,14 +79,21 @@ per-request *methods* are one-shot style.
 - Session objects are owned via `std::shared_ptr`, returned by the factory. The
   reader thread holds a strong ref while delivering a callback, so the object
   never dies mid-callback.
-- The **listener** (the app object implementing the interface) has a separate
-  lifetime. Contract: before destroying a listener, call `obj->close()` **and**
-  `obj->detach()`. After `detach()` no further callback will reference the
-  listener; the app can then be torn down safely.
-- **Every terminal callback fires exactly once.** `on_*_close` (sessions) and the
-  one-shot completion `std::function` are each guaranteed to run exactly once —
-  on success, on failure, or with `Error::Cancelled` when `Client::close()` tears
-  things down. This makes captured resources deterministic to release.
+- The library holds the **listener** (the app object implementing the interface)
+  as a `std::weak_ptr` and `lock()`s it before each dispatch. The app owns the
+  listener's lifetime via a `std::shared_ptr`. Contract: call `obj->close()` to
+  stop I/O; **dropping the listener's `shared_ptr` is enough to detach** — once
+  the weak ref expires, no further callback references it. There is no `detach()`:
+  the `lock()` skips the callback racelessly if the listener is gone, so the app
+  only does its usual UI marshalling and never threads lifetime bookkeeping
+  through the library. (Hand the listener in as a `shared_ptr`/`weak_ptr`; e.g. a
+  screen passes a `shared_ptr` aliasing `shared_from_this()`.)
+- **Every terminal callback fires exactly once** *if the listener is still alive*.
+  `on_*_close` (sessions) and the one-shot completion `std::function` each run at
+  most once — on success, on failure, or with `Error::Cancelled` when
+  `Client::close()` tears things down. (A session's `on_*_close` is delivered
+  through the weak listener, so it is skipped if the listener was already dropped;
+  one-shot completions own their captures and always fire.)
 
 ### Errors — `adb::Error`
 
@@ -112,17 +119,16 @@ bytes exceed the per-stream cap (initial cap ≈ 64 KB; see implementation).
 ## Roadmap (commit-sized slices)
 
 1. **`Client::connect_usb` + `state()`/`banner()` + `close()`** — *done*.
-   Owns the RSA key / transport / reader task; replaces the setup half of
-   `app/adb_session.cpp`. Verified in the simulator (libusb) against a real phone
-   via `test/test_client.cpp`. Detail: [`docs/client.md`](docs/client.md).
-2. Rewire `app/` onto `Client` + the `exec` one-shot — *done*. `app/adb_session.*`
-   is **retired**: the app-global holder (owns the `shared_ptr<Client>`, marshals
-   the reader-thread `on_state` to LVGL) folded into `adb_app`, and the getprop
-   path moved to `Client::exec` (no `AdbConnection` leaked from `adb`). Pulled the
-   `exec` one-shot forward from slice 4 to do this cleanly:
-   [`docs/one-shots.md`](docs/one-shots.md). (Engine change: `AdbConnection`
-   teardown now closes outstanding streams so a one-shot completion fires exactly
-   once.)
+   Owns the RSA key / transport / reader task. Verified in the simulator (libusb)
+   against a real phone via `test/test_client.cpp`. Detail:
+   [`docs/client.md`](docs/client.md).
+2. Wire `app/` onto `Client` + the `exec` one-shot — *done*. The app-global holder
+   (owns the `shared_ptr<Client>`, marshals the reader-thread `on_state` to LVGL)
+   lives in `adb_app`, and the getprop path goes through `Client::exec` (no
+   `AdbConnection` leaked from `adb`). Pulled the `exec` one-shot forward from
+   slice 4 to do this cleanly: [`docs/one-shots.md`](docs/one-shots.md).
+   (`AdbConnection` teardown closes outstanding streams so a one-shot completion
+   fires exactly once.)
 3. **`Shell`** — interactive `shell:` session (and `shell:<cmd>`) — *done*.
    `Client::open_shell(listener, cmd="")` returns a `shared_ptr<Shell>`;
    `ShellListener` delivers `on_shell_data`/`on_shell_close` on the reader thread,

@@ -25,9 +25,9 @@ class Client {
 public:
   // Async connect to the first USB Android device: load/create the RSA identity,
   // open the transport, run CNXN+AUTH on an internal reader task. Returns
-  // immediately; progress arrives via ClientListener::on_state. `listener` must
-  // outlive the Client.
-  static std::shared_ptr<Client> connect_usb(ClientListener* listener);
+  // immediately; progress arrives via ClientListener::on_state. The listener is
+  // held weakly (drop its shared_ptr to detach — see Lifetime in the README).
+  static std::shared_ptr<Client> connect_usb(std::weak_ptr<ClientListener> listener);
 
   ConnectionState    state()  const;   // current state (thread-safe)
   const std::string& banner() const;   // device banner, valid once Online
@@ -37,9 +37,9 @@ public:
             std::function<void(Error, const std::string& output)> cb);  // see docs/one-shots.md
   void screencap(std::function<void(Error, const uint8_t* png, size_t n)> cb);  // [planned]
 
-  // --- sessions (return shared_ptr) ---  [planned]
-  std::shared_ptr<Shell> open_shell(ShellListener*, const std::string& cmd = "");
-  std::shared_ptr<Sync>  open_sync (SyncListener*);
+  // --- sessions (return shared_ptr; listener held weakly) ---
+  std::shared_ptr<Shell> open_shell(std::weak_ptr<ShellListener>, const std::string& cmd = "");
+  std::shared_ptr<Sync>  open_sync (std::weak_ptr<SyncListener>);
 
   // Stop the reader task, close all sessions, cancel all in-flight one-shots
   // (each gets Error::Cancelled). Idempotent. Blocks until the reader task has
@@ -77,8 +77,7 @@ transport error or after `close()`.
   `AdbConnection::stop()` being honored before `run_blocking()` begins (a
   `stop_requested_` gate in `embedded_adb`).
 
-`Client` replaced the provisional `app/adb_session.*`, which is **retired** as of
-slice 2: the app keeps a small holder (in `app/adb_app.cpp`) that owns the
+The app keeps a small holder (in `app/adb_app.cpp`) that owns the
 `shared_ptr<Client>`, implements `ClientListener`, and marshals `on_state` to
 LVGL. The lifecycle + reader task live in `Client`, not the app.
 

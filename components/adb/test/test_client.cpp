@@ -15,6 +15,7 @@
 //       -I$cc/include
 //   g++ -std=c++17 -Iinc -I../embedded_adb/inc -I$cc/include \
 //       test/test_client.cpp src/adb_client.cpp src/adb_error.cpp \
+//       src/adb_shell.cpp src/adb_sync.cpp \
 //       ../embedded_adb/src/adb_protocol.cpp ../embedded_adb/src/adb_crypto.cpp \
 //       ../embedded_adb/src/adb_keystore.cpp ../embedded_adb/src/adb_connection.cpp \
 //       ../embedded_adb/src/adb_stream.cpp ../embedded_adb/src/transport_libusb.cpp \
@@ -27,6 +28,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <thread>
 
 namespace {
@@ -56,17 +58,17 @@ private:
 int main() {
     nvs_flash_sim_set_path("/tmp/adb_test_nvs.json");  // don't touch a real store
 
-    Listener listener;
-    auto client = adb::Client::connect_usb(&listener);
+    auto listener = std::make_shared<Listener>();  // Client holds it weakly
+    auto client = adb::Client::connect_usb(listener);
 
     // Poll for Online (the reader task drives state asynchronously). ~20s budget
     // covers a first-run authorization tap.
-    for (int i = 0; i < 200 && !listener.online(); ++i) {
+    for (int i = 0; i < 200 && !listener->online(); ++i) {
         if (client->state() == adb::ConnectionState::Closed) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    bool ok = listener.online();
+    bool ok = listener->online();
     std::printf("state() = %s, banner empty = %s\n",
                 adb::to_string(client->state()), client->banner().empty() ? "yes" : "no");
 

@@ -70,7 +70,6 @@ public:
   bool is_open() const;   // stream opened and not yet closed
 
   void close();   // end the session (A_CLSE), stop the worker. Idempotent.
-  void detach();  // stop referencing the listener (see Lifetime)
 };
 ```
 
@@ -78,7 +77,8 @@ Created by the factory on `Client`:
 
 ```cpp
 // Open the device's sync service. Returns nullptr if the client is not Online.
-std::shared_ptr<Sync> Client::open_sync(SyncListener* listener);
+// The listener is held weakly (drop its shared_ptr to detach).
+std::shared_ptr<Sync> Client::open_sync(std::weak_ptr<SyncListener> listener);
 ```
 
 ## The `sync:` sub-protocol (what push/stat do on the wire)
@@ -128,12 +128,15 @@ completion fires synchronously on the caller's thread with `Error::Cancelled`.
   `close()`, or with `Error::Cancelled` when `Client::close()` tears the
   connection down (queued-but-unstarted ops are drained with `Cancelled`). An
   op already in flight when the stream drops completes with `StreamClosed`.
-- `on_sync_close` fires **exactly once**, after the last op completion.
+- `on_sync_close` fires **exactly once**, after the last op completion, *if the
+  listener is still alive* (it is delivered through the weak listener ref).
 - `close()` sends `A_CLSE` and joins the worker; idempotent, and safe to call
   from inside a completion (it runs on the worker thread and only signals there —
   no self-join). The destructor calls `close()`.
-- Before destroying the listener, call `close()` **and** `detach()`. `detach()`
-  stops referencing the listener; don't call it from within a callback.
+- The `Sync` holds the listener as a `weak_ptr`. To detach, just **drop the
+  listener's `shared_ptr`** — `fire_close_once()` `lock()`s the weak ref and skips
+  if it has expired, so there is no `detach()`. Typical teardown: `close()` to
+  stop the worker, then let the listener be destroyed.
 
 ## v1 limitations (intentional)
 
