@@ -52,14 +52,14 @@ void AdbConnection::send_connect() {
 }
 
 void AdbConnection::run_blocking() {
-    if (!transport_) {
+    if (!transport_ || stop_requested_.load()) {
         set_state(ConnectionState::Closed);
         return;
     }
     running_ = true;
     send_connect();
 
-    while (running_) {
+    while (running_ && !stop_requested_.load()) {
         Packet p;
         IoResult r = transport_->read_packet(p);
         if (r == IoResult::Timeout) {
@@ -76,7 +76,10 @@ void AdbConnection::run_blocking() {
     set_state(ConnectionState::Closed);
 }
 
-void AdbConnection::stop() { running_ = false; }
+void AdbConnection::stop() {
+    stop_requested_.store(true);
+    running_ = false;
+}
 
 void AdbConnection::handle_packet(Packet& p) {
     switch (p.header.command) {

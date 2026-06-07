@@ -4,6 +4,7 @@
 // top in adb_stream (P5).
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
@@ -49,6 +50,8 @@ public:
     void run_blocking();
 
     // Ask the read loop to exit (callable from another thread / a callback).
+    // Honored even if called *before* run_blocking() starts: a stop that lands in
+    // that window makes run_blocking() return immediately instead of looping.
     void stop();
 
     ConnectionState state() const { return state_; }
@@ -98,6 +101,7 @@ private:
     std::string banner_;
     uint32_t max_payload_;  // our advertised CNXN.arg1, then negotiated min
     bool running_ = false;
+    std::atomic<bool> stop_requested_{false};  // stop() before/while run_blocking()
 
     bool sent_signature_ = false;  // tried signing with our key
     bool sent_pubkey_ = false;     // sent the public key (prompted the user)

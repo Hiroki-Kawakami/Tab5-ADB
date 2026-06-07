@@ -74,6 +74,10 @@ components/                  # SHARED  (both targets)
   embedded_adb/              #   ADB host-side client (C++) — usb_host vs libusb split
     inc/                     #     public API (embedded_adb.hpp, adb_protocol.hpp)
     src/                     #     protocol/crypto/keystore/connection/stream + transport_*
+  adb/                       #   app-facing object API over embedded_adb (Client/Shell/Sync)
+    inc/                     #     adb.hpp umbrella + adb_client.hpp, adb_error.hpp
+    src/  test/              #     impl + host test
+    README.md  docs/         #     README = front door; docs/<surface>.md = per-surface spec
 esp32p4/                     # DEVICE build root (IDF project)
   main/                      #   entry point (app_main + device LVGL runtime via esp_lvgl_port)
 simulator/                   # SIMULATOR build root (see below)
@@ -307,6 +311,48 @@ over USB-C. `idf.py monitor` needs a TTY, so capture the boot log by resetting v
 RTS and reading the port with a short PySerial script (the P4 prints logs only
 once after reset). The full ADB host stack was verified end-to-end on the real
 Tab5 + an Android phone (claim → auth → `shell:` output).
+
+### The `adb` component (app-facing object API — in progress)
+
+The layer the app actually drives, on top of `embedded_adb`. Where
+`embedded_adb` is the thread-agnostic protocol engine, **`adb` owns the
+connection lifecycle** (RSA key, USB transport, the reader task) and exposes a
+typed, object-oriented surface. It's a **separate component** (not folded into
+`embedded_adb`) so the engine keeps its `std::thread`-only host unit tests while
+`adb` is free to use the FreeRTOS API (`xTaskCreate`) for the reader task — works
+on both targets (real kernel on device, pthread compat in the sim). It shares
+`namespace adb`; high-level names (`Client`/`Shell`/`Sync`) don't collide with
+the engine's (`AdbConnection`/`AdbStream`/`Packet`). No source split — all
+portable C++ over `embedded_adb` + FreeRTOS, one `idf_component_register`.
+
+**Docs: `components/adb/README.md` is the front door** (overview + the
+cross-cutting rules every API obeys + roadmap); **per-surface detail lives in
+`components/adb/docs/<surface>.md`** (e.g. `docs/client.md`), one file per API
+surface, grown slice by slice. **Write/update the relevant doc before
+implementing.** The agreed design (read the docs for the full contract):
+- **Archetypes:** *sessions* (long-lived: `Shell`, `Sync`) use an abstract-class
+  listener with the originating object as the **first callback arg** (one
+  listener serves multiple objects); *one-shots* (`screencap`, `exec`, each
+  `Sync` op) use a `std::function` completion (the closure is the correlation, no
+  tag). Filesystem = the `sync:` stream is itself a session whose *methods* are
+  one-shot-style.
+- **Threading:** all callbacks fire on the reader thread; **marshalling to LVGL
+  is the app's job** (the library never touches LVGL). Methods are non-blocking
+  and callable from any thread (e.g. `Shell::write()` enqueues, returns
+  `adb::Error`; backpressure → `Error::QueueFull`).
+- **Lifetime:** sessions are `shared_ptr`; every terminal callback (`on_*_close`
+  / one-shot completion) fires **exactly once** (incl. `Error::Cancelled` from
+  `Client::close()`); detach the listener before destroying it.
+
+Built incrementally in commit-sized slices (see the roadmap in the component
+`README.md`). Slice 1
+(done): `Client::connect_usb()` + `state()`/`banner()` + `close()` — replaces the
+setup half of `app/adb_session.cpp`; verified by `test/test_client.cpp` (libusb
+vs a real phone, same harness pattern as `embedded_adb/test`). `Client` runs the
+read loop on an internal FreeRTOS task and joins it in `close()`/dtor; this relies
+on `AdbConnection::stop()` being honored even **before** `run_blocking()` starts
+(a `stop_requested_` gate added for race-free teardown). Later slices add `Shell`,
+the one-shots, and `Sync`, and rewire the UI off `adb_session`.
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen)
 

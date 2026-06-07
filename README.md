@@ -51,7 +51,9 @@ Notes:
   device `.c` and a simulator `_sim.cpp`), `lvgl++/` (C++ helpers over LVGL),
   `screen_manager/` (screen stack / navigation), `embedded_adb/` (ADB host-side
   client library in C++ — portable protocol/crypto/auth with a USB transport that
-  splits esp-idf `usb_host` on device vs `libusb` in the simulator).
+  splits esp-idf `usb_host` on device vs `libusb` in the simulator), and `adb/`
+  (the app-facing object API over `embedded_adb` — owns the connection lifecycle
+  and exposes `Client`/`Shell`/`Sync`; see `components/adb/README.md`).
 - `esp32p4/` — device build root (IDF project): `main/` is the entry point
   (`app_main` + device LVGL runtime via esp_lvgl_port).
 - `simulator/` — host SDL2/LVGL build of `app/`: `platform/` is the SDL/LVGL
