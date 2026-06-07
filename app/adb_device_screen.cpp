@@ -1,13 +1,15 @@
 #include "adb_device_screen.hpp"
 
+#include <functional>
 #include <memory>
 #include <string>
-#include <vector>
+#include <utility>
 
-#include "adb.hpp"  // adb::Client, adb::Error
+#include "adb.hpp"  // adb::Client
 #include "adb_app.hpp"
 #include "adb_shell_screen.hpp"
 #include "screen_manager.hpp"
+#include "resources/resources.h"
 
 namespace {
 
@@ -17,98 +19,108 @@ std::string banner_field(const std::string &banner, const std::string &key) {
     std::string body = sep == std::string::npos ? banner : banner.substr(sep + 2);
     std::string needle = key + "=";
     auto pos = body.find(needle);
-    if (pos == std::string::npos) return "?";
+    if (pos == std::string::npos) return "";
     pos += needle.size();
     auto end = body.find(';', pos);
     return body.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
 }
 
-// Split shell output into lines, dropping \r so \n / \r\n both work.
-std::vector<std::string> split_lines(const std::string &s) {
-    std::vector<std::string> lines;
-    std::string cur;
-    for (char ch : s) {
-        if (ch == '\n') { lines.push_back(cur); cur.clear(); }
-        else if (ch != '\r') cur += ch;
-    }
-    if (!cur.empty()) lines.push_back(cur);
-    return lines;
-}
-
 }  // namespace
 
 void ADBDeviceScreen::build() {
-    lv_obj_set_size(root_, PANEL_W, PANEL_H);
-    lv_obj_set_style_bg_color(root_, lv_color_hex(0x101418), 0);
+    lv_obj_set_style_bg_color(root_, lv_color_hex(0xeeeeee), 0);
     lv_obj_set_flex_flow(root_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(root_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(root_, 24, 0);
-    lv_obj_set_style_pad_row(root_, 16, 0);
+    lv_obj_set_style_pad_row(root_, 24, 0);
 
+    createHeader();
+    control_container_ = lv_obj_create(root_);
+    lv_obj_remove_style_all(control_container_);
+    lv_obj_set_size(control_container_, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(control_container_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(control_container_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(control_container_, 24, 0);
+    createPreviewContainer();
+    createToolsContainer();
+}
+
+void ADBDeviceScreen::createHeader() {
+    // ---- Device summary, parsed from the CNXN banner (no live ADB calls) ----
     adb::Client *client = app::adb_client();
     static const std::string kNoBanner;
     const std::string &banner = client ? client->banner() : kNoBanner;
+    std::string model = banner_field(banner, "ro.product.model");
+    if (model.empty()) model = "ADB Device";
+    std::string device = banner_field(banner, "ro.product.device");
 
-    lv_obj_t *title = lv_label_create(root_);
-    lv_label_set_text(title, "Connected");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x4caf50), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    if (header_) lv_obj_delete(header_);
+    header_ = lv_obj_create(root_);
+    lv_obj_set_size(header_, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(header_, 20, 0);
+    lv_obj_add_flag(header_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(header_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(header_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_event_fn(header_, LV_EVENT_CLICKED, [](lv_event_t *) {
+        // screen_manager.push(std::make_unique<PlaceholderScreen>("Device Info"));
+    });
+    lv_obj_set_flex_flow(header_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    auto add_row = [&](const char *caption, const std::string &value) {
-        lv_obj_t *l = lv_label_create(root_);
-        lv_label_set_text(l, (std::string(caption) + value).c_str());
-        lv_obj_set_style_text_color(l, lv_color_hex(0xffffff), 0);
-        lv_obj_set_width(l, PANEL_W - 48);
-        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    auto label = lv_label_create(header_);
+    lv_label_set_text(label, model.c_str());
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+
+    auto chevron = lv_label_create(header_);
+    lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_font(chevron, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(chevron, lv_color_hex(0xe0e0e0), 0);
+}
+
+void ADBDeviceScreen::createPreviewContainer() {
+    const int width = 360;
+    if (preview_container_) lv_obj_delete(preview_container_);
+    preview_container_ = lv_obj_create(control_container_);
+    lv_obj_remove_style_all(preview_container_);
+    lv_obj_set_size(preview_container_, width, LV_SIZE_CONTENT);
+    preview_image_ = lv_image_create(preview_container_);
+    lv_obj_set_size(preview_image_, LV_PCT(100), width / 9 * 20);
+    lv_obj_set_style_bg_color(preview_image_, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(preview_image_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(preview_image_, 12, 0);
+}
+
+void ADBDeviceScreen::createToolsContainer() {
+    if (tools_container_) lv_obj_delete(tools_container_);
+    tools_container_ = lv_obj_create(control_container_);
+    lv_obj_remove_style_all(tools_container_);
+    lv_obj_set_size(tools_container_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(tools_container_, 1);
+    lv_obj_set_flex_flow(tools_container_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(tools_container_, 16, 0);
+
+    auto tool_button = [this](const char *icon, const char *title, std::function<void(lv_event_t*)> callback){
+        auto button = lv_button_create(tools_container_);
+        lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
+        lv_obj_set_size(button, LV_PCT(100), 80);
+        lv_obj_set_flex_align(button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(button, 12, 0);
+        lv_obj_add_event_fn(button, LV_EVENT_CLICKED, callback);
+
+        auto icon_label = lv_label_create(button);
+        lv_label_set_text(icon_label, icon);
+        lv_obj_set_style_text_font(icon_label, R.font.lucide_40, 0);
+
+        auto title_label = lv_label_create(button);
+        lv_label_set_text(title_label, title);
+        lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
     };
-
-    add_row("Model: ", banner_field(banner, "ro.product.model"));
-    add_row("Name: ", banner_field(banner, "ro.product.name"));
-    add_row("Device: ", banner_field(banner, "ro.product.device"));
-
-    // Live props (filled in asynchronously).
-    props_label_ = lv_label_create(root_);
-    lv_label_set_text(props_label_, "Reading device properties...");
-    lv_obj_set_style_text_color(props_label_, lv_color_hex(0xb0bec5), 0);
-    lv_obj_set_width(props_label_, PANEL_W - 48);
-    lv_label_set_long_mode(props_label_, LV_LABEL_LONG_WRAP);
-
-    // One exec (commands chained with ';') returns four newline-separated values.
-    // The completion fires on the reader thread, so marshal the label update to
-    // LVGL. The screen is terminal (no back nav), so props_label_ stays valid.
-    lv_obj_t *label = props_label_;
-    if (!client) {
-        lv_label_set_text(label, "(no connection)");
-        return;
-    }
-
-    // Open the interactive terminal (ADBShellScreen) on top.
-    lv_obj_t *term_btn = lv_button_create(root_);
-    lv_obj_set_size(term_btn, 260, 80);
-    lv_obj_t *term_lbl = lv_label_create(term_btn);
-    lv_label_set_text(term_lbl, LV_SYMBOL_KEYBOARD " Open Terminal");
-    lv_obj_center(term_lbl);
-    lv_obj_add_event_fn(term_btn, LV_EVENT_CLICKED, [](lv_event_t *) {
+    tool_button(LUCIDE_SQUARE_TERMINAL, "Shell", [](lv_event_t*){
         screen_manager.push(std::make_unique<ADBShellScreen>());
     });
-
-    client->exec(
-        "getprop ro.build.version.release; getprop ro.build.version.sdk; "
-        "getprop ro.product.manufacturer; getprop ro.serialno",
-        [label](adb::Error err, const std::string &out) {
-            std::string text;
-            if (err == adb::Error::Ok) {
-                auto lines = split_lines(out);
-                auto field = [&](size_t i) {
-                    return i < lines.size() ? lines[i] : std::string("?");
-                };
-                text = "Android " + field(0) + "  (SDK " + field(1) + ")\n" +
-                       "Manufacturer: " + field(2) + "\n" +
-                       "Serial: " + field(3);
-            } else {
-                text = "(failed to read properties)";
-            }
-            lv_async_call([label, text]() { lv_label_set_text(label, text.c_str()); });
-        });
+    tool_button(LUCIDE_FOLDER_CLOSED, "File Manager", [](lv_event_t*){});
+    tool_button(LUCIDE_LAYOUT_GRID, "Apps", [](lv_event_t*){});
+    tool_button(LUCIDE_LOGS, "Logcat", [](lv_event_t*){});
+    tool_button(LUCIDE_POWER, "Power Menu", [](lv_event_t*){});
+    tool_button(LUCIDE_UNPLUG, "Disconect", [](lv_event_t*){});
 }
