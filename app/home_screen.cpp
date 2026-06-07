@@ -39,7 +39,7 @@ void HomeScreen::start_connect() {
 
     app::adb_connect_async([this](bool ok) {
         if (ok) {
-            screen_manager.push(std::make_unique<ADBDeviceScreen>());
+            screen_manager.push(std::make_shared<ADBDeviceScreen>());
         } else {
             lv_obj_remove_state(connect_btn_, LV_STATE_DISABLED);
             lv_label_set_text(status_label_, "Connection failed. Tap Connect to retry.");

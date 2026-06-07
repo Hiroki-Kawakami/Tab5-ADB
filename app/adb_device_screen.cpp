@@ -116,7 +116,7 @@ void ADBDeviceScreen::createToolsContainer() {
         lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
     };
     tool_button(LUCIDE_SQUARE_TERMINAL, "Shell", [](lv_event_t*){
-        screen_manager.push(std::make_unique<ADBShellScreen>());
+        screen_manager.push(std::make_shared<ADBShellScreen>());
     });
     tool_button(LUCIDE_FOLDER_CLOSED, "File Manager", [](lv_event_t*){});
     tool_button(LUCIDE_LAYOUT_GRID, "Apps", [](lv_event_t*){});

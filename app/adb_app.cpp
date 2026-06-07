@@ -104,7 +104,7 @@ void adb_app() {
 
     lvgl_setup();
     lv_async_call([](){
-        screen_manager.push(std::make_unique<HomeScreen>());
+        screen_manager.push(std::make_shared<HomeScreen>());
     });
     bsp_display_set_brightness(80);
 }

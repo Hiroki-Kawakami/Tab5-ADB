@@ -1,7 +1,8 @@
 #pragma once
+#include <memory>
 #include "lvgl.hpp"
 
-class Screen {
+class Screen : public std::enable_shared_from_this<Screen> {
 public:
     lv_obj_t *root_;
 
@@ -17,4 +18,10 @@ public:
     virtual void onExit()   {}
     virtual void onAppear()  {}
     virtual void onDisappear() {}
+
+    bool exited() const { return exited_; }
+
+private:
+    friend class ScreenManager;
+    bool exited_ = false;
 };

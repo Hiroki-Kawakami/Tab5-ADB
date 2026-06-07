@@ -1,9 +1,10 @@
 #include "screen_manager.hpp"
 
-void ScreenManager::load(std::unique_ptr<Screen> screen) {
+void ScreenManager::load(std::shared_ptr<Screen> screen) {
     if (!stack_.empty()) {
         stack_.back()->onDisappear();
         while (!stack_.empty()) {
+            stack_.back()->exited_ = true;
             stack_.back()->onExit();
             stack_.pop_back();
         }
@@ -11,7 +12,7 @@ void ScreenManager::load(std::unique_ptr<Screen> screen) {
     push(std::move(screen));
 }
 
-void ScreenManager::push(std::unique_ptr<Screen> screen) {
+void ScreenManager::push(std::shared_ptr<Screen> screen) {
     if (!stack_.empty()) stack_.back()->onDisappear();
     switch_theme(screen->theme());
     if (!screen->root_) {
@@ -27,8 +28,8 @@ void ScreenManager::push(std::unique_ptr<Screen> screen) {
 void ScreenManager::pop() {
     if (stack_.size() < 2) return;
     stack_.back()->onDisappear();
+    stack_.back()->exited_ = true;
     stack_.back()->onExit();
-    auto screen = std::move(stack_.back());
     stack_.pop_back();
 
     switch_theme(stack_.back()->theme());
@@ -41,6 +42,7 @@ void ScreenManager::top() {
     if (stack_.size() > 1) {
         stack_.back()->onDisappear();
         while (stack_.size() > 1) {
+            stack_.back()->exited_ = true;
             stack_.back()->onExit();
             stack_.pop_back();
         }

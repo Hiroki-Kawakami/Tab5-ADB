@@ -13,9 +13,10 @@
 //
 // The screen IS the adb::ShellListener. Shell callbacks fire on the reader
 // thread; this marshals every UI update to the LVGL thread with lv_async_call.
-// Teardown (onExit, before the screen object is destroyed) closes + detaches the
-// shell so no callback outlives the listener, and an `alive` flag shared into the
-// marshalling lambdas keeps already-queued updates from touching freed widgets.
+// Each marshalling lambda captures `self = shared_from_this()` (keeping the
+// screen alive until it drains on the LVGL thread) and skips the update when the
+// base Screen::exited() flag is set — so updates queued before teardown never
+// touch freed widgets.
 class ADBShellScreen : public Screen, public adb::ShellListener {
 public:
     ADBShellScreen();
@@ -46,9 +47,4 @@ private:
     lv_obj_t *output_ = nullptr;    // read-only terminal text area
     lv_obj_t *input_ = nullptr;     // single-line input
     lv_obj_t *keyboard_ = nullptr;  // on-screen keyboard
-
-    // Set false on the LVGL thread in onExit; checked inside marshalled lambdas so
-    // updates queued before teardown skip the (now-freed) widgets. Shared into the
-    // lambdas so reading it stays valid after the screen object is gone.
-    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };

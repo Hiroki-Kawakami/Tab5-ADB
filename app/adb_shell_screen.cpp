@@ -57,7 +57,6 @@ ADBShellScreen::~ADBShellScreen() {
     // onExit normally runs first (pop()/load()), but guard against a destroy
     // without it: close()+detach() must happen before the listener (this) dies.
     if (shell_) {
-        *alive_ = false;
         shell_->close();
         shell_->detach();
         shell_.reset();
@@ -135,9 +134,9 @@ void ADBShellScreen::build() {
 }
 
 void ADBShellScreen::onExit() {
-    // Runs on the LVGL thread before the screen object is destroyed. Stop UI
-    // updates first, then close()+detach() so no Shell callback outlives `this`.
-    *alive_ = false;
+    // Runs on the LVGL thread before the screen object is destroyed (exited() is
+    // already set). close()+detach() so no Shell callback outlives `this`; any
+    // update already marshalled sees exited() and skips the freed widgets.
     if (shell_) {
         shell_->close();
         shell_->detach();
@@ -194,9 +193,10 @@ void ADBShellScreen::on_shell_data(adb::Shell * /*sh*/, const uint8_t *data,
     }
     if (!need_schedule) return;  // a flush is already queued; it'll see this data
 
-    auto alive = alive_;
-    lv_async_call([this, alive]() {
-        if (!*alive) return;  // screen torn down; widgets gone
+    // Strong `self` keeps the screen alive until this runs on the LVGL thread,
+    // where the last ref drops; exited() skips the freed widgets after teardown.
+    lv_async_call([self = shared_from_this(), this]() {
+        if (exited()) return;
         flush_output();
     });
 }
@@ -209,9 +209,8 @@ void ADBShellScreen::on_shell_close(adb::Shell * /*sh*/, adb::Error /*err*/) {
         pending_out_ += "\n[shell closed]\n";
         flush_scheduled_ = true;
     }
-    auto alive = alive_;
-    lv_async_call([this, alive]() {
-        if (!*alive) return;
+    lv_async_call([self = shared_from_this(), this]() {
+        if (exited()) return;
         flush_output();
         if (input_) lv_obj_add_state(input_, LV_STATE_DISABLED);
     });
