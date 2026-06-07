@@ -360,8 +360,18 @@ thread, see `docs/one-shots.md`) plus rewiring the UI onto `Client` —
 `app/adb_session.*` is **retired** (the holder folded into `adb_app`; getprops go
 through `exec`, so `adb` no longer leaks an `AdbConnection`). To make a one-shot
 completion fire **exactly once**, `AdbConnection::run_blocking()` teardown now
-closes outstanding streams (and `AdbStream::mark_closed()` is idempotent). Later
-slices add `Shell`, `screencap`, and `Sync`.
+closes outstanding streams (and `AdbStream::mark_closed()` is idempotent).
+**Slice 3** (done): the `Shell` session — `Client::open_shell(listener, cmd="")`
+returns a `shared_ptr<Shell>` (an interactive PTY `shell:` when `cmd` is empty,
+`shell:<cmd>` otherwise); `ShellListener` delivers `on_shell_data`/`on_shell_close`
+(exactly once) on the reader thread, and non-blocking `Shell::write()` enqueues to
+a **per-Shell writer task** that owns the blocking `AdbStream::write()` (one
+`A_WRTE` per `A_OKAY`) — so the engine stays thread-agnostic while the `adb` layer
+spends a FreeRTOS task on it. Backpressure → `Error::QueueFull` past a ~64 KB
+per-stream cap; `detach()` synchronizes with the reader thread (takes the dispatch
+lock) so no callback touches the listener after it returns. See `docs/shell.md`;
+verified by `test/test_shell.cpp` (libusb vs a real phone). Later slices add
+`screencap` and `Sync`.
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen)
 

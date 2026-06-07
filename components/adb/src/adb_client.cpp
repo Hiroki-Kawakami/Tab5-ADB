@@ -105,6 +105,17 @@ void Client::exec(const std::string& cmd, ExecCb cb) {
     }
 }
 
+std::shared_ptr<Shell> Client::open_shell(ShellListener* listener,
+                                          const std::string& cmd) {
+    AdbConnection* conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(life_mtx_);
+        if (!closing_) conn = conn_.get();
+    }
+    if (!conn || conn->state() != ConnectionState::Online) return nullptr;
+    return Shell::create(conn, cmd, listener);
+}
+
 void Client::close() {
     SemaphoreHandle_t done = nullptr;
     {

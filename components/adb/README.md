@@ -31,7 +31,7 @@ API surface, grown slice by slice as each is implemented:
 |---|---|---|
 | `Client` — connect + lifecycle, the factory | [`docs/client.md`](docs/client.md) | implemented (slice 1) |
 | `exec` / `screencap` — one-shots | [`docs/one-shots.md`](docs/one-shots.md) | `exec` implemented (slice 2); `screencap` planned |
-| `Shell` — interactive shell session | `docs/shell.md` | planned (slice 3) |
+| `Shell` — interactive shell session | [`docs/shell.md`](docs/shell.md) | implemented (slice 3) |
 | `Sync` — filesystem session | `docs/sync.md` | planned (slice 5) |
 
 When you implement a surface, write its `docs/*.md` **before** the code and link
@@ -123,9 +123,13 @@ bytes exceed the per-stream cap (initial cap ≈ 64 KB; see implementation).
    [`docs/one-shots.md`](docs/one-shots.md). (Engine change: `AdbConnection`
    teardown now closes outstanding streams so a one-shot completion fires exactly
    once.)
-3. **`Shell`** — interactive `shell:` session (and `shell:<cmd>`): session object,
-   `ShellListener` (`on_shell_data`/`on_shell_close`), non-blocking `write()`.
-   → write `docs/shell.md`.
+3. **`Shell`** — interactive `shell:` session (and `shell:<cmd>`) — *done*.
+   `Client::open_shell(listener, cmd="")` returns a `shared_ptr<Shell>`;
+   `ShellListener` delivers `on_shell_data`/`on_shell_close` on the reader thread,
+   and non-blocking `write()` enqueues to an internal writer task that owns the
+   blocking `AdbStream::write()` (one `A_WRTE` per `A_OKAY`) — keeping the engine
+   thread-agnostic. Verified by `test/test_shell.cpp` (libusb vs a real phone).
+   Detail: [`docs/shell.md`](docs/shell.md).
 4. **`screencap`** — the remaining one-shot (PNG capture), same shape as `exec`.
    → extend `docs/one-shots.md`.
 5. **`Sync`** — `sync:` filesystem session; methods one-shot style

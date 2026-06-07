@@ -19,6 +19,7 @@
 
 #include "adb_connection.hpp"  // adb::ConnectionState, adb::AdbConnection
 #include "adb_error.hpp"       // adb::Error
+#include "adb_shell.hpp"       // adb::Shell, adb::ShellListener
 
 namespace adb {
 
@@ -59,6 +60,15 @@ public:
     // when not Online). See docs/one-shots.md.
     using ExecCb = std::function<void(Error, const std::string& output)>;
     void exec(const std::string& cmd, ExecCb cb);
+
+    // Session: open an interactive `shell:` (empty cmd -> a PTY shell) or run a
+    // single command (cmd = "ls" -> shell:ls). Returns a shared_ptr immediately
+    // (before the device's A_OKAY); use Shell::write()/close() to interact and
+    // ShellListener for output/close. nullptr if the client is not Online.
+    // `listener` may serve several shells; detach it before destroying it.
+    // See docs/shell.md.
+    std::shared_ptr<Shell> open_shell(ShellListener* listener,
+                                      const std::string& cmd = "");
 
     // Stop the reader task and release the connection. Idempotent. Blocks until
     // the reader task has exited (so no callback fires after it returns) — except

@@ -10,3 +10,4 @@
 
 #include "adb_client.hpp"
 #include "adb_error.hpp"
+#include "adb_shell.hpp"
