@@ -32,14 +32,14 @@ public:
   ConnectionState    state()  const;   // current state (thread-safe)
   const std::string& banner() const;   // device banner, valid once Online
 
+  // --- one-shots (std::function completion) ---
+  void exec(const std::string& cmd,
+            std::function<void(Error, const std::string& output)> cb);  // see docs/one-shots.md
+  void screencap(std::function<void(Error, const uint8_t* png, size_t n)> cb);  // [planned]
+
   // --- sessions (return shared_ptr) ---  [planned]
   std::shared_ptr<Shell> open_shell(ShellListener*, const std::string& cmd = "");
   std::shared_ptr<Sync>  open_sync (SyncListener*);
-
-  // --- one-shots (std::function completion) ---  [planned]
-  void screencap(std::function<void(Error, const uint8_t* png, size_t n)> cb);
-  void exec(const std::string& cmd,
-            std::function<void(Error, const std::string& output)> cb);
 
   // Stop the reader task, close all sessions, cancel all in-flight one-shots
   // (each gets Error::Cancelled). Idempotent. Blocks until the reader task has
@@ -77,9 +77,10 @@ transport error or after `close()`.
   `AdbConnection::stop()` being honored before `run_blocking()` begins (a
   `stop_requested_` gate in `embedded_adb`).
 
-`Client` replaces the connection-setup half of the provisional
-`app/adb_session.cpp`; once the UI is rewired onto it (slice 2), `adb_session.cpp`
-is retired.
+`Client` replaced the provisional `app/adb_session.*`, which is **retired** as of
+slice 2: the app keeps a small holder (in `app/adb_app.cpp`) that owns the
+`shared_ptr<Client>`, implements `ClientListener`, and marshals `on_state` to
+LVGL. The lifecycle + reader task live in `Client`, not the app.
 
 ## Test
 

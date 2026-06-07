@@ -4,7 +4,6 @@
 
 #include "adb_app.hpp"
 #include "adb_device_screen.hpp"
-#include "adb_session.hpp"
 #include "screen_manager.hpp"
 
 void HomeScreen::build() {

@@ -30,8 +30,8 @@ API surface, grown slice by slice as each is implemented:
 | Surface | Detail | Status |
 |---|---|---|
 | `Client` — connect + lifecycle, the factory | [`docs/client.md`](docs/client.md) | implemented (slice 1) |
+| `exec` / `screencap` — one-shots | [`docs/one-shots.md`](docs/one-shots.md) | `exec` implemented (slice 2); `screencap` planned |
 | `Shell` — interactive shell session | `docs/shell.md` | planned (slice 3) |
-| `screencap` / `exec` — one-shots | `docs/one-shots.md` | planned (slice 4) |
 | `Sync` — filesystem session | `docs/sync.md` | planned (slice 5) |
 
 When you implement a surface, write its `docs/*.md` **before** the code and link
@@ -115,13 +115,18 @@ bytes exceed the per-stream cap (initial cap ≈ 64 KB; see implementation).
    Owns the RSA key / transport / reader task; replaces the setup half of
    `app/adb_session.cpp`. Verified in the simulator (libusb) against a real phone
    via `test/test_client.cpp`. Detail: [`docs/client.md`](docs/client.md).
-2. Rewire `app/` (`home_screen` / `adb_device_screen`) onto `Client`, retiring
-   `app/adb_session.cpp`.
+2. Rewire `app/` onto `Client` + the `exec` one-shot — *done*. `app/adb_session.*`
+   is **retired**: the app-global holder (owns the `shared_ptr<Client>`, marshals
+   the reader-thread `on_state` to LVGL) folded into `adb_app`, and the getprop
+   path moved to `Client::exec` (no `AdbConnection` leaked from `adb`). Pulled the
+   `exec` one-shot forward from slice 4 to do this cleanly:
+   [`docs/one-shots.md`](docs/one-shots.md). (Engine change: `AdbConnection`
+   teardown now closes outstanding streams so a one-shot completion fires exactly
+   once.)
 3. **`Shell`** — interactive `shell:` session (and `shell:<cmd>`): session object,
    `ShellListener` (`on_shell_data`/`on_shell_close`), non-blocking `write()`.
    → write `docs/shell.md`.
-4. **`screencap` / `exec`** — one-shots on `Client` with `std::function`
-   completion (`exec` returns output only in v1; no exit code yet).
-   → write `docs/one-shots.md`.
+4. **`screencap`** — the remaining one-shot (PNG capture), same shape as `exec`.
+   → extend `docs/one-shots.md`.
 5. **`Sync`** — `sync:` filesystem session; methods one-shot style
    (`stat`/`list`/`pull` first, `push` later). → write `docs/sync.md`.

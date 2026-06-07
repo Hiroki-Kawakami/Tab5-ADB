@@ -73,6 +73,19 @@ void AdbConnection::run_blocking() {
     }
 
     running_ = false;
+
+    // Close any still-open streams so their owners get a terminal callback
+    // (one-shot completions / session on_close fire exactly once on teardown).
+    // Copy out and clear under the lock, then notify outside it so an on_close
+    // that re-enters the connection can't deadlock on streams_mtx_.
+    std::vector<std::shared_ptr<AdbStream>> pending;
+    {
+        std::lock_guard<std::mutex> lk(streams_mtx_);
+        for (auto& kv : streams_) pending.push_back(kv.second);
+        streams_.clear();
+    }
+    for (auto& s : pending) s->mark_closed();
+
     set_state(ConnectionState::Closed);
 }
 

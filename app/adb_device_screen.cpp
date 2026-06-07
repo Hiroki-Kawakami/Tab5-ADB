@@ -1,12 +1,10 @@
 #include "adb_device_screen.hpp"
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-
 #include <string>
+#include <vector>
 
+#include "adb.hpp"  // adb::Client, adb::Error
 #include "adb_app.hpp"
-#include "adb_session.hpp"
 
 namespace {
 
@@ -22,32 +20,16 @@ std::string banner_field(const std::string &banner, const std::string &key) {
     return body.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
 }
 
-void strip_eol(std::string &s) {
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-}
-
-// Background: pull a few props over a shell stream, then update the label on the
-// LVGL thread. The screen is terminal (no back nav) so the label stays valid.
-void props_worker(void *arg) {
-    auto *label = static_cast<lv_obj_t *>(arg);
-    auto *conn = app::adb_connection();
-    std::string text;
-    if (conn) {
-        auto getprop = [&](const char *prop) {
-            std::string out;
-            conn->run_service(std::string("shell:getprop ") + prop, out, 5000);
-            strip_eol(out);
-            return out;
-        };
-        text = "Android " + getprop("ro.build.version.release") +
-               "  (SDK " + getprop("ro.build.version.sdk") + ")\n" +
-               "Manufacturer: " + getprop("ro.product.manufacturer") + "\n" +
-               "Serial: " + getprop("ro.serialno");
-    } else {
-        text = "(no connection)";
+// Split shell output into lines, dropping \r so \n / \r\n both work.
+std::vector<std::string> split_lines(const std::string &s) {
+    std::vector<std::string> lines;
+    std::string cur;
+    for (char ch : s) {
+        if (ch == '\n') { lines.push_back(cur); cur.clear(); }
+        else if (ch != '\r') cur += ch;
     }
-    lv_async_call([label, text]() { lv_label_set_text(label, text.c_str()); });
-    vTaskDelete(nullptr);
+    if (!cur.empty()) lines.push_back(cur);
+    return lines;
 }
 
 }  // namespace
@@ -61,7 +43,9 @@ void ADBDeviceScreen::build() {
     lv_obj_set_style_pad_all(root_, 24, 0);
     lv_obj_set_style_pad_row(root_, 16, 0);
 
-    const std::string &banner = app::adb_banner();
+    adb::Client *client = app::adb_client();
+    static const std::string kNoBanner;
+    const std::string &banner = client ? client->banner() : kNoBanner;
 
     lv_obj_t *title = lv_label_create(root_);
     lv_label_set_text(title, "Connected");
@@ -87,5 +71,30 @@ void ADBDeviceScreen::build() {
     lv_obj_set_width(props_label_, PANEL_W - 48);
     lv_label_set_long_mode(props_label_, LV_LABEL_LONG_WRAP);
 
-    xTaskCreate(props_worker, "adb_props", 8192, props_label_, 5, nullptr);
+    // One exec (commands chained with ';') returns four newline-separated values.
+    // The completion fires on the reader thread, so marshal the label update to
+    // LVGL. The screen is terminal (no back nav), so props_label_ stays valid.
+    lv_obj_t *label = props_label_;
+    if (!client) {
+        lv_label_set_text(label, "(no connection)");
+        return;
+    }
+    client->exec(
+        "getprop ro.build.version.release; getprop ro.build.version.sdk; "
+        "getprop ro.product.manufacturer; getprop ro.serialno",
+        [label](adb::Error err, const std::string &out) {
+            std::string text;
+            if (err == adb::Error::Ok) {
+                auto lines = split_lines(out);
+                auto field = [&](size_t i) {
+                    return i < lines.size() ? lines[i] : std::string("?");
+                };
+                text = "Android " + field(0) + "  (SDK " + field(1) + ")\n" +
+                       "Manufacturer: " + field(2) + "\n" +
+                       "Serial: " + field(3);
+            } else {
+                text = "(failed to read properties)";
+            }
+            lv_async_call([label, text]() { lv_label_set_text(label, text.c_str()); });
+        });
 }

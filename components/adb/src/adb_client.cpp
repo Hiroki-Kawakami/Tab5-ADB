@@ -76,6 +76,35 @@ void Client::set_state(ConnectionState s) {
     if (listener_) listener_->on_state(this, s);
 }
 
+void Client::exec(const std::string& cmd, ExecCb cb) {
+    AdbConnection* conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(life_mtx_);
+        if (!closing_) conn = conn_.get();
+    }
+    if (!conn || conn->state() != ConnectionState::Online) {
+        if (cb) cb(Error::NotConnected, std::string());
+        return;
+    }
+
+    // Accumulate output on the reader thread; complete once when the stream
+    // closes (peer A_CLSE or connection teardown — both fire on_close exactly
+    // once). The shared buffer / cb outlive this call via the stream's callbacks.
+    auto buf = std::make_shared<std::string>();
+    auto sink = std::make_shared<ExecCb>(std::move(cb));
+    auto stream = conn->open_stream(
+        "shell:" + cmd,
+        [buf](const uint8_t* d, size_t n) {
+            buf->append(reinterpret_cast<const char*>(d), n);
+        },
+        [buf, sink]() {
+            if (*sink) (*sink)(Error::Ok, *buf);
+        });
+    if (!stream) {  // raced to not-Online between the check and open_stream
+        if (*sink) (*sink)(Error::NotConnected, std::string());
+    }
+}
+
 void Client::close() {
     SemaphoreHandle_t done = nullptr;
     {

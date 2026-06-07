@@ -18,6 +18,7 @@
 #include <string>
 
 #include "adb_connection.hpp"  // adb::ConnectionState, adb::AdbConnection
+#include "adb_error.hpp"       // adb::Error
 
 namespace adb {
 
@@ -50,6 +51,14 @@ public:
 
     ConnectionState state() const { return state_.load(); }
     const std::string& banner() const { return banner_; }
+
+    // One-shot: run a single shell command and collect its output. Opens a
+    // shell:<cmd> stream, accumulates until the device closes it, then fires `cb`
+    // exactly once with the output. Non-blocking, callable from any thread; the
+    // completion fires on the reader thread (except a synchronous NotConnected
+    // when not Online). See docs/one-shots.md.
+    using ExecCb = std::function<void(Error, const std::string& output)>;
+    void exec(const std::string& cmd, ExecCb cb);
 
     // Stop the reader task and release the connection. Idempotent. Blocks until
     // the reader task has exited (so no callback fires after it returns) — except

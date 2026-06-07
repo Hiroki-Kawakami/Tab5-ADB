@@ -1,4 +1,8 @@
 #include "adb_app.hpp"
+
+#include <memory>
+
+#include "adb.hpp"  // adb::Client, adb::ClientListener
 #include "bsp.h"
 #include "lvgl.hpp"
 #include "screen_manager.hpp"
@@ -41,6 +45,55 @@ static void lvgl_setup() {
         }
     });
 }
+
+namespace app {
+namespace {
+
+// Single-device holder: the Client must outlive the screens (they are pushed/
+// popped, the connection is not), so it lives at file scope. The holder is the
+// app's ClientListener — on_state fires on the reader thread, so everything
+// UI-facing is marshalled to LVGL with lv_async_call.
+std::shared_ptr<adb::Client> g_client;
+
+class Holder : public adb::ClientListener {
+public:
+    void start(std::function<void(bool)> on_result) {
+        on_result_ = std::move(on_result);
+        reported_ = false;
+        g_client = adb::Client::connect_usb(this);
+    }
+
+    void on_state(adb::Client* /*c*/, adb::ConnectionState s) override {
+        if (s == adb::ConnectionState::Online) {
+            report(true);
+        } else if (s == adb::ConnectionState::Closed) {
+            report(false);  // closed before/without ever reaching Online
+        }
+    }
+
+private:
+    void report(bool ok) {
+        if (reported_) return;  // deliver the result once (Online then Closed, etc.)
+        reported_ = true;
+        auto cb = on_result_;
+        lv_async_call([cb, ok]() { if (cb) cb(ok); });
+    }
+
+    std::function<void(bool)> on_result_;
+    bool reported_ = false;
+};
+
+Holder g_holder;
+
+}  // namespace
+
+void adb_connect_async(std::function<void(bool)> on_result) {
+    g_holder.start(std::move(on_result));
+}
+
+adb::Client* adb_client() { return g_client.get(); }
+
+}  // namespace app
 
 void adb_app() {
     bsp_config_t config = {};

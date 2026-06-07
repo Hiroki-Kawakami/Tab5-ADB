@@ -26,14 +26,17 @@ void AdbStream::deliver(const uint8_t* data, size_t len) {
 }
 
 void AdbStream::mark_closed() {
+    bool was_closed;
     {
         std::lock_guard<std::mutex> lk(m_);
-        closed_.store(true);
+        was_closed = closed_.exchange(true);
         open_.store(false);
         writable_ = false;
     }
     cv_.notify_all();
-    if (on_close_) on_close_();
+    // Idempotent: on_close fires at most once even if both the peer's A_CLSE and
+    // connection teardown mark us closed.
+    if (!was_closed && on_close_) on_close_();
 }
 
 bool AdbStream::write(const uint8_t* data, size_t len) {

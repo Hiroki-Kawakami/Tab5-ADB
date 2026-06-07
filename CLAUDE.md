@@ -281,8 +281,11 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   for one-shot commands, classic per-OKAY flow control). The packet read loop is
   `run_blocking()` — the *caller* owns the thread (a `std::thread` in the host
   tests, a FreeRTOS task in the app); the library only relies on a thread-safe
-  `send()` + stream registry, so it stays thread-model-agnostic. (`start()` /
-  `adb_client` high-level API land with P7.)
+  `send()` + stream registry, so it stays thread-model-agnostic. On teardown
+  (`run_blocking()` returns) it closes any still-open streams so every owner gets
+  a terminal `on_close` (one-shot completions fire exactly once);
+  `AdbStream::mark_closed()` is idempotent so the peer's `A_CLSE` and teardown
+  can't double-fire. (`start()` / `adb_client` high-level API land with P7.)
 
 Dev strategy: the simulator's **libusb transport talks to a real Android device
 plugged into the PC**, so the protocol/auth/stream layers are developed and
@@ -345,29 +348,37 @@ implementing.** The agreed design (read the docs for the full contract):
   `Client::close()`); detach the listener before destroying it.
 
 Built incrementally in commit-sized slices (see the roadmap in the component
-`README.md`). Slice 1
-(done): `Client::connect_usb()` + `state()`/`banner()` + `close()` — replaces the
-setup half of `app/adb_session.cpp`; verified by `test/test_client.cpp` (libusb
-vs a real phone, same harness pattern as `embedded_adb/test`). `Client` runs the
-read loop on an internal FreeRTOS task and joins it in `close()`/dtor; this relies
-on `AdbConnection::stop()` being honored even **before** `run_blocking()` starts
-(a `stop_requested_` gate added for race-free teardown). Later slices add `Shell`,
-the one-shots, and `Sync`, and rewire the UI off `adb_session`.
+`README.md`). **Slice 1** (done): `Client::connect_usb()` + `state()`/`banner()` +
+`close()` — replaces the setup half of the old `app/adb_session.cpp`; verified by
+`test/test_client.cpp` (libusb vs a real phone, same harness pattern as
+`embedded_adb/test`). `Client` runs the read loop on an internal FreeRTOS task and
+joins it in `close()`/dtor; this relies on `AdbConnection::stop()` being honored
+even **before** `run_blocking()` starts (a `stop_requested_` gate added for
+race-free teardown). **Slice 2** (done): the `exec` one-shot
+(`Client::exec(cmd, cb)` → collects `shell:<cmd>` output, completion on the reader
+thread, see `docs/one-shots.md`) plus rewiring the UI onto `Client` —
+`app/adb_session.*` is **retired** (the holder folded into `adb_app`; getprops go
+through `exec`, so `adb` no longer leaks an `AdbConnection`). To make a one-shot
+completion fire **exactly once**, `AdbConnection::run_blocking()` teardown now
+closes outstanding streams (and `AdbStream::mark_closed()` is idempotent). Later
+slices add `Shell`, `screencap`, and `Sync`.
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen)
 
 `app/` drives the connection from the LVGL UI: `HomeScreen` has a **Connect**
-button; tapping it calls `app::adb_connect_async()` (`app/adb_session.cpp`), which
-spawns a FreeRTOS task that loads the key, opens the transport, and runs
-`AdbConnection::run_blocking()`. On reaching Online it pushes `ADBDeviceScreen`,
-which shows banner-derived fields (model/name/device) and fetches a few live
-`getprop`s over a `shell:` stream on a background task. `adb_session` is the
-bridge that keeps the library thread-model-agnostic: it owns the connection +
-reader task and marshals the connection's worker-thread callbacks to the LVGL
-thread with `lv_async_call`. It's app-level (not in `embedded_adb`) so the library
-itself pulls in no FreeRTOS task-creation — the host unit tests still link with
-just `std::thread`. This replaced the earlier on-device smoke test (one
-`usb_host_install` only — the UI is now the single connection driver).
+button; tapping it calls `app::adb_connect_async()` — a small app-global holder in
+`app/adb_app.cpp` that owns the single `std::shared_ptr<adb::Client>` (it must
+outlive the transient screens) and implements `adb::ClientListener`. The `Client`
+owns the connection lifecycle + reader task; the holder's only job is to marshal
+the reader-thread `on_state` callbacks to the LVGL thread with `lv_async_call`
+(marshalling is the app's job — the library never touches LVGL). On reaching
+Online it pushes `ADBDeviceScreen`, which shows banner-derived fields
+(model/name/device) and fetches a few live `getprop`s via a single
+`app::adb_client()->exec(...)` one-shot (its completion fires on the reader thread,
+so the label update is marshalled back to LVGL). This holder replaced the earlier
+`app/adb_session.*` (a bespoke reader task + `AdbConnection` marshalling) once
+`Client` took over the lifecycle — the app pulls in no protocol/transport details,
+only the `adb` component's typed surface.
 
 ## Simulator details
 
