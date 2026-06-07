@@ -1,10 +1,13 @@
 #include "adb_device_screen.hpp"
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "adb.hpp"  // adb::Client, adb::Error
 #include "adb_app.hpp"
+#include "adb_shell_screen.hpp"
+#include "screen_manager.hpp"
 
 namespace {
 
@@ -79,6 +82,17 @@ void ADBDeviceScreen::build() {
         lv_label_set_text(label, "(no connection)");
         return;
     }
+
+    // Open the interactive terminal (ADBShellScreen) on top.
+    lv_obj_t *term_btn = lv_button_create(root_);
+    lv_obj_set_size(term_btn, 260, 80);
+    lv_obj_t *term_lbl = lv_label_create(term_btn);
+    lv_label_set_text(term_lbl, LV_SYMBOL_KEYBOARD " Open Terminal");
+    lv_obj_center(term_lbl);
+    lv_obj_add_event_fn(term_btn, LV_EVENT_CLICKED, [](lv_event_t *) {
+        screen_manager.push(std::make_unique<ADBShellScreen>());
+    });
+
     client->exec(
         "getprop ro.build.version.release; getprop ro.build.version.sdk; "
         "getprop ro.product.manufacturer; getprop ro.serialno",

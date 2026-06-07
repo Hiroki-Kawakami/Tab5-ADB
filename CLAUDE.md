@@ -373,7 +373,7 @@ lock) so no callback touches the listener after it returns. See `docs/shell.md`;
 verified by `test/test_shell.cpp` (libusb vs a real phone). Later slices add
 `screencap` and `Sync`.
 
-### The provisional UI (HomeScreen → ADBDeviceScreen)
+### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 
 `app/` drives the connection from the LVGL UI: `HomeScreen` has a **Connect**
 button; tapping it calls `app::adb_connect_async()` — a small app-global holder in
@@ -389,6 +389,24 @@ so the label update is marshalled back to LVGL). This holder replaced the earlie
 `app/adb_session.*` (a bespoke reader task + `AdbConnection` marshalling) once
 `Client` took over the lifecycle — the app pulls in no protocol/transport details,
 only the `adb` component's typed surface.
+
+`ADBDeviceScreen` has an **Open Terminal** button that pushes **`ADBShellScreen`**
+(`app/adb_shell_screen.*`) — an interactive terminal over `Client::open_shell()`.
+The screen **is** the `adb::ShellListener`: device output streams into a read-only
+monospace (`lv_font_unscii_16`) `lv_textarea`, and an input `lv_textarea` + an
+on-screen `lv_keyboard` send a line per OK keypress (`shell_->write(line+"\n")`;
+the PTY echoes input back, so the UI does **not** local-echo). Two threading
+concerns the screen handles, both from the cross-cutting `adb` contract: (1) Shell
+callbacks fire on the **reader thread**, so `on_shell_data`/`on_shell_close`
+sanitize (strip CR + ANSI/VT escapes the bitmap font can't render) and marshal the
+widget update with `lv_async_call`; (2) the screen (the listener) can be destroyed
+on `pop()`, so `onExit()` runs `shell_->close()` **then** `detach()` before the
+object dies (per the lifetime rule), and every marshalled lambda captures a
+`shared_ptr<bool> alive_` (set false in `onExit`) so an update already queued
+before teardown skips the freed widgets — race-free because teardown and the
+`lv_async_call` body both run on the LVGL thread. `LV_FONT_UNSCII_16` is enabled
+on both targets for the terminal (sim `lv_conf.h`; device `sdkconfig`/
+`sdkconfig.defaults`). v1 is line-oriented (touch keyboard), not a raw VT.
 
 ## Simulator details
 
