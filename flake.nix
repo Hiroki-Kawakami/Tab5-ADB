@@ -37,6 +37,8 @@
             pkgs.ccache
             pkgs.cjson
             pkgs.SDL2
+            pkgs.libusb1   # embedded_adb host transport (simulator)
+            pkgs.mbedtls   # embedded_adb RSA auth (simulator); device gets it from ESP-IDF
           ];
           shellHook = ''
             export ESP_IDF_VERSION="5.4"

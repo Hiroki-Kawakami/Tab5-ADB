@@ -71,6 +71,9 @@ components/                  # SHARED  (both targets)
     boards/<model>/          #     per-model bring-up: <model>.c (device) + <model>_sim.cpp (sim)
   lvgl++/                    #   C++ helpers (lv_async_call, lv_obj_add_event_fn)
   screen_manager/            #   Screen base + screen stack
+  embedded_adb/              #   ADB host-side client (C++) — usb_host vs libusb split
+    inc/                     #     public API (embedded_adb.hpp, adb_protocol.hpp)
+    src/                     #     protocol/crypto/keystore/connection/stream + transport_*
 esp32p4/                     # DEVICE build root (IDF project)
   main/                      #   entry point (app_main + device LVGL runtime via esp_lvgl_port)
 simulator/                   # SIMULATOR build root (see below)
@@ -232,6 +235,42 @@ on both targets.
 
 Keep NVS as the C API on both sides. A C++ convenience layer, if wanted, belongs
 in a shared component on top of the C API — not as a per-target file.
+
+### The `embedded_adb` component (ADB host-side client — work in progress)
+
+Tab5 plays the **ADB host** (like WebADB / ya-webadb): it drives a USB-connected
+Android device. Only the host side of the protocol is implemented. Modeled on the
+upstream ADB sources (read-only reference). C++ so the
+async stream/auth logic isn't a C callback maze.
+
+Layering (one concern per pair, all portable C++ **except the transport**):
+- `adb_protocol` — pure wire format: `MessageHeader` (24-byte `amessage`),
+  `Packet` (`apacket`), command/auth constants, checksum. No I/O.
+- `adb_crypto` — RSA-2048 keygen, token signing (PKCS#1 v1.5 + SHA1), and the
+  Android public-key blob. Uses **mbedTLS on both targets** (ESP-IDF bundles it;
+  the simulator gets it from Nix) — crypto is a third-party lib, not an ESP API
+  or a board concern, so it is *not* re-abstracted and needs no `idf_compat` shim.
+- `adb_keystore` — persists the RSA private key via the **NVS C API** (per the NVS
+  rule above; JSON-backed in the simulator). We **never read the host's
+  `~/.android/adbkey`** — always generate/store our own key in NVS.
+- `transport` — USB bulk transfer to the ADB interface (USB class `0xFF` /
+  subclass `0x42` / protocol `0x01`). This is the **only device/simulator split**:
+  `transport_usbhost.cpp` (esp-idf `usb_host`) vs `transport_libusb.cpp` (libusb),
+  selected by the `ESP_PLATFORM` branch in the component `CMakeLists.txt` — same
+  pattern as `m5stack-bsp`. It lives inside `embedded_adb`, not the BSP: the
+  `usb_host` API is too large to reimplement on the host and the need (find iface,
+  open bulk IN/OUT eps, transfer) is ADB-specific, not a generic board seam.
+- `adb_connection` / `adb_stream` / `adb_client` — CNXN handshake + AUTH state
+  machine, `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing, and the high-level API. A
+  read task + write queue drives packet dispatch (FreeRTOS on both targets; on the
+  host these are pthreads, so tasks spawn anywhere — no post-boot restriction).
+
+Dev strategy: the simulator's **libusb transport talks to a real Android device
+plugged into the PC**, so the protocol/auth/stream layers are developed and
+debugged on the desktop against a real phone; only `transport_usbhost.cpp` needs
+on-device validation. (Run `adb kill-server` first so the host adb-server doesn't
+hold the interface.) SDL2/libusb/mbedTLS are linked to the `simulator` exe in
+`simulator/CMakeLists.txt`; `flake.nix` provides `libusb1` + `mbedtls` for the host.
 
 ## Simulator details
 

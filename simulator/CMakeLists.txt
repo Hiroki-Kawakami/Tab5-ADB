@@ -88,6 +88,7 @@ set(SHARED_COMPONENTS
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/m5stack-bsp
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/lvgl++
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/screen_manager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/embedded_adb
     ${CMAKE_CURRENT_SOURCE_DIR}/../app)
 foreach(comp ${SHARED_COMPONENTS})
     get_filename_component(name "${comp}" NAME)
