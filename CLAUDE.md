@@ -42,7 +42,7 @@ the serial directly with esptool + PySerial. The second `/dev/cu.usbmodem*`
 enumerator is the JTAG/console port used for flashing; **ESP32-P4 only prints
 logs once after reset**, so capture during the boot sequence.
 
-### Host simulator — `simulator/` (SDL2 + LVGL + FreeRTOS POSIX port)
+### Host simulator — `simulator/` (SDL2 + LVGL + pthread-backed FreeRTOS API)
 
 Runs `app/` on the desktop so UI / app logic can be developed without a board.
 
@@ -74,10 +74,10 @@ components/                  # SHARED  (both targets)
 esp32p4/                     # DEVICE build root (IDF project)
   main/                      #   entry point (app_main + device LVGL runtime via esp_lvgl_port)
 simulator/                   # SIMULATOR build root (see below)
-  platform/                  #   SIM-only entry (main.cpp: SDL/LVGL + FreeRTOS loop)
+  platform/                  #   SIM-only entry (main.cpp: SDL/LVGL timer loop)
   idf_compat/                #   SIM-only ESP-IDF compat component (see its README.md)
-    include/  src/           #     hand-written shims (esp_err/esp_log/esp_check/esp_timer/nvs)
-    freertos_kernel/         #     vendored FreeRTOS-Kernel (Posix port + macOS fixes)
+    include/  src/           #     host shims: esp_* (err/log/check/timer/heap/nvs)
+                             #     + freertos/* (pthread-backed FreeRTOS API)
 ```
 
 `m5stack-bsp` is the worked example of a target-divergent shared component: its
@@ -111,7 +111,7 @@ source of truth** consumed by both builds:
   components and the **simulator-only `idf_compat` component** (its own
   `CMakeLists.txt`) are consumed this way — so growing `idf_compat` just means
   adding `SRCS` to that file, not editing `simulator/CMakeLists.txt`. Only
-  `simulator/platform/` (the SDL/LVGL + FreeRTOS entry) stays a direct
+  `simulator/platform/` (the SDL/LVGL entry) stays a direct
   `target_sources` — it's the executable's "main", not a component. A shared
   component that builds differently per target (like `m5stack-bsp`) branches on
   `ESP_PLATFORM` inside its own `CMakeLists.txt`; guard anything that touches
@@ -197,8 +197,8 @@ wiring) is `#ifdef ESP_PLATFORM` so the host build never pulls in `driver/*`.
 
 Audio (`bsp_tab5_audio_*` in `inc/bsp_audio.h`) is Tab5-specific with no
 cross-model contract yet, so it keeps its name and lives in the tab5 board.
-`audio_eq.c` is device-only for now (it pulls in FreeRTOS and the host has no
-audio path); it moves into the shared sources once a simulator audio board exists.
+`audio_eq.c` is device-only for now (the host has no audio path); it moves into
+the shared sources once a simulator audio board exists.
 
 ### App entry & the LVGL runtime (not in the BSP)
 
@@ -209,7 +209,8 @@ audio path); it moves into the shared sources once a simulator audio board exist
   (`lvgl_port_init`) then calls `adb_app()`.
 - Simulator: `simulator/platform/main.cpp` `main()` runs `lv_init`, sets the LVGL
   tick/delay to SDL, then calls `adb_app()` and runs the `lv_timer_handler` loop
-  on the main thread (scheduler on a background pthread — see below).
+  on the main thread. No scheduler bootstrap — host FreeRTOS tasks are pthreads
+  (see "FreeRTOS on the host" below), so `main()` mirrors device `app_main()`.
 
 `adb_app()` in `app/adb_app.cpp` is the shared entry: it calls `bsp_init()`, sets
 up the LVGL display on the two `bsp_display` frame buffers + an indev on
@@ -232,56 +233,57 @@ on both targets.
 Keep NVS as the C API on both sides. A C++ convenience layer, if wanted, belongs
 in a shared component on top of the C API — not as a per-target file.
 
-## Simulator details (FreeRTOS POSIX port)
+## Simulator details
 
-The simulator compiles in the **FreeRTOS-Kernel GCC/Posix port**, vendored under
-`simulator/idf_compat/freertos_kernel/` (see `simulator/idf_compat/README.md`
-for the vendoring/upgrade details), so app code
-can use real FreeRTOS primitives (`xTaskCreate`, `vTaskDelay`, queues,
-semaphores) on the host. Verified working end-to-end (scheduler + idle + timer
-task come up; task entry → `vTaskDelay` ticks → `vTaskDelete`).
+### FreeRTOS on the host — a pthread-backed API compat (not the real kernel)
 
-Hard constraints — violate these and it hangs/crashes:
+The simulator does **not** run the FreeRTOS kernel. Instead the FreeRTOS *API
+contract* is reimplemented on native pthreads in `simulator/idf_compat/`
+(`include/freertos/*.h` + `src/freertos_*.c`) — the same "reimplement the
+contract, don't port the implementation" philosophy as the `esp_*` shims. A task
+**is** a detached pthread scheduled by the host OS; there is no scheduler to
+start, no tick ISR, no POSIX-signal machinery.
 
-1. **SDL/LVGL own the main thread.** `simulator/platform/main.cpp` runs the LVGL/SDL
-   loop on the main thread and starts `vTaskStartScheduler()` on a *background
-   pthread*. SDL must be driven from the main thread on macOS, so the scheduler
-   cannot run there.
-2. **Spawn FreeRTOS tasks only post-boot** — from an `lv_async_call` or a screen
-   callback (which run on the main thread after the scheduler thread is up),
-   **never from `adb_app()`/`bsp_init()` before `vTaskStartScheduler()`**. Creating
-   a task before the scheduler makes the port's one-time signal setup
-   (`pthread_once`) run on the wrong thread and corrupts it.
-3. **Two macOS/arm64 POSIX-port bugs — both fixed inline** in the vendored
-   `freertos_kernel/portable/ThirdParty/GCC/Posix/port.c` (grep `macOS/arm64`).
-   These are the only edits to the vendored kernel; re-apply them on upgrade (the
-   procedure is in `simulator/idf_compat/README.md`). What they fix:
-   - **Task-creation deadlock** (marker `macOS/arm64 workaround`): the port
-     creates each task pthread inside a critical section that masks every signal;
-     on macOS that deadlocks in libsystem once another task thread is parked in
-     `pthread_cond_wait`, so `vTaskStartScheduler()` hangs creating the timer
-     task (symptom: `xTaskCreate` returns pdPASS but the task body never runs).
-     Fix: create the task thread with a clean signal mask, then restore.
-   - **Sub-page stack-size underflow** (marker `macOS/arm64 stack-size fix`):
-     `pxPortInitialiseStack()` rounds the stack *end pointer* up to a page, but
-     arm64 pages are 16 KB while a task stack (`configMINIMAL_STACK_SIZE` words ×
-     8 B ≈ 2 KB for idle) is smaller than one page. The rounding pushes the end
-     past the top of stack, the size subtraction underflows to a huge `size_t`,
-     and `pthread_create()` faults (`EXC_BAD_ACCESS`, surfaces as `Bus error: 10`)
-     while `vTaskStartScheduler()` creates the idle task. **Non-deterministic** —
-     depends on each stack buffer's malloc alignment, so it can appear to "work"
-     on lucky runs. Fix: round the *size* up to a page instead (never underflows);
-     `PTHREAD_STACK_MIN` is the floor.
+This is deliberate: the previous vendored FreeRTOS-Kernel GCC/Posix port
+emulated a single-core, signal-driven scheduler on pthreads, which forced a pile
+of fragile constraints (SDL had to own the main thread *and* the scheduler had to
+run on a background thread because `vTaskStartScheduler()` blocks forever; tasks
+could only be spawned post-boot or the port's `pthread_once` signal setup
+corrupted; two macOS/arm64 port bugs). The host OS already has a scheduler, so
+running a second one bought scheduling fidelity this UI/app-logic simulator does
+not need. The compat layer deletes all of that.
 
-Other simulator notes:
+What this means for app code:
+- **`xTaskCreate()` works anywhere, anytime** — including directly from
+  `adb_app()` / `bsp_init()`. No "spawn only post-boot", no `lv_async_call`
+  dance for non-LVGL FreeRTOS work. The device and simulator entry points are now
+  symmetric: `app_main()` (device) and `main()` (sim) both just call `adb_app()`.
+- The **one** semantic gap: real hardware runs one task at a time per core, so a
+  critical section is atomic against all other tasks. With pthreads tasks run
+  truly in parallel, so `taskENTER_CRITICAL`/`portENTER_CRITICAL` (incl. the
+  ESP-IDF `portMUX_TYPE*` form) map to a single global recursive mutex — the "big
+  kernel lock" — which restores single-at-a-time semantics *inside* critical
+  sections but does not serialize ordinary task code. Priorities are stored but
+  not enforced; `*FromISR` variants forward to their blocking counterparts
+  (no ISRs on the host); `portYIELD_FROM_ISR` is a no-op.
+- Tick rate matches the device (`configTICK_RATE_HZ = 100`) so `pdMS_TO_TICKS()`
+  and raw tick delays behave the same on both targets.
+
+Still true: **SDL/LVGL own the main thread** (`SDL_PollEvent`/Cocoa on macOS), so
+`simulator/platform/main.cpp` runs the `lv_timer_handler` loop on the main thread.
+But that is now the *only* main-thread rule — it no longer interacts with task
+creation. LVGL itself is single-threaded on both targets, so a FreeRTOS task that
+needs to touch LVGL still marshals via `lv_async_call` (device: `lvgl_port_lock`),
+exactly as on hardware.
+
+### Other simulator notes
 - LVGL config is `simulator/lv_conf.h` (found via `LV_CONF_INCLUDE_SIMPLE` +
   the project source dir). `LV_COLOR_DEPTH 16` (RGB565, matches the panel) and
   `LV_USE_THEME_DEFAULT 1` (the e-paper-derived base config had it off).
 - Host compat for shared code lives in the `simulator/idf_compat/` component.
   **`simulator/idf_compat/README.md` is the source of truth** (layout, the
-  include-path rules, how to add a shim, FreeRTOS vendoring/upgrade). In short:
-  `include/` = shim headers, `src/` = shim sources, `freertos_kernel/` = vendored
-  upstream FreeRTOS. Current shim surface:
+  include-path rules, how to add a shim, the FreeRTOS compat surface). In short:
+  `include/` = shim headers, `src/` = shim sources. Current shim surface:
   - `esp_err` — `esp_err_t`, `ESP_ERR_*`, `esp_err_to_name()`, `ESP_ERROR_CHECK[_WITHOUT_ABORT]`.
   - `esp_log` — `ESP_LOGx` to stderr, level enum, `esp_log_level_set` (no-op).
   - `esp_check` — `ESP_RETURN_ON_ERROR` / `ESP_GOTO_ON_*` / `ESP_RETURN_ON_FALSE`.
@@ -289,10 +291,13 @@ Other simulator notes:
   - `esp_heap_caps` — `heap_caps_malloc`/`calloc`/`realloc`/`aligned_alloc`/`free`
     (host malloc; `MALLOC_CAP_*` flags accepted and ignored).
   - `nvs`/`nvs_flash` — JSON-backed NVS C API (see the NVS section).
-  - `include/freertos/` — bridge headers (`freertos/FreeRTOS.h` → real `<FreeRTOS.h>`).
-  `INCLUDE_DIRS` is `include` + the vendored kernel dirs; `include/freertos/` is
-  deliberately **not** on the path (so the bridge's `#include <task.h>` reaches
-  the kernel, not itself). Add a shim: header in `include/`, source in `src/` +
-  its `SRCS` entry — nothing else to wire.
+  - `freertos` — pthread-backed FreeRTOS API: tasks, delays, queues, semaphores
+    (binary/counting/mutex/recursive), event groups, task notifications, software
+    timers, critical sections (`include/freertos/*.h` + `src/freertos_*.c`).
+  `INCLUDE_DIRS` is just `include`; `freertos/FreeRTOS.h` resolves because
+  `include` is on the path. Add a shim: header in `include/`, source in `src/` +
+  its `SRCS` entry — nothing else to wire. Grow the FreeRTOS surface the same way
+  (add to an existing `freertos_*.c` or a new one). pthreads link to the
+  `simulator` exe via `Threads::Threads` in `simulator/CMakeLists.txt`.
 - Build artifacts (`build/`, `simulator/.deps/`) are gitignored. LVGL is fetched
-  into `.deps`; FreeRTOS is vendored in-tree.
+  into `.deps`.

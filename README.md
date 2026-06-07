@@ -15,9 +15,9 @@ nix develop --command idf.py -C esp32p4 flash monitor   # needs a TTY
 
 ## Host simulator
 
-`simulator/` runs `app/` on the desktop (SDL2 + LVGL), with the **FreeRTOS POSIX
-port** linked in so app code can use real FreeRTOS primitives (`xTaskCreate`,
-`vTaskDelay`, queues, semaphores) off-device.
+`simulator/` runs `app/` on the desktop (SDL2 + LVGL), with a **pthread-backed
+FreeRTOS API** so app code can use FreeRTOS primitives (`xTaskCreate`,
+`vTaskDelay`, queues, semaphores, event groups, timers) off-device.
 
 ```sh
 ./run.sh            # == ./run.sh simulator
@@ -29,18 +29,18 @@ port** linked in so app code can use real FreeRTOS primitives (`xTaskCreate`,
 implements that seam with an SDL backend inside `components/m5stack-bsp/`
 (`simulator/sdl_backend.cpp` + the tab5 sim board `boards/tab5/tab5_sim.cpp`), so
 `app/` compiles unchanged. `simulator/platform/main.cpp` only owns the host LVGL
-runtime + the SDL/FreeRTOS main loop.
+runtime (the SDL/LVGL timer loop).
 
 Notes:
-- SDL/LVGL own the main thread; `vTaskStartScheduler()` runs on a background
-  pthread (`simulator/platform/main.cpp`), required because SDL must be driven
-  from the main thread on macOS.
-- Spawn FreeRTOS tasks from post-boot code (e.g. an `lv_async_call` or a screen
-  callback), never from `adb_app()` before the scheduler starts.
-- The FreeRTOS-Kernel is vendored under `simulator/idf_compat/freertos_kernel/`
-  (GCC/Posix port), with two macOS/arm64 fixes to task pthread creation applied
-  inline (an all-signals-masked deadlock and a sub-page stack-size underflow).
-  See `simulator/idf_compat/README.md` for vendoring/upgrade details.
+- SDL/LVGL own the main thread (SDL must be driven from the main thread on
+  macOS), so `main()` runs the `lv_timer_handler` loop there. That is the only
+  main-thread rule — it mirrors device `app_main()`.
+- FreeRTOS tasks are just pthreads (no scheduler to start), so `xTaskCreate()`
+  works anywhere — including directly from `adb_app()`, like on device.
+- The FreeRTOS API is reimplemented on pthreads in `simulator/idf_compat/`
+  (`include/freertos/*.h` + `src/freertos_*.c`), not the real kernel. One
+  semantic gap: critical sections use a global lock (host tasks run in parallel).
+  See `simulator/idf_compat/README.md` for the surface and details.
 
 ## Layout
 
@@ -52,6 +52,6 @@ Notes:
   `screen_manager/` (screen stack / navigation).
 - `esp32p4/` — device build root (IDF project): `main/` is the entry point
   (`app_main` + device LVGL runtime via esp_lvgl_port).
-- `simulator/` — host SDL2/LVGL + FreeRTOS-POSIX build of `app/`: `platform/`
-  is the SDL/LVGL + FreeRTOS entry; `idf_compat/` is the host compat component
-  (ESP-IDF API shims + vendored FreeRTOS-Kernel — see its `README.md`).
+- `simulator/` — host SDL2/LVGL build of `app/`: `platform/` is the SDL/LVGL
+  entry; `idf_compat/` is the host compat component (ESP-IDF API shims + a
+  pthread-backed FreeRTOS API — see its `README.md`).

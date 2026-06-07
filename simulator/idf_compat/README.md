@@ -15,24 +15,24 @@ straight into the `simulator` executable (one binary → no separate library).
 idf_compat/
   include/            shim headers (what shared code #includes)
     esp_err.h esp_log.h esp_check.h esp_timer.h esp_heap_caps.h nvs.h nvs_flash.h
-    freertos/         bridge headers: "freertos/FreeRTOS.h" -> <FreeRTOS.h>
+    freertos/         host FreeRTOS API: FreeRTOS.h task.h queue.h semphr.h
+                      event_groups.h timers.h portmacro.h
   src/                shim implementations
     esp_err.c esp_timer.c esp_heap_caps.c nvs.c
-  freertos_kernel/    VENDORED upstream FreeRTOS-Kernel (see below)
+    freertos_port.c freertos_task.c freertos_queue.c
+    freertos_event_groups.c freertos_timers.c
+    freertos_internal.h   (shared helpers; not part of the public API)
   CMakeLists.txt      registers all of the above
   README.md           this file — the single source of truth for idf_compat
 ```
 
-Two kinds of thing live here, on purpose:
+Everything here is a **hand-written host implementation** of a device API —
+nothing is vendored. The same philosophy throughout: reimplement the API
+*contract* on host primitives, just enough for the simulator.
 
-- **Hand-written shims** (`include/` + `src/`) — our own host implementations of
-  ESP-IDF APIs: `esp_err`, `esp_log`, `esp_check`, `esp_timer`, `esp_heap_caps`,
-  and a JSON-backed `nvs` / `nvs_flash`. These reimplement just enough of each
-  API for the host.
-- **Vendored upstream** (`freertos_kernel/`) — a real third-party library we host
-  a frozen copy of, rather than reimplementing. Keep the ownership boundary
-  clear: don't hand-edit files under `freertos_kernel/` except for the documented
-  macOS fixes below.
+- ESP-IDF APIs: `esp_err`, `esp_log`, `esp_check`, `esp_timer`, `esp_heap_caps`,
+  and a JSON-backed `nvs` / `nvs_flash`.
+- The FreeRTOS API (`freertos/*.h`) on native pthreads — see below.
 
 ## Layout rule (how to add a new shim)
 
@@ -41,9 +41,9 @@ host binary, component splits like esp_common / nvs_flash are invisible):
 
 - Included as a bare name (`"esp_err.h"`) → header in `include/`.
 - Included with a path prefix (`"freertos/FreeRTOS.h"`, `"driver/gpio.h"`) → put
-  the header under `include/<prefix>/`. That prefix subdir is reachable as part
-  of the include string but is **not** itself an `INCLUDE_DIRS` entry, so a
-  bridge header's `#include <foo.h>` resolves to the real impl, not to itself.
+  the header under `include/<prefix>/`. `include` is the only `INCLUDE_DIRS`
+  entry, so `"freertos/FreeRTOS.h"` resolves via that path; headers reference
+  their siblings the same way (`#include "freertos/portmacro.h"`).
 - Any `.c`/`.cpp` → `src/`, and add it to `SRCS` in `CMakeLists.txt`. That's the
   only wiring step.
 
@@ -54,46 +54,56 @@ host binary, component splits like esp_common / nvs_flash are invisible):
 before the first open). Shared code calls the C API directly — there is no C++
 wrapper. Fidelity notes are at the top of `src/nvs.c`.
 
-## Vendored FreeRTOS-Kernel
+## FreeRTOS API (host, on pthreads)
 
-- **Upstream:** https://github.com/FreeRTOS/FreeRTOS-Kernel
-- **Version:** V11.1.0
-- **Port:** `portable/ThirdParty/GCC/Posix` (GCC/Posix), heap: `MemMang/heap_3.c`
+`freertos/*.h` + `src/freertos_*.c` reimplement the FreeRTOS API on native
+pthreads. **This is not the FreeRTOS kernel.** There is no scheduler, no tick
+ISR, no signal machinery: a task *is* a detached pthread run by the host OS.
 
-Only the subset needed for the Posix port is vendored: the core sources
-(`tasks.c`, `queue.c`, `list.c`, `timers.c`, `event_groups.c`,
-`stream_buffer.c`), all of `include/`, the Posix port (`port.c`, `portmacro.h`,
-`utils/wait_for_event.{c,h}`), `heap_3.c`, `FreeRTOSConfig.h`, and `LICENSE.md`.
-`croutine.c` is omitted (`configUSE_CO_ROUTINES` is 0).
+This replaced a previously vendored FreeRTOS-Kernel GCC/Posix port. That port ran
+the real kernel and emulated a single-core, signal-driven scheduler on pthreads,
+which forced fragile constraints (SDL had to own the main thread while the
+scheduler ran on a background thread because `vTaskStartScheduler()` blocks
+forever; tasks could only be created post-boot or the port's `pthread_once`
+signal setup corrupted; two macOS/arm64 port bugs). Since the host OS already
+schedules threads, that emulation bought fidelity this simulator doesn't need.
+With the compat layer, `xTaskCreate()` works anywhere, anytime.
 
-### Local modifications
+### Surface
 
-Two macOS/arm64 fixes are applied **inline** to
-`freertos_kernel/portable/ThirdParty/GCC/Posix/port.c`, each marked with a
-comment so they're easy to find and re-apply. Grep `macOS/arm64`:
+- **Tasks** (`task.h` / `freertos_task.c`): `xTaskCreate`,
+  `xTaskCreatePinnedToCore` (core ignored), `vTaskDelete` (self-delete robust;
+  other-task is best-effort `pthread_cancel`), `vTaskDelay`, `xTaskDelayUntil`,
+  `xTaskGetTickCount`, `xTaskGetCurrentTaskHandle`, priority get/set (stored, not
+  enforced), and direct-to-task notifications (`xTaskNotifyGive`/`ulTaskNotifyTake`
+  /`xTaskNotify`/`xTaskNotifyWait`).
+- **Queues** (`queue.h` / `freertos_queue.c`): ring buffer + mutex + two condvars.
+- **Semaphores** (`semphr.h`, built on the queue object): binary, counting,
+  mutex, recursive mutex.
+- **Event groups** (`event_groups.h` / `freertos_event_groups.c`).
+- **Software timers** (`timers.h` / `freertos_timers.c`): one daemon pthread.
+- **Port** (`portmacro.h` / `freertos_port.c`): heap (`pvPortMalloc`), ticks,
+  critical sections, `vTaskStartScheduler` (blocks forever — unnecessary on host).
 
-1. **`macOS/arm64 workaround`** — in `pxPortInitialiseStack()`, create the task
-   pthread with a clean signal mask (the port otherwise calls `pthread_create()`
-   with every signal masked, which deadlocks libsystem on macOS).
-2. **`macOS/arm64 stack-size fix`** — in `pxPortInitialiseStack()`, round the
-   stack *size* up to a page instead of rounding the *end pointer* up (the latter
-   underflows to a huge `size_t` for sub-page task stacks on 16 KB-page arm64 and
-   crashes `pthread_create`).
+### Semantics that differ from real FreeRTOS
 
-There are no other edits — every other vendored file is verbatim upstream.
+- **Critical sections → one global recursive mutex** (the "big kernel lock").
+  Hardware runs one task at a time per core, so a critical section is atomic
+  against all tasks; pthreads run in parallel, so `taskENTER_CRITICAL` /
+  `portENTER_CRITICAL` (incl. the ESP-IDF `portMUX_TYPE*` form — arg accepted and
+  ignored) take a global lock to restore single-at-a-time *inside* critical
+  sections. Ordinary task code is genuinely parallel.
+- **Priorities are not enforced** — host OS scheduling, best-effort.
+- **No ISRs** — `*FromISR` variants forward to the blocking calls (zero timeout)
+  and `portYIELD_FROM_ISR` is a no-op.
+- **Tick rate** `configTICK_RATE_HZ = 100`, matching the device, so
+  `pdMS_TO_TICKS()` and raw tick delays match both targets. Tick is derived from
+  `CLOCK_MONOTONIC`, not a periodic interrupt.
 
-### How to upgrade
+### How to grow it
 
-1. Clone the new tag of FreeRTOS-Kernel somewhere outside the repo.
-2. Overwrite the vendored files from the same upstream paths (the layout under
-   `freertos_kernel/` mirrors upstream exactly, so it's a straight copy of: the
-   six core `*.c`, `include/*.h`, the Posix port dir, `MemMang/heap_3.c`,
-   `LICENSE.md`). Do **not** overwrite `FreeRTOSConfig.h` — it's ours.
-3. Re-apply the two macOS fixes to `port.c` (search the new `port.c` for
-   `pxPortInitialiseStack`; the anchors are the `pthread_create()` call and the
-   `#ifdef __APPLE__` stack-size block). The previous diff is recoverable from
-   git history of this file.
-4. If the port added/renamed source files, update `SRCS` in `CMakeLists.txt`.
-5. Build the simulator and run it: reaching the home screen means the scheduler,
-   timer task, and idle task all came up — i.e. the fixes are in place. Run a few
-   times (the stack-size bug was non-deterministic).
+Add functions to the relevant `freertos_*.c` and declare them in the matching
+`freertos/*.h` (new file → add to `SRCS`). Time-bounded waits use the
+`freertos_cond_timedwait_ms()` / `freertos_now_ms()` helpers in
+`freertos_internal.h`. Keep it demand-driven — implement what app code actually
+uses, like the `esp_*` shims.

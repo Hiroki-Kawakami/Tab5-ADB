@@ -1,34 +1,29 @@
 # Simulator-only ESP-IDF compatibility layer. See README.md for the full picture
-# (what lives here, the include-path rules, and how to upgrade the vendored
-# FreeRTOS-Kernel). Consumed via the idf_component_register() shim in
-# simulator/CMakeLists.txt, which folds these straight into the `simulator` exe.
+# (what lives here, the include-path rules, and the FreeRTOS API compat design).
+# Consumed via the idf_component_register() shim in simulator/CMakeLists.txt,
+# which folds these straight into the `simulator` exe.
 #
-# Layout: include/ = shim headers, src/ = shim sources, freertos_kernel/ =
-# vendored upstream FreeRTOS (GCC/Posix port subset, with the macOS fixes applied
-# inline — grep "macOS/arm64" in port.c).
+# Layout: include/ = shim headers (esp_* and a host FreeRTOS API), src/ = shim
+# sources. The FreeRTOS API is reimplemented on native pthreads (no vendored
+# kernel, no scheduler) — same philosophy as the esp_* shims.
 idf_component_register(
     SRCS
-        # hand-written host shims
+        # hand-written host shims (ESP-IDF APIs)
         "src/esp_err.c"
         "src/esp_timer.c"
         "src/esp_heap_caps.c"
         "src/nvs.c"
-        # vendored FreeRTOS-Kernel (GCC/Posix port)
-        "freertos_kernel/tasks.c"
-        "freertos_kernel/queue.c"
-        "freertos_kernel/list.c"
-        "freertos_kernel/timers.c"
-        "freertos_kernel/event_groups.c"
-        "freertos_kernel/stream_buffer.c"
-        "freertos_kernel/portable/ThirdParty/GCC/Posix/port.c"
-        "freertos_kernel/portable/ThirdParty/GCC/Posix/utils/wait_for_event.c"
-        "freertos_kernel/portable/MemMang/heap_3.c"
+        # host FreeRTOS API on pthreads
+        "src/freertos_port.c"
+        "src/freertos_task.c"
+        "src/freertos_queue.c"
+        "src/freertos_event_groups.c"
+        "src/freertos_timers.c"
     INCLUDE_DIRS
-        # shim headers (bare-name: "esp_err.h"; the "freertos/" bridge subdir is
-        # reachable as "freertos/FreeRTOS.h" but is NOT itself on the path, so
-        # the bridge's #include <FreeRTOS.h> reaches the kernel, not itself)
-        "include"
-        # vendored FreeRTOS: bare-name headers, the Posix port, and the config
-        "freertos_kernel/include"
-        "freertos_kernel/portable/ThirdParty/GCC/Posix"
-        "freertos_kernel")
+        # shim headers (bare-name: "esp_err.h"; the "freertos/" subdir is
+        # reachable as "freertos/FreeRTOS.h" because "include" is on the path)
+        "include")
+
+# pthreads (used by the host FreeRTOS API) are linked to the `simulator`
+# executable in ../CMakeLists.txt via Threads::Threads — nothing to do here (the
+# idf_component_register shim folds sources/includes only; no COMPONENT_LIB).

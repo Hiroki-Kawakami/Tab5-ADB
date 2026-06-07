@@ -18,7 +18,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ---------------------------------------------------------------------------
 find_package(SDL2 REQUIRED)
 find_package(CJSON REQUIRED)
-find_package(Threads REQUIRED)   # FreeRTOS POSIX port (vendored in idf_compat) uses pthreads
+find_package(Threads REQUIRED)   # host FreeRTOS API (idf_compat) is built on pthreads
 
 # LVGL (lv_conf.h is picked up from this directory via LV_CONF_INCLUDE_SIMPLE)
 FetchContent_Declare(
