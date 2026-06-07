@@ -19,7 +19,7 @@ if(ESP_PLATFORM)
             "src/transport_usbhost.cpp"
         INCLUDE_DIRS "inc"
         PRIV_INCLUDE_DIRS "src"
-        PRIV_REQUIRES mbedtls nvs_flash)
+        PRIV_REQUIRES mbedtls nvs_flash usb)
 else()
     # Simulator: libusb transport. libusb + mbedTLS are linked to the `simulator`
     # executable in simulator/CMakeLists.txt, so their headers are on the global

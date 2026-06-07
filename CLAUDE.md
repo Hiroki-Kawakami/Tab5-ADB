@@ -259,7 +259,19 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   selected by the `ESP_PLATFORM` branch in the component `CMakeLists.txt` — same
   pattern as `m5stack-bsp`. It lives inside `embedded_adb`, not the BSP: the
   `usb_host` API is too large to reimplement on the host and the need (find iface,
-  open bulk IN/OUT eps, transfer) is ADB-specific, not a generic board seam.
+  open bulk IN/OUT eps, transfer) is ADB-specific, not a generic board seam. The
+  esp-idf usb_host API is async (transfers complete via callbacks pumped by two
+  background tasks — `usb_host_lib_handle_events` + `usb_host_client_handle_events`);
+  `transport_usbhost.cpp` wraps it as the synchronous `Transport` with a binary
+  semaphore per direction. **Critical gotcha (cost a debugging session):** the
+  default USB host FIFO bias (`BALANCED`) gives the non-periodic TX FIFO only
+  `dfifo_depth/16` lines → a **bulk OUT MPS limit of 256**, so claiming an Android
+  phone's 512-byte high-speed bulk endpoints fails with `interface_claim →
+  ESP_ERR_NOT_SUPPORTED`. ADB is bulk-only, so we set `usb_host_config_t`'s
+  `fifo_settings_custom` to rx=256 / nptx=256 / ptx=0 lines (MPS limits ~1016 /
+  1024; P4 DFIFO is 1024 lines, sum must be ≤ that). On device, advertise a modest
+  CNXN maxdata (16 KB) so the usb_host transport's per-payload DMA allocations stay
+  small.
 - `adb_connection` / `adb_stream` — CNXN handshake + AUTH state machine, and
   `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing (`open_stream()` + `run_service()`
   for one-shot commands, classic per-OKAY flow control). The packet read loop is
@@ -289,6 +301,15 @@ file's header comment):
   `std::thread` and executes `shell:` commands via `run_service()`. Verified on a
   real Android device (`getprop`/`echo`/`id` return correct output). The read loop is started
   with `std::thread` here; the app (P7) wraps `run_blocking()` in a FreeRTOS task.
+
+On-device (P6) there is a temporary smoke test in `esp32p4/main/adb_smoketest.cpp`
+(spawned from `app_main` after `adb_app()` so the BSP has powered the USB host
+port). It runs the same connect + `shell:` sequence over `usb_host` and logs to
+the serial console. Phone goes on the **Tab5's USB-A host port** (not the Mac);
+flash over USB-C. `idf.py monitor` needs a TTY, so capture the boot log by
+resetting via RTS and reading the port with a short PySerial script (the P4 prints
+logs only once after reset). Verified end-to-end against a real Android device. Remove this
+smoke test once the LVGL UI (P7) drives the connection.
 
 ## Simulator details
 

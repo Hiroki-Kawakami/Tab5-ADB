@@ -31,7 +31,11 @@ class AdbConnection {
 public:
     using StateCallback = std::function<void(ConnectionState)>;
 
-    AdbConnection(std::unique_ptr<Transport> transport, RsaKey key);
+    // advertised_max_payload is sent in CNXN.arg1 and caps per-A_WRTE payloads.
+    // Keep it modest on device (the usb_host transport DMA-allocs per payload);
+    // 256 KB is fine on the simulator (libusb).
+    AdbConnection(std::unique_ptr<Transport> transport, RsaKey key,
+                  uint32_t advertised_max_payload = 256 * 1024);
     ~AdbConnection();
 
     AdbConnection(const AdbConnection&) = delete;
@@ -92,7 +96,7 @@ private:
     StateCallback state_cb_;
     ConnectionState state_ = ConnectionState::Offline;
     std::string banner_;
-    uint32_t max_payload_ = 256 * 1024;  // our advertised CNXN.arg1
+    uint32_t max_payload_;  // our advertised CNXN.arg1, then negotiated min
     bool running_ = false;
 
     bool sent_signature_ = false;  // tried signing with our key

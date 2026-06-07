@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_lvgl_port.h"
 #include "adb_app.hpp"
+#include "adb_smoketest.hpp"
 
 static const char *TAG = "main";
 
@@ -26,4 +27,8 @@ extern "C" void app_main() {
         assert(0);
     }
     adb_app();
+
+    // P6 bring-up: exercise the usb_host ADB transport over the serial console.
+    // (BSP powered the USB host port in adb_app's bsp_init.)
+    adb_smoketest_start();
 }

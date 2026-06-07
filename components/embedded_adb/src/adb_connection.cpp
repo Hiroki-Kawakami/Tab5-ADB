@@ -25,8 +25,10 @@ const char* to_string(ConnectionState s) {
     return "?";
 }
 
-AdbConnection::AdbConnection(std::unique_ptr<Transport> transport, RsaKey key)
-    : transport_(std::move(transport)), key_(std::move(key)) {}
+AdbConnection::AdbConnection(std::unique_ptr<Transport> transport, RsaKey key,
+                             uint32_t advertised_max_payload)
+    : transport_(std::move(transport)), key_(std::move(key)),
+      max_payload_(advertised_max_payload) {}
 
 AdbConnection::~AdbConnection() { stop(); }
 
