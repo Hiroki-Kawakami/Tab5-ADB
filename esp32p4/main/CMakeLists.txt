@@ -3,7 +3,7 @@
 # component in the build, so no REQUIRES is needed (and adding one would
 # suppress that implicit dependency, breaking transitive BSP/LCD includes).
 idf_component_register(
-    SRCS "main.cpp" "adb_smoketest.cpp"
+    SRCS "main.cpp"
     INCLUDE_DIRS ".")
 
 # Keep app_main() (referenced across the main<->app component link group) from

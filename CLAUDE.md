@@ -302,14 +302,26 @@ file's header comment):
   real Android device (`getprop`/`echo`/`id` return correct output). The read loop is started
   with `std::thread` here; the app (P7) wraps `run_blocking()` in a FreeRTOS task.
 
-On-device (P6) there is a temporary smoke test in `esp32p4/main/adb_smoketest.cpp`
-(spawned from `app_main` after `adb_app()` so the BSP has powered the USB host
-port). It runs the same connect + `shell:` sequence over `usb_host` and logs to
-the serial console. Phone goes on the **Tab5's USB-A host port** (not the Mac);
-flash over USB-C. `idf.py monitor` needs a TTY, so capture the boot log by
-resetting via RTS and reading the port with a short PySerial script (the P4 prints
-logs only once after reset). Verified end-to-end against a real Android device. Remove this
-smoke test once the LVGL UI (P7) drives the connection.
+On hardware: phone goes on the **Tab5's USB-A host port** (not the Mac); flash
+over USB-C. `idf.py monitor` needs a TTY, so capture the boot log by resetting via
+RTS and reading the port with a short PySerial script (the P4 prints logs only
+once after reset). The full ADB host stack was verified end-to-end on the real
+Tab5 + an Android phone (claim → auth → `shell:` output).
+
+### The provisional UI (HomeScreen → ADBDeviceScreen)
+
+`app/` drives the connection from the LVGL UI: `HomeScreen` has a **Connect**
+button; tapping it calls `app::adb_connect_async()` (`app/adb_session.cpp`), which
+spawns a FreeRTOS task that loads the key, opens the transport, and runs
+`AdbConnection::run_blocking()`. On reaching Online it pushes `ADBDeviceScreen`,
+which shows banner-derived fields (model/name/device) and fetches a few live
+`getprop`s over a `shell:` stream on a background task. `adb_session` is the
+bridge that keeps the library thread-model-agnostic: it owns the connection +
+reader task and marshals the connection's worker-thread callbacks to the LVGL
+thread with `lv_async_call`. It's app-level (not in `embedded_adb`) so the library
+itself pulls in no FreeRTOS task-creation — the host unit tests still link with
+just `std::thread`. This replaced the earlier on-device smoke test (one
+`usb_host_install` only — the UI is now the single connection driver).
 
 ## Simulator details
 
