@@ -15,8 +15,12 @@ embedded ADB.
 
 Phase 1 skeleton: the server listens on `localabstract:tab5adb-agent` and serves
 a banner — enough to verify the build + `app_process` launch + socket path end to
-end with standard adb. Screen capture / offload services and the wire protocol
-come later.
+end with standard adb. Screen capture / offload services come later.
+
+The wire protocol — single-socket framing, the agent-initiated HELLO handshake,
+and the JPEG strip stream (audio reserved) — is specified in
+[`docs/protocol.md`](docs/protocol.md); that doc is the contract between the
+agent and the Tab5 side (`embedded_adb`/`adb` + app).
 
 ## Layout
 
