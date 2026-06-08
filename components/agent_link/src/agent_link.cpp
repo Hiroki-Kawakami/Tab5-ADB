@@ -38,6 +38,29 @@ std::shared_ptr<Link> Link::open(std::shared_ptr<adb::Client> client,
 
 bool Link::is_open() const { return stream_ && stream_->is_open(); }
 
+adb::Error Link::start_mirror(const MirrorConfig& cfg) {
+    if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+
+    // CONTROL_REQUEST payload (§4.1): cmd, req_id, then MIRROR_START args (§4.4).
+    // req_id 0x02 (HELLO used 0x01); only one MIRROR_START is ever in flight, so
+    // the response is matched by cmd alone.
+    uint8_t payload[2 + kMirrorStartArgsLen];
+    payload[0] = kCmdMirrorStart;
+    payload[1] = 0x02;
+    uint8_t* a = payload + 2;
+    wr_u16(a + 0, cfg.target_width);
+    wr_u16(a + 2, cfg.target_height);
+    a[4] = cfg.scale_mode;
+    a[5] = cfg.streams;
+    wr_u16(a + 6, 0);  // reserved
+
+    uint8_t frame[kFrameHeaderSize + sizeof(payload)];
+    write_header(frame, kTypeControlRequest, /*flags=*/0,
+                 tx_seq_.fetch_add(1), static_cast<uint32_t>(sizeof(payload)));
+    std::memcpy(frame + kFrameHeaderSize, payload, sizeof(payload));
+    return stream_->write(frame, sizeof(frame));
+}
+
 void Link::close() {
     if (stream_) stream_->close();  // A_CLSE; on_stream_close drives on_link_close
 }
@@ -77,8 +100,14 @@ void Link::on_frame(const FrameHeader& h, const uint8_t* payload) {
         case kTypeControlRequest:
             handle_control_request(payload, h.length);
             break;
-        // JPEG / AUDIO / EVENT arrive in later slices; unknown TYPEs are ignored
-        // for forward compatibility (§3.1).
+        case kTypeControlResponse:
+            handle_control_response(payload, h.length);
+            break;
+        case kTypeJpeg:
+            handle_jpeg(h, payload);
+            break;
+        // AUDIO / EVENT arrive in later slices; unknown TYPEs are ignored for
+        // forward compatibility (§3.1).
         default:
             break;
     }
@@ -103,10 +132,8 @@ void Link::handle_control_request(const uint8_t* p, size_t len) {
     info.version_major = a[1];
     info.version_minor = a[2];
     info.version_patch = a[3];
-    info.source_width = rd_u16(a + 4);
-    info.source_height = rd_u16(a + 6);
-    info.video_codec = a[8];
-    // a[9] reserved.
+    info.capabilities = rd_u16(a + 4);
+    // a[6..7] reserved.
 
     if (info.proto_version != kProtoVersion) {
         send_hello_response(req_id, kStatusEnotsup);  // §4.4: mismatch -> ENOTSUP
@@ -119,26 +146,74 @@ void Link::handle_control_request(const uint8_t* p, size_t len) {
     if (auto l = listener_.lock()) l->on_link_hello(this, info);
 }
 
+// CONTROL_RESPONSE (§4.2): replies to a Tab5-initiated request. Today the only
+// such request is MIRROR_START.
+void Link::handle_control_response(const uint8_t* p, size_t len) {
+    if (len < 3) {
+        fail(adb::Error::Protocol);
+        return;
+    }
+    const uint8_t cmd = p[0];
+    const uint8_t status = p[2];
+    if (cmd != kCmdMirrorStart) return;  // unknown cmd: ignore (forward compat)
+
+    if (status != kStatusOk) {  // agent refused MIRROR_START
+        fail(adb::Error::Protocol);
+        return;
+    }
+    if (len < 3 + kMirrorStartResultLen) {
+        fail(adb::Error::Protocol);
+        return;
+    }
+    const uint8_t* r = p + 3;
+    MirrorInfo info;
+    info.source_width = rd_u16(r + 0);
+    info.source_height = rd_u16(r + 2);
+    info.video_codec = r[4];
+    // r[5..7] reserved.
+    if (auto l = listener_.lock()) l->on_mirror_started(this, info);
+}
+
+// JPEG (§5.2): one strip = subheader (x,y,w,h) + JPEG bytes. The frame layer has
+// already reassembled the whole strip into `payload`; hand it to the decode +
+// framebuffer seam (the listener).
+void Link::handle_jpeg(const FrameHeader& h, const uint8_t* payload) {
+    if (h.length < kJpegSubheaderSize) {
+        fail(adb::Error::Protocol);
+        return;
+    }
+    JpegSubheader s;
+    parse_jpeg_subheader(payload, s);
+    VideoStrip strip;
+    strip.x = s.x;
+    strip.y = s.y;
+    strip.w = s.w;
+    strip.h = s.h;
+    strip.jpeg = payload + kJpegSubheaderSize;
+    strip.jpeg_len = h.length - kJpegSubheaderSize;
+    strip.frame_start = (h.flags & kFlagFrameStart) != 0;
+    strip.frame_end = (h.flags & kFlagFrameEnd) != 0;
+    if (auto l = listener_.lock()) l->on_video_strip(this, strip);
+}
+
 void Link::send_hello_response(uint8_t req_id, uint8_t status) {
     // CONTROL_RESPONSE payload (§4.2): cmd, req_id, status, then result (§4.4),
-    // which is only present/valid on status == OK.
+    // which is only present/valid on status == OK. Link-only: proto / caps /
+    // max_payload — no mirror params (those go in MIRROR_START).
     uint8_t payload[3 + kHelloResultLen];
     payload[0] = kCmdHello;
     payload[1] = req_id;
     payload[2] = status;
     uint8_t* r = payload + 3;
-    wr_u32(r + 0, cfg_.max_payload);
-    wr_u16(r + 4, cfg_.target_width);
-    wr_u16(r + 6, cfg_.target_height);
-    r[8] = kProtoVersion;
-    r[9] = cfg_.scale_mode;
-    r[10] = 0;
-    r[11] = 0;
+    r[0] = kProtoVersion;
+    r[1] = 0;  // reserved
+    wr_u16(r + 2, cfg_.capabilities);
+    wr_u32(r + 4, cfg_.max_payload);
 
     const size_t plen = (status == kStatusOk) ? sizeof(payload) : 3;
 
     uint8_t frame[kFrameHeaderSize + sizeof(payload)];
-    write_header(frame, kTypeControlResponse, /*flags=*/0, tx_seq_++,
+    write_header(frame, kTypeControlResponse, /*flags=*/0, tx_seq_.fetch_add(1),
                  static_cast<uint32_t>(plen));
     std::memcpy(frame + kFrameHeaderSize, payload, plen);
     if (stream_) stream_->write(frame, kFrameHeaderSize + plen);

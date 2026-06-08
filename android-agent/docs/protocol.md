@@ -9,10 +9,15 @@ Tab5（ESP32-P4。組み込み ADB ホスト）と Android 側の `tab5adb-agent
 - 文中の `u8` `u16` `u32` は符号なし整数。`i16` 等は符号付き。
 - バージョン: **proto_version = 1**。完全一致のみ許可（§4.4）。
 - **役割の非対称性**: media（映像/音声）は **Android → Tab5 の単方向**。制御だけが双方向で、
-  接続直後の **HELLO は agent（Android）が送り Tab5 が応える**（§4, §7）。
+  接続直後の **HELLO は agent（Android）が送り Tab5 が応える**（§4, §7）。mirror の開始は逆に
+  **Tab5 が `MIRROR_START` を送り agent が応える**（§4）。
+- **HELLO の役割は agent_link レイヤー接続の確立だけ**: proto 版・agent バージョン・capability の
+  確認に限る。mirror など個別機能のパラメータは扱わず、それらは各機能の開始メッセージ
+  （`MIRROR_START` 等）が運ぶ。agent_link は mirror 専用ではなく Tab5⇄Android の汎用リンク。
 
-> **ステータス。** フレーム層（§3）・HELLO（§4）・映像（§5）はこの版で確定。音声（§6）は **枠だけ**
-> （拡張余地の確保）。実機で詰める数値（`max_payload`/`SPLIT_COUNT` の最適値など）は §10。
+> **ステータス。** フレーム層（§3）・HELLO + `MIRROR_START`（§4）・映像（§5）はこの版で確定。
+> 音声（§6）は **枠だけ**（`MIRROR_START` の `AUDIO` ビット＋ AUDIO フレームを将来追記）。実機で
+> 詰める数値（`max_payload`/`SPLIT_COUNT` の最適値など）は §10。
 
 ---
 
@@ -49,12 +54,17 @@ USB bulk のリンク層 CRC/再送 + ADB のメッセージ整合の上に、Wi
 1. Tab5 が agent の dex を `sync:` で `/data/local/tmp` へ push（ファーム埋め込みの dex を展開して送る）。
 2. Tab5 が `shell:`/`exec` で `CLASSPATH=… app_process / com.tab5adb.agent.Server` を起動。
 3. Tab5 が `localabstract:tab5adb-agent` へストリームを開く（agent が listen するまで短間隔でリトライ）。
-4. 接続確立後、**agent が `HELLO`（CONTROL_REQUEST）を送る**（自己紹介＋画面情報。§4.4）。
-5. Tab5 が `HELLO`（CONTROL_RESPONSE）を返す（互換確認、`max_payload`・パネル寸法・スケールモードの通知）。
-6. 以降 agent が `JPEG` フレームを流し始める（§5）。
+4. 接続確立後、**agent が `HELLO`（CONTROL_REQUEST）を送る**（proto 版・agent バージョン・capability。§4.4）。
+5. Tab5 が `HELLO`（CONTROL_RESPONSE）を返す（互換確認、`max_payload`・capability の通知）。
+   → ここで **agent_link 接続が確立**（`READY`）。
+6. mirror を始めるとき、**Tab5 が `MIRROR_START`（CONTROL_REQUEST）を送る**（パネル寸法・スケール
+   モード・開始ストリーム。§4.4）。
+7. agent が `MIRROR_START`（CONTROL_RESPONSE）を返し（ソース寸法・コーデック）、以降 `JPEG`
+   フレームを流し始める（§5）。
 
 切断（ストリーム CLSE / agent 終了 / USB 抜け / WiFi 途絶）で `IDLE` に戻り、必要なら本シーケンスで
-再接続する。
+再接続する。今は mirror がリンクを張る唯一の用途なので 1 と 6 は連続するが、HELLO（リンク確立）と
+`MIRROR_START`（機能開始）は別ステップとして分離している。
 
 ---
 
@@ -107,8 +117,9 @@ USB bulk のリンク層 CRC/再送 + ADB のメッセージ整合の上に、Wi
 ## 4. 制御メッセージ（枠組みと共通規約）
 
 要求/応答モデル。**どちらの側からでも要求を出せる**（応答側が `req_id` をエコーして対応付ける）。
-v1 で実際に使うのは agent 発の `HELLO` のみ。Tab5→agent の制御（品質変更・スケールモード切替・音声
-開始など）は将来 §4.4 のレジストリへ追記して定義する。
+v1 で実際に使うのは agent 発の `HELLO`（リンク確立）と Tab5 発の `MIRROR_START`（mirror 開始）。
+その他の Tab5→agent 制御（品質変更・スケールモード切替・mirror 停止など）は §4.4 のレジストリへ
+追記して定義する。
 
 ### 4.1 CONTROL_REQUEST payload（共通規約）
 
@@ -142,18 +153,18 @@ v1 で実際に使うのは agent 発の `HELLO` のみ。Tab5→agent の制御
 
 | cmd | 名前 | 発信 | 役割 | payload 詳細 |
 |---|---|---|---|---|
-| `0x01` | `HELLO` | A→T | 接続確立。agent が自己紹介、Tab5 が互換確認＋パネル寸法/`max_payload`/スケールモード通知 | 下記 |
-| `0x10` | `VIDEO_START`     | T→A | **予約**: 映像ストリーム開始 | 未定 |
-| `0x11` | `VIDEO_STOP`      | T→A | **予約**: 映像停止 | 未定 |
-| `0x12` | `VIDEO_SET_PARAM` | T→A | **予約**: スケールモード/品質/分割数等のライブ変更 | 未定 |
-| `0x20` | `AUDIO_START`     | T→A | **予約**: 音声開始（パラメータは開始メッセージが運ぶ。§6） | 未定 |
-| `0x21` | `AUDIO_STOP`      | T→A | **予約**: 音声停止 | 未定 |
+| `0x01` | `HELLO` | A→T | **agent_link 接続確立**。proto 版・agent バージョン・capability の確認のみ | 下記 |
+| `0x10` | `MIRROR_START`     | T→A | **mirror 開始**（映像＋音声。v1 は映像のみ）。パネル寸法/スケールモード/開始ストリームを運ぶ | 下記 |
+| `0x11` | `MIRROR_STOP`      | T→A | **予約**: mirror 停止（映像＋音声） | 未定 |
+| `0x12` | `MIRROR_SET_PARAM` | T→A | **予約**: スケールモード/品質/分割数等のライブ変更 | 未定 |
 
-予約: `0x02..0x0F` 制御一般 / `0x13..0x1F` 映像制御 / `0x22..0x2F` 音声制御 / `0x30..` 拡張。
+予約: `0x02..0x0F` 制御一般 / `0x13..0x1F` mirror 制御 / `0x20..` 拡張。
 
-> v1 は **HELLO 後に agent が即 JPEG ストリームを開始**する（`VIDEO_START` 不要）。`VIDEO_*`/`AUDIO_*`
-> は Tab5 主導の制御を将来入れるための枠。「映像と並行して制御を処理できる」よう、Tab5/agent とも
-> 受信ループは TYPE で振り分け、JPEG の流量で制御がブロックされない実装にする。
+> v1 のフロー: **HELLO でリンクを確立 → Tab5 の `MIRROR_START` で mirror 開始 → agent が JPEG
+> ストリームを流す**。`MIRROR_START` は映像と音声の **両方**を開始するメッセージ（運ぶストリームは
+> `streams` ビットマスクで選ぶ。v1 は映像のみ）。音声フィールドは実装時に末尾へ append する。
+> 「映像と並行して制御を処理できる」よう、Tab5/agent とも受信ループは TYPE で振り分け、JPEG の流量
+> で制御がブロックされない実装にする。
 
 **イベント**（予約）
 
@@ -164,9 +175,10 @@ v1 で実際に使うのは agent 発の `HELLO` のみ。Tab5→agent の制御
 
 予約: `0x03..0x0F` 一般 / `0x10..` 拡張。
 
-#### HELLO (cmd = 0x01) — 接続確立
+#### HELLO (cmd = 0x01) — agent_link 接続確立
 
-接続直後に **agent が CONTROL_REQUEST として送る**（自己紹介）。状態を変えない。
+接続直後に **agent が CONTROL_REQUEST として送る**。**proto 版・agent バージョン・capability の確認のみ**
+で、mirror など個別機能のパラメータは扱わない（それらは各機能の開始メッセージが運ぶ）。状態を変えない。
 
 **要求 (CONTROL_REQUEST) args**（agent → Tab5）:
 
@@ -175,29 +187,73 @@ v1 で実際に使うのは agent 発の `HELLO` のみ。Tab5→agent の制御
  +1   u8      agent_version_major
  +2   u8      agent_version_minor
  +3   u8      agent_version_patch
- +4   u16     source_width        ソース画面の物理幅 [px] (LE)。情報用
- +6   u16     source_height       ソース画面の物理高さ [px] (LE)。情報用
- +8   u8      video_codec         0x01=JPEG(YUV420)（現行）。以降は予約
- +9   u8      reserved            0
- (= 10 bytes。将来は末尾に append-only)
+ +4   u16     capabilities        agent が提供できる機能のビットマスク (LE)。§4.6
+ +6   u16     reserved            0
+ (= 8 bytes。将来は末尾に append-only)
 ```
 
 **応答 (CONTROL_RESPONSE) result**（Tab5 → agent, `status = OK`）:
 
 ```
- +0   u32     max_payload         Tab5 が受理できる payload 最大長 (LE)。agent は JPEG ブロックをこれ以下に収める
- +4   u16     target_width        Tab5 パネル幅 [px] (LE)。= 720
- +6   u16     target_height       Tab5 パネル高さ [px] (LE)。= 1280
- +8   u8      proto_version       Tab5 のプロトコル版。agent が完全一致を確認
- +9   u8      scale_mode          初期スケールモード。0=fit（既定） / 1=fill（§5.3）
- +10  u8      reserved            0
- +11  u8      reserved            0
- (= 12 bytes。将来は末尾に append-only)
+ +0   u8      proto_version       Tab5 のプロトコル版。agent が完全一致を確認
+ +1   u8      reserved            0
+ +2   u16     capabilities        Tab5 が受理できる機能のビットマスク (LE)。§4.6
+ +4   u32     max_payload         Tab5 が受理できる payload 最大長 (LE)。agent はフレーム payload をこれ以下に収める
+ (= 8 bytes。将来は末尾に append-only)
 ```
 
 - 双方とも `proto_version` の **完全一致**を確認してから使う。jar は Tab5 が保持し通信前に転送するため
   不一致は基本起こらないが、念のため不一致なら Tab5 は `status = ENOTSUP` を返しストリームを閉じる。
+- `max_payload` はリンク層（§3）の容量なので mirror に限らず全 TYPE に効く。`capabilities` は両者の
+  AND が実際に使える機能集合（§4.6）。
 - 将来フィールドを足すときは **末尾に追記**（append-only）。
+
+#### MIRROR_START (cmd = 0x10) — mirror 開始
+
+HELLO で agent_link が確立した後、**Tab5 が CONTROL_REQUEST として送る**。映像（＋将来は音声）の
+mirror を開始させ、表示パラメータ（パネル寸法・スケールモード）を agent に渡す。agent は応答を返した
+**後に** ストリーミングを始める。
+
+**要求 (CONTROL_REQUEST) args**（Tab5 → agent）:
+
+```
+ +0   u16     target_width        Tab5 パネル幅 [px] (LE)。= 720
+ +2   u16     target_height       Tab5 パネル高さ [px] (LE)。= 1280
+ +4   u8      scale_mode          スケールモード。0=fit（既定） / 1=fill（§5.3）
+ +5   u8      streams             開始するストリームのビットマスク（§4.6 と同じ bit 割当）。v1 = 0x01（VIDEO のみ）
+ +6   u16     reserved            0
+ (= 8 bytes。将来は末尾に append-only)
+```
+
+**応答 (CONTROL_RESPONSE) result**（agent → Tab5, `status = OK`）:
+
+```
+ +0   u16     source_width        ソース画面の物理幅 [px] (LE)。情報用
+ +2   u16     source_height       ソース画面の物理高さ [px] (LE)。情報用
+ +4   u8      video_codec         0x01=JPEG(YUV420)（現行）。以降は予約
+ +5   u8      reserved            0
+ +6   u16     reserved            0
+ (= 8 bytes。将来は末尾に append-only)
+```
+
+- `streams` に立っているが agent が提供できない（HELLO の `capabilities` に無い）ビットがあれば、agent は
+  `status = ENOTSUP` を返す。提供可能なビットだけを開始してもよい（運用は実装で確定）。
+- `status = OK` の応答を返した後、agent は §5 の JPEG ストリームを流し始める。
+- 将来フィールド（音声パラメータ等）を足すときは **末尾に追記**（append-only）。
+
+### 4.6 capability ビット（共通）
+
+機能の有無を表すビットマスク。HELLO で双方が広告し（agent=提供可能 / Tab5=受理可能）、`MIRROR_START`
+の `streams` も同じ bit 割当を使う。
+
+| bit | 名前 | 意味 |
+|---|---|---|
+| 0 | `VIDEO` | 映像 mirror（JPEG ストリップ。§5） |
+| 1 | `AUDIO` | 音声 mirror（§6。**予約**） |
+| 2-15 | 予約 | 0 |
+
+v1 は agent・Tab5 とも `VIDEO` を立てる（`AUDIO` は将来）。両者の `capabilities` の **AND** が利用可能な
+機能集合。
 
 ### 4.5 ステータスコード（共通の基準値・拡張可）
 
@@ -217,7 +273,8 @@ v1 で実際に使うのは agent 発の `HELLO` のみ。Tab5→agent の制御
 
 `TYPE = JPEG`(0x10) のフレームで、画面 1 フレームを **横方向のストリップ（水平バンド）に分割**して
 Android→Tab5 へ送る。各ブロックは「Tab5 画面内の矩形領域（座標・サイズ）」と「その領域を JPEG 圧縮
-したデータ」を持つ。v1 では **毎フレーム画面全体**を送る。
+したデータ」を持つ。v1 では **毎フレーム画面全体**を送る。agent は **Tab5 の `MIRROR_START`（§4）を
+受けてから**このストリームを開始する（`target_width`/`target_height`/`scale_mode` はその要求が運ぶ）。
 
 ### 5.1 agent 側のパイプライン（回転 → スケール → ストリップ → JPEG）
 
@@ -262,8 +319,8 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
   ため、1 フレームを複数ストリップに分けて **デコードを時間方向に分散**させる。`SPLIT_COUNT` はこの
   分散粒度のノブで、**既定 4・調整可能**。負荷分散と転送効率（`max_payload`）の兼ね合いで実機調整する。
   Tab5 はバンド数を事前に知る必要はない（各ブロックの座標とフレーム層の `FRAME_END` で境界が決まる）。
-  当面は agent 側の設定値。将来 Tab5 主導で変えるなら `VIDEO_SET_PARAM`（§4.4 予約）。
-- **スケールモード**（初期値は HELLO 応答の `scale_mode`。将来 `VIDEO_SET_PARAM` でライブ切替）:
+  当面は agent 側の設定値。将来 Tab5 主導で変えるなら `MIRROR_SET_PARAM`（§4.4 予約）。
+- **スケールモード**（初期値は `MIRROR_START` の `scale_mode`。将来 `MIRROR_SET_PARAM` でライブ切替）:
   - **fit（既定）**: 画面全体が収まるよう **アスペクト比を保って** 720×1280 に内接させる。縦横比が
     パネルと異なると上下または左右に余白（レターボックス）が出る＝**送られる画像は 720×1280 より
     小さくなり得る**。中央寄せの分だけ `x`/`y` にオフセットが乗る。余白は静的な黒で、Tab5 が初期化時
@@ -290,7 +347,8 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 `TYPE = AUDIO`(0x11) のフレームで音声（PCM またはエンコード済み）を Android→Tab5 へ運ぶ予定。
 **本版では構造を確定しない**（拡張の余地だけ確保）。実装時に決めるもの:
 
-- パラメータ（sample_rate / channels / フォーマット / 圧縮）は **開始メッセージ（`AUDIO_START`, §4.4）が運ぶ**。
+- パラメータ（sample_rate / channels / フォーマット / 圧縮）は **`MIRROR_START`（§4.4）の末尾に
+  append したフィールドが運ぶ**（`streams` の `AUDIO` ビットで開始を選択）。
 - AUDIO payload のサブヘッダ（タイムスタンプ/通し番号など）と本体形式。
 - ストリーム境界は §3.2 の `FRAME_START`/`FRAME_END` を流用。
 
@@ -301,16 +359,18 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 ## 7. 状態遷移
 
 ```
-            connect + HELLO(ok)
-  IDLE ───────────────────────────▶ STREAMING(JPEG[, AUDIO])
-   ▲                                       │
-   └───────────────────────────────────────┘
-         ストリーム切断 / agent 終了 / USB 抜け / WiFi 途絶
+            connect + HELLO(ok)        MIRROR_START(ok)
+  IDLE ──────────────────────────▶ READY ─────────────────▶ STREAMING(JPEG[, AUDIO])
+   ▲                                 │                              │
+   └─────────────────────────────────┴──────────────────────────────┘
+              ストリーム切断 / agent 終了 / USB 抜け / WiFi 途絶
 ```
 
 - `IDLE`: 未接続、または接続直後 HELLO 前。
-- `STREAMING`: HELLO 確立後。agent が JPEG（将来は AUDIO も）を流す。
-- 切断で `IDLE` に戻り、§2.2 のシーケンスで再接続する。
+- `READY`: HELLO 確立後（agent_link 接続済み、mirror 未開始）。制御メッセージのやりとりは可能。
+- `STREAMING`: `MIRROR_START` 後。agent が JPEG（将来は AUDIO も）を流す。
+- 切断で `IDLE` に戻り、§2.2 のシーケンスで再接続する。`MIRROR_STOP`（§4.4 予約）で `READY` に戻る
+  経路は将来追加する。
 
 ---
 
@@ -333,13 +393,25 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 HELLO 要求フレーム（`TYPE=CONTROL_REQUEST`, `SEQ=0`, payload = `cmd=0x01, req_id=0x01` + HELLO args）:
 
 ```
-A5 01 00 00 0C 00 00 00  01 01  01 00 00 00  …source_w/h…  01 00
-│  │  │  │  └──────────┴ LENGTH=12 (LE u32)
+A5 01 00 00 0A 00 00 00  01 01  01 01 00 00  01 00  00 00
+│  │  │  │  └──────────┴ LENGTH=10 (LE u32)
 │  │  │  └ SEQ=0
 │  │  └ FLAGS=0
 │  └ TYPE=CONTROL_REQUEST(0x01)
 └ MAGIC
-  payload: cmd=01 req_id=01 | proto=01 ver=0.0.0 | source_w source_h | codec=01 rsv=0
+  payload: cmd=01 req_id=01 | proto=01 ver=1.0.0 | caps=0x0001(VIDEO) | rsv=0
+```
+
+MIRROR_START 要求フレーム（`TYPE=CONTROL_REQUEST`, `SEQ=1`, payload = `cmd=0x10, req_id=0x02` + args）:
+
+```
+A5 01 00 01 0A 00 00 00  10 02  D0 02  00 05  00 01  00 00
+│  │  │  │  └──────────┴ LENGTH=10 (LE u32)
+│  │  │  └ SEQ=1
+│  │  └ FLAGS=0
+│  └ TYPE=CONTROL_REQUEST(0x01)
+└ MAGIC
+  payload: cmd=10 req_id=02 | target_w=0x02D0(720) target_h=0x0500(1280) | scale=0(fit) streams=0x01(VIDEO) | rsv=0
 ```
 
 JPEG ストリップフレーム（先頭バンド = `FRAME_START`, `SEQ=7`, jpeg=N バイト, fill モード例）:
@@ -364,4 +436,4 @@ A5 10 01 07 <LEN u32 LE> 00 00 00 00 D0 02 40 01 <jpeg…>
 - **`SPLIT_COUNT` の最適値**（§5.3）: 既定 4。負荷分散と転送効率の兼ね合いで実機調整。
 - **JPEG の細部**: HW JPEG デコーダの制約（最小タイルサイズ・整列。16 整列は §5.2 で前提化）と
   YUV420 サブサンプルの相性を実機確認。
-- 音声（§6）の全フィールド（`AUDIO_START` 定義時）。
+- 音声（§6）の全フィールド（`MIRROR_START` の `AUDIO` 拡張定義時）。

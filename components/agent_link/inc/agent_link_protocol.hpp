@@ -35,7 +35,22 @@ enum Flag : uint8_t {
 
 // Control commands (§4.4).
 enum Cmd : uint8_t {
-    kCmdHello = 0x01,
+    kCmdHello = 0x01,         // A->T: agent_link link establishment (link-only)
+    kCmdMirrorStart = 0x10,   // T->A: start mirror (video + future audio)
+    kCmdMirrorStop = 0x11,    // T->A: stop mirror (reserved)
+    kCmdMirrorSetParam = 0x12,  // T->A: live param change (reserved)
+};
+
+// Capability bits (§4.6) — also the MIRROR_START `streams` bit assignment.
+enum Cap : uint16_t {
+    kCapVideo = 0x0001,
+    kCapAudio = 0x0002,
+};
+
+// scale_mode (MIRROR_START args, §5.3).
+enum ScaleMode : uint8_t {
+    kScaleFit = 0,   // aspect-preserve inscribe, letterbox (default)
+    kScaleFill = 1,  // aspect-preserve cover, crop (always 720x1280)
 };
 
 // Status codes (§4.5).
@@ -49,12 +64,19 @@ enum Status : uint8_t {
     kStatusEfail = 0xFF,
 };
 
-// video_codec (HELLO request, §4.4).
+// video_codec (MIRROR_START response, §4.4).
 constexpr uint8_t kVideoCodecJpeg = 0x01;
 
-// HELLO request args length (§4.4) and response result length (§4.4).
-constexpr size_t kHelloArgsLen = 10;     // after cmd+req_id
-constexpr size_t kHelloResultLen = 12;   // after cmd+req_id+status
+// HELLO request args / response result lengths (§4.4) — link-only now.
+constexpr size_t kHelloArgsLen = 8;    // after cmd+req_id
+constexpr size_t kHelloResultLen = 8;  // after cmd+req_id+status
+
+// MIRROR_START request args / response result lengths (§4.4).
+constexpr size_t kMirrorStartArgsLen = 8;    // after cmd+req_id
+constexpr size_t kMirrorStartResultLen = 8;  // after cmd+req_id+status
+
+// JPEG block subheader (§5.2): x, y, w, h (all u16), then the JPEG bytes.
+constexpr size_t kJpegSubheaderSize = 8;
 
 // --- little-endian field access ---
 inline uint16_t rd_u16(const uint8_t* p) {
@@ -103,6 +125,30 @@ inline void write_header(uint8_t* p, uint8_t type, uint8_t flags, uint8_t seq,
     p[2] = flags;
     p[3] = seq;
     wr_u32(p + 4, length);
+}
+
+// JPEG block subheader (§5.2): the rectangle (Tab5 device coords) the JPEG bytes
+// decode into. All fields are 16px multiples; the JPEG bytes follow at +8.
+struct JpegSubheader {
+    uint16_t x, y, w, h;
+};
+
+// Parse the JPEG subheader from a JPEG frame's payload (caller guarantees
+// len >= kJpegSubheaderSize).
+inline void parse_jpeg_subheader(const uint8_t* p, JpegSubheader& s) {
+    s.x = rd_u16(p + 0);
+    s.y = rd_u16(p + 2);
+    s.w = rd_u16(p + 4);
+    s.h = rd_u16(p + 6);
+}
+
+// Write a JPEG subheader into `p` (caller guarantees >= kJpegSubheaderSize bytes).
+inline void write_jpeg_subheader(uint8_t* p, uint16_t x, uint16_t y, uint16_t w,
+                                 uint16_t h) {
+    wr_u16(p + 0, x);
+    wr_u16(p + 2, y);
+    wr_u16(p + 4, w);
+    wr_u16(p + 6, h);
 }
 
 }  // namespace agent_link

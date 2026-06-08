@@ -13,24 +13,32 @@ embedded ADB.
 
 ## Status
 
-The server listens on `localabstract:tab5adb-agent` and runs the protocol's
-**HELLO handshake**: on each connection it sends its HELLO CONTROL_REQUEST and
-checks the Tab5 CONTROL_RESPONSE (proto-version match), then holds the stream
-open. Screen capture / offload services come later (Phase 2). Verified against a
-real Android device by the headless Tab5-side harness `components/agent_link/test/test_hello.cpp`
-(no GUI; drives connect → push → launch → HELLO over libusb).
+On each connection the server runs the protocol's **HELLO handshake** (link
+establishment only — proto / version / capability), then waits for the Tab5 to
+send **MIRROR_START** and **streams the screen as JPEG strips** (Phase 2, done):
+it captures via the hidden `SurfaceControl`→`ImageReader` display APIs and runs a
+rotate → scale (fit/fill) → horizontal-strip → JPEG (YUV420 q60) pipeline. A
+`--test-pattern` mode streams a deterministic frame instead (for headless
+verification without the capture APIs). Verified against a real Android device by the
+Tab5-side harnesses `test_hello.cpp` (HELLO) and `test_mirror.cpp` (strip mirror,
+incl. a real-capture smoke test).
 
-The wire protocol — single-socket framing, the agent-initiated HELLO handshake,
-and the JPEG strip stream (audio reserved) — is specified in
-[`docs/protocol.md`](docs/protocol.md); that doc is the contract between the
-agent and the Tab5 side (`embedded_adb`/`adb` + the `agent_link` component).
+The wire protocol — single-socket framing, the agent-initiated HELLO (link-only)
+handshake, the Tab5-initiated MIRROR_START, and the JPEG strip stream (audio
+reserved) — is specified in [`docs/protocol.md`](docs/protocol.md); that doc is
+the contract between the agent and the Tab5 side (`embedded_adb`/`adb` + the
+`agent_link` component).
 
 ## Layout
 
 ```
-src/com/tab5adb/agent/Server.java   # entry point (main); LocalServerSocket loop
-build.sh                            # javac + d8  -> build/tab5adb-agent.jar
-run.sh                              # adb push + app_process (dev loop)
+src/com/tab5adb/agent/
+  Server.java         # entry point (main); sockets, HELLO + MIRROR_START, stream loop
+  FramePipeline.java  # rotate -> scale (fit/fill) -> strip -> JPEG (§5.1)
+  TestPattern.java    # deterministic source frame for --test-pattern verification
+  ScreenCapture.java  # real capture: SurfaceControl mirror display -> ImageReader
+build.sh              # javac + d8  -> build/tab5adb-agent.jar
+run.sh                # adb push + app_process (dev loop)
 ```
 
 Build artifacts go to `build/` (gitignored).
@@ -45,13 +53,21 @@ authorized:
 nix develop -c android-agent/build.sh      # -> build/tab5adb-agent.jar
 ```
 
-**Primary verification = the headless Tab5-side harness** (the real
-`embedded_adb`/`adb` + `agent_link` stack over libusb, no GUI). It pushes the jar,
-launches `app_process`, opens `localabstract:tab5adb-agent`, and runs the HELLO
-handshake against the phone — run it with
-`nix develop -c components/agent_link/test/run.sh` (the runner builds the host
-stack, runs `adb kill-server`, and launches the test). The test approach (headless,
-no LVGL, real Tab5-side stack) is documented in [`docs/testing.md`](docs/testing.md).
+**Primary verification = the headless Tab5-side harnesses** (the real
+`embedded_adb`/`adb` + `agent_link` stack over libusb, no GUI). They push the jar,
+launch `app_process`, open `localabstract:tab5adb-agent`, and drive the protocol
+against the phone:
+
+```sh
+nix develop -c components/agent_link/test/run.sh                       # HELLO (test_hello)
+nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'   # JPEG strip mirror
+#   TAB5ADB_REAL=1 on test_mirror smoke-tests real SurfaceControl capture
+```
+
+`test_mirror` decodes the received strips with host libjpeg and asserts
+framing / 16-alignment / per-frame tiling (it also writes `build/mirror_frame.ppm`
+for eyeballing). The test approach (headless, no LVGL, real Tab5-side stack) is
+documented in [`docs/testing.md`](docs/testing.md).
 
 `run.sh` still launches the agent standalone for manual poking, but the agent now
 speaks the binary HELLO protocol (it sends a HELLO frame and waits for the Tab5
@@ -74,5 +90,7 @@ Verified against a real Android device (Android 14, API 34).
   reference.
 - `javac -source 8 -target 8 -classpath android.jar` then `d8 --release` into a
   jar (the jar holds `classes.dex`; `app_process` loads it via `CLASSPATH`).
-- Hidden APIs (for capture, later) are reached by **reflection** for now, so the
-  build needs only the public `android.jar`.
+- Hidden APIs (`SurfaceControl` display capture, `DisplayManagerGlobal`) are
+  reached by **reflection**, so the build needs only the public `android.jar`.
+- No `Canvas.drawText` — a bare `app_process` has no default `Typeface`, so text
+  drawing aborts; the test pattern uses coloured shapes instead.

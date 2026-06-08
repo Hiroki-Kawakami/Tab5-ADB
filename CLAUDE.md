@@ -86,21 +86,32 @@ connect via a `localabstract:` stream open. That open is **not** a missing engin
 piece — `embedded_adb`'s `AdbConnection::open_stream(service, …)` is generic, so
 `open_stream("localabstract:tab5adb-agent", …)` already works; what the Tab5 side
 needed was a generic `adb`-layer stream + the agent-protocol logic, both now built
-(see `agent_link` below). The dex is tiny (~3.5 KB), so the plan is to embed it
-gzip+`xxd` → C array, falling back to a dedicated partition if it grows.
+(see `agent_link` below). The dex is tiny (~9 KB with the Phase 2 pipeline), so
+the plan is to embed it gzip+`xxd` → C array, falling back to a dedicated
+partition if it grows.
 **Phase 1 done** (build + `app_process` launch + socket banner). **Wire protocol
 specified** in `android-agent/docs/protocol.md` (single-socket TYPE multiplexing,
-no payload CRC, agent-initiated HELLO over a forward `localabstract:` connection,
-Android→Tab5 JPEG strip stream — YUV420 q60, agent-side rotate/scale (fit/fill)/
-strip, 16px aligned; audio reserved). **HELLO handshake done & verified on a
-real Android device** (agent sends HELLO REQUEST + checks the Tab5 RESPONSE's proto match;
-Tab5-side `agent_link` answers): the headless harness
-`components/agent_link/test/test_hello.cpp` drives the whole bring-up GUI-less over
-libusb (connect → `Sync::push` the jar → `open_shell` to launch `app_process` →
-`Link::open` localabstract → HELLO round-trip), both sides logging `HELLO ok`. Run
-it with `nix develop -c components/agent_link/test/run.sh`; the test approach is
-documented in `android-agent/docs/testing.md`. Next: Phase 2 (JPEG strip
-capture/receive). See `android-agent/README.md`.
+no payload CRC; agent-initiated **HELLO = link establishment only** — proto /
+version / capability — over a forward `localabstract:` connection; mirror starts
+on a separate **Tab5-initiated `MIRROR_START`** carrying panel size / scale mode /
+streams; Android→Tab5 JPEG strip stream — YUV420 q60, agent-side rotate/scale
+(fit/fill)/strip, 16px aligned; audio reserved as a `MIRROR_START` AUDIO bit).
+**Phase 2 (JPEG strip mirror) done & verified on a real Android device.** The Java agent
+(`Server` + `FramePipeline`/`TestPattern`/`ScreenCapture`) captures the screen via
+hidden `SurfaceControl`→`ImageReader`, runs the rotate→scale→strip→JPEG pipeline,
+and streams strips; the Tab5-side `agent_link::Link` parses frames and hands each
+strip to a decode+framebuffer seam (`LinkListener::on_video_strip`). The headless
+harness `components/agent_link/test/test_mirror.cpp` drives the whole bring-up
+GUI-less over libusb (HELLO → `start_mirror` → strips), decodes strips with host
+libjpeg, and asserts framing/16-alignment/tiling; the agent's deterministic
+`--test-pattern` mode is the primary pass/fail (no `Canvas.drawText` — bare
+app_process has no default Typeface), and `TAB5ADB_REAL=1` smoke-tests real
+capture. `test_hello.cpp` still covers the HELLO-only path. Run with
+`nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'`; test
+approach in `android-agent/docs/testing.md`. **Next: receive→decode→render** — a
+mirror screen in `app/` (simulator: host libjpeg into an LVGL canvas over the
+same libusb `Client`; device: P4 HW JPEG into the bsp framebuffer), then real
+Tab5 E2E. See `android-agent/README.md`.
 
 ## Architecture
 
@@ -136,7 +147,7 @@ simulator/                   # SIMULATOR build root (see below)
     include/  src/           #     host shims: esp_* (err/log/check/timer/heap/nvs)
                              #     + freertos/* (pthread-backed FreeRTOS API)
 android-agent/               # ANDROID  tab5adb-agent (scrcpy-style app_process server)
-  src/                       #   Java sources (com.tab5adb.agent.Server)
+  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/TestPattern/ScreenCapture
   build.sh  run.sh           #   javac+d8 -> dex jar; adb push + app_process dev loop
 ```
 
@@ -477,14 +488,22 @@ wire format (frame header §3, TYPE/FLAGS, HELLO §4, status codes) is in
 reader thread**: `agent_link` is mostly a receiver (agent→Tab5 push), so
 `on_stream_data` accumulates bytes and dispatches whole frames; the HELLO response
 `write()` is non-blocking. So `on_link_hello`/`on_link_close` fire on the **reader
-thread** (LVGL marshalling is the app's job; the headless test needs none). This
-same parser carries the JPEG strip stream in Phase 2 by handing each `FRAME_END`
-to a decode+framebuffer seam (host libjpeg in the test, P4 HW JPEG + bsp FB in the
-app). **HELLO done & verified on a real Android device** by `test/test_hello.cpp` (run it with
-`nix develop -c components/agent_link/test/run.sh` — the runner builds the whole
-host stack, runs `adb kill-server`, and launches the test; artifacts in
-`test/build/`; test approach in `android-agent/docs/testing.md`). Next slices:
-JPEG strip receive (Phase 2).
+thread** (LVGL marshalling is the app's job; the headless test needs none).
+`Link::start_mirror(MirrorConfig)` sends the Tab5-initiated `MIRROR_START`
+(non-blocking; call from `on_link_hello`), and the same parser carries the JPEG
+strip stream: each whole JPEG frame (the frame layer reassembles A_WRTE splits) is
+handed to a **decode+framebuffer seam** = `LinkListener::on_video_strip(VideoStrip)`
+(rect + JPEG bytes + frame_start/end), so `Link` stays free of libjpeg / HW-JPEG
+(host libjpeg in the test, P4 HW JPEG + bsp FB in the app). `tx_seq_` is atomic
+because `start_mirror` (app thread) and the HELLO response (reader thread) both
+write frames. **HELLO + Phase 2 mirror done & verified on a real Android device**:
+`test/test_hello.cpp` covers the HELLO-only path; `test/test_mirror.cpp` drives
+HELLO → `start_mirror` → strips and asserts framing/16-alignment/tiling via host
+libjpeg (run with `nix develop -c sh -c 'TEST=test_mirror
+components/agent_link/test/run.sh'`; default `TEST=test_hello`; the runner builds
+the host stack incl. `libjpeg`, runs `adb kill-server`, launches the test;
+artifacts in `test/build/`; approach in `android-agent/docs/testing.md`). Next
+slices: receive→decode→**render** (a mirror screen in `app/`).
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 

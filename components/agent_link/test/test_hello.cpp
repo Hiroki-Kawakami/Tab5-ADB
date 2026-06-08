@@ -72,10 +72,9 @@ public:
 
     // --- LinkListener ---
     void on_link_hello(agent_link::Link* link, const agent_link::AgentInfo& info) override {
-        std::printf(">>> on_link_hello: proto=%u agent=%u.%u.%u source=%ux%u codec=%u\n",
+        std::printf(">>> on_link_hello: proto=%u agent=%u.%u.%u caps=0x%04x\n",
                     info.proto_version, info.version_major, info.version_minor,
-                    info.version_patch, info.source_width, info.source_height,
-                    info.video_codec);
+                    info.version_patch, info.capabilities);
         hello_link_ = link;  // the link that completed HELLO (retries make others)
         hello_ = true;
     }

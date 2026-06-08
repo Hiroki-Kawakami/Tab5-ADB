@@ -55,7 +55,7 @@ g++ -std=c++17 \
     "$comps/embedded_adb/src/adb_keystore.cpp" "$comps/embedded_adb/src/adb_connection.cpp" \
     "$comps/embedded_adb/src/adb_stream.cpp" "$comps/embedded_adb/src/transport_libusb.cpp" \
     $objs \
-    $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson) \
+    $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson libjpeg) \
     -lpthread -o "$bin"
 
 # Default the jar path to build.sh's output unless the caller overrides argv[1].

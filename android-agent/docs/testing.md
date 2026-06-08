@@ -59,6 +59,36 @@ nix develop -c components/agent_link/test/run.sh [jar-path]
 **合否**: `on_link_hello` 発火（Tab5 側受理）＋ agent stdout に `HELLO ok`（agent 側受理）＋ `Link` の
 `on_link_close` が exactly-once。`PASSED`/`FAILED` を終了コードで返す。実機で検証済み。
 
+### `test_mirror` — JPEG ストリップ mirror（`test/test_mirror.cpp`）
+
+`test_hello` の bring-up を引き継ぎ、Phase 2 の映像ストリームを検証する:
+
+```sh
+nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'
+```
+
+1. connect → `Sync::push` jar → `open_shell` で agent を **`--test-pattern` 付き**起動（決定的な
+   `TestPattern`＝グリッド＋上向き矢印＋四隅カラーブロック。実画面 capture は介さず、パイプライン/
+   framing/受信/デコードを検証）。
+2. `on_link_hello`（READY）で `Link::start_mirror()` → `MIRROR_START` 往復、`on_mirror_started` で
+   ソース寸法を受領。
+3. `on_video_strip` ごとに **構造アサート**: 16 整列 / パネル内 / libjpeg でデコード成功 /
+   デコード寸法＝サブヘッダ `w×h`。**フレーム単位のタイリング**: `FRAME_START..FRAME_END` 間で
+   `SPLIT_COUNT`(=4) 本・`x`/`w` 一定・`y` 連続・Σ`h`＝画像高。
+4. ストリップを 720×1280 のメモリ FB に合成（app の bsp FB＋P4 HW JPEG seam の host 版＝libjpeg＋
+   メモリ）し、1 フレームを `build/mirror_frame.ppm`（runner の cwd 基準＝リポジトリルート）に書き出す
+   （回転 / fit 配置の目視用）。
+
+**合否**: `MIRROR_START` 受理 ＋ クリーンなフレーム ≥3 ＋ `bad_strips==0` ＋ `Link` の `on_link_close`
+が exactly-once。実機で検証済み（fit: 1080×2160 → 640×1280 レターボックス）。
+
+`TAB5ADB_REAL=1` を付けると `--test-pattern` を外して **実画面 capture（`SurfaceControl`→
+`ImageReader`）をスモークテスト**する（構造アサートは同じ。PPM に実機画面が写る）。実機の実ホーム
+画面 1080×2340 → 576×1280 で検証済み。
+
+> `libjpeg`（host のストリップデコード用。device は P4 HW JPEG）を flake host deps に追加済み。runner は
+> `pkg-config libjpeg` をリンクする。
+
 ## 5. カバー範囲（レイヤー別）
 
 | 対象 | headless ハーネスで |
@@ -66,8 +96,9 @@ nix develop -c components/agent_link/test/run.sh [jar-path]
 | agent ビルド/起動（`app_process`） | ✅（ハーネスが push + `open_shell` 起動） |
 | localabstract 接続経路（`A_OPEN localabstract:`） | ✅ **embedded_adb 実装で**（標準 adb forward ではなく真の経路） |
 | フレーム framing（MAGIC/TYPE/FLAGS/SEQ/LENGTH）/ HELLO（protocol.md §3,§4） | ✅ Tab5 側パーサ + HELLO 応答 |
-| JPEG ストリップ受信→デコード | ⏳ Phase 2（同ハーネスを拡張。§7） |
-| 受信→デコード→**描画** | ⏳ シミュレータ統合（`agent_link` を `app/` の画面へ） |
+| `MIRROR_START` 往復 / JPEG ストリップ受信→デコード | ✅ `test_mirror`（agent パイプライン＋framing＋host libjpeg デコード＋タイリング検証） |
+| 実画面 capture（`SurfaceControl`→`ImageReader`） | ✅ `test_mirror` `TAB5ADB_REAL=1` スモーク（実機画面が PPM に写る） |
+| 受信→デコード→**描画** | ⏳ シミュレータ統合（`agent_link` を `app/` の画面へ）/ device は P4 HW JPEG + bsp FB |
 | E2E mirror | ⏳ 実機 Tab5 + 実機 Android |
 
 ## 6. デバッグ用フォールバック — 標準 adb
@@ -84,12 +115,13 @@ agent は **binary な HELLO フレームを喋り応答を待つ**ので、素�
 REQUEST のバイト列が返り、その後 agent は応答待ちでブロックする）。「agent が正しく listen・送信して
 いる」と確認できれば原因は Tab5 側（embedded_adb の open/retry/フレーム解釈）に絞れる（逆も同様）。
 
-## 7. Phase 2（JPEG ストリップ）のテストは別途
+## 7. Phase 2（JPEG ストリップ）— 実装・検証済み
 
-ストリップ受信のテストは同じ headless ハーネスを拡張して足す（`agent_link` の reactive パーサが
-`FRAME_END` を **デコード + framebuffer seam** に渡す：test は host libjpeg + メモリ FB、`app/` は P4 HW
-JPEG + bsp FB）。検証アプローチ（構造アサート / host デコード / 性能ノブ）と実装の参考は **memory
-`mirror-phase2-test-plan`** にまとめてある。実装したら本書の §4/§5 に追記する。
+ストリップ受信は §4 の `test_mirror` で検証済み（同じ headless ハーネスを拡張。`agent_link` の reactive
+パーサが各ストリップを **デコード + framebuffer seam**＝`on_video_strip` に渡す：test は host libjpeg +
+メモリ FB、`app/` は P4 HW JPEG + bsp FB）。残るは **受信→デコード→描画**（シミュレータの mirror 画面 /
+device の HW JPEG + bsp FB）と実機 Tab5 E2E（§5 の ⏳ 行）。当初の設計メモは memory
+`mirror-phase2-test-plan`。
 
 ## 8. 注意点
 

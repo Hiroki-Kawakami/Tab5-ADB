@@ -35,24 +35,52 @@ class Client;
 namespace agent_link {
 
 // The agent's HELLO (its self-introduction, protocol.md §4.4 request args).
+// Link-only: proto/version/capability. Mirror params (source size, codec) arrive
+// later in the MIRROR_START response (see MirrorInfo).
 struct AgentInfo {
     uint8_t proto_version = 0;
     uint8_t version_major = 0;
     uint8_t version_minor = 0;
     uint8_t version_patch = 0;
+    uint16_t capabilities = 0;  // agent's offered features (§4.6 Cap bits)
+};
+
+// Tab5's HELLO response params (protocol.md §4.4 response result). Defaults: the
+// simulator/libusb max_payload (device advertises 16 KiB, so the app overrides
+// this) and a video-capable sink. Link-only — no mirror params here.
+struct HelloConfig {
+    uint32_t max_payload = 256 * 1024;
+    uint16_t capabilities = kCapVideo;  // features Tab5 can accept (§4.6)
+};
+
+// Mirror parameters Tab5 hands the agent in MIRROR_START (protocol.md §4.4 args).
+// Defaults match the Tab5 panel + fit mode, video only.
+struct MirrorConfig {
+    uint16_t target_width = 720;
+    uint16_t target_height = 1280;
+    uint8_t scale_mode = kScaleFit;
+    uint8_t streams = kCapVideo;  // which streams to start (§4.6 bit assignment)
+};
+
+// The agent's MIRROR_START response (protocol.md §4.4 result): the source it is
+// actually streaming.
+struct MirrorInfo {
     uint16_t source_width = 0;   // physical source width [px] (informational)
     uint16_t source_height = 0;  // physical source height [px] (informational)
     uint8_t video_codec = 0;     // 0x01 = JPEG(YUV420)
 };
 
-// Tab5's HELLO response params (protocol.md §4.4 response result). Defaults match
-// the Tab5 panel; max_payload defaults to the simulator/libusb value (device
-// advertises 16 KiB, so the app overrides this).
-struct HelloConfig {
-    uint32_t max_payload = 256 * 1024;
-    uint16_t target_width = 720;
-    uint16_t target_height = 1280;
-    uint8_t scale_mode = 0;  // 0 = fit (default), 1 = fill (§5.3)
+// One JPEG strip (§5.2): the rectangle on the Tab5 panel (x,y,w,h, all 16px
+// multiples) plus the JPEG bytes that decode into it. `frame_start`/`frame_end`
+// mirror the frame-layer FLAGS — present the framebuffer after the frame_end
+// strip is decoded (§5.4). `jpeg` points into the Link's rx buffer and is only
+// valid for the duration of the on_video_strip call.
+struct VideoStrip {
+    uint16_t x = 0, y = 0, w = 0, h = 0;
+    const uint8_t* jpeg = nullptr;
+    size_t jpeg_len = 0;
+    bool frame_start = false;
+    bool frame_end = false;
 };
 
 class Link;
@@ -63,9 +91,22 @@ public:
     virtual ~LinkListener() = default;
 
     // The HELLO handshake completed: the agent's HELLO was received, proto
-    // matched, and our response was sent. Fires once, before any media. The
-    // Link* first arg lets one listener serve several links.
+    // matched, and our response was sent. Fires once, before any media — the
+    // agent_link layer is now established (READY). Call Link::start_mirror() from
+    // here (or later) to begin mirroring. The Link* first arg lets one listener
+    // serve several links.
     virtual void on_link_hello(Link* link, const AgentInfo& info) = 0;
+
+    // The agent accepted MIRROR_START (its response, §4.4 result): the video
+    // stream is about to flow. Optional. Fires once per start_mirror().
+    virtual void on_mirror_started(Link* /*link*/, const MirrorInfo& /*info*/) {}
+
+    // One JPEG strip of the video stream (§5). Optional. Decode `strip.jpeg` into
+    // the (x,y,w,h) region; present the framebuffer once strip.frame_end is
+    // decoded (§5.4). The decode + framebuffer seam is the listener's job, so the
+    // Link stays free of libjpeg / HW-JPEG (test: host libjpeg + memory FB; app:
+    // P4 HW JPEG + bsp FB).
+    virtual void on_video_strip(Link* /*link*/, const VideoStrip& /*strip*/) {}
 
     // The link closed (peer/our close(), Client::close() teardown, or a protocol
     // error). Fires exactly once; err == Protocol on a framing/proto-mismatch
@@ -93,6 +134,13 @@ public:
 
     bool is_open() const;
 
+    // Start mirroring: send MIRROR_START (§4.4) with `cfg` (panel size / scale
+    // mode / streams). Non-blocking — the agent's response arrives as
+    // on_mirror_started and JPEG strips then flow as on_video_strip, both on the
+    // reader thread. Call after on_link_hello (READY). Returns QueueFull on
+    // backpressure, StreamClosed if the link is down, Ok otherwise.
+    adb::Error start_mirror(const MirrorConfig& cfg = {});
+
     // End the link (A_CLSE the stream). Idempotent. on_link_close follows from
     // the reader thread.
     void close();
@@ -108,6 +156,8 @@ private:
     void feed(const uint8_t* data, size_t len);
     void on_frame(const FrameHeader& h, const uint8_t* payload);
     void handle_control_request(const uint8_t* payload, size_t len);
+    void handle_control_response(const uint8_t* payload, size_t len);
+    void handle_jpeg(const FrameHeader& h, const uint8_t* payload);
     void send_hello_response(uint8_t req_id, uint8_t status);
     void fail(adb::Error err);          // protocol error: close + notify
     void fire_close_once(adb::Error err);
@@ -118,7 +168,10 @@ private:
     HelloConfig cfg_;
 
     std::vector<uint8_t> rx_;  // frame accumulator (reader thread only)
-    uint8_t tx_seq_ = 0;       // outgoing frame counter (reader thread only)
+    // Outgoing frame counter. Touched by the reader thread (HELLO response) and
+    // the app thread (start_mirror), so atomic; each stream_->write() enqueues a
+    // whole frame, so frames never interleave on the wire.
+    std::atomic<uint8_t> tx_seq_{0};
     bool hello_done_ = false;
     std::atomic<bool> close_notified_{false};  // on_link_close fires once
 };
