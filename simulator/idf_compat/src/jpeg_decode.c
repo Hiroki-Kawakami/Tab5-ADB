@@ -165,11 +165,16 @@ esp_err_t jpeg_decoder_process(jpeg_decoder_handle_t decoder_engine,
         jpeg_read_scanlines(&cinfo, &p, 1);
         const uint8_t *s = rowbuf;
         if (bpp == 2) {
+            // RGB565 byte-order quirk: the Tab5 panel is driven R-in-high-bits, and
+            // on the P4 HW JPEG decoder that packing is produced by rgb_order == BGR
+            // (the RGB enum's 565 scramble corrupts the 16-bit pixel). So mirror that
+            // here — BGR maps to the R-high packing — to preview the device-correct
+            // colours. (The RGB888 branch below keeps the naive byte order.)
             uint16_t *d = (uint16_t *)(decode_outbuf + (size_t)row * w * 2);
             for (uint32_t x = 0; x < w; x++, s += 3) {
-                uint8_t r = bgr ? s[2] : s[0];
+                uint8_t r = bgr ? s[0] : s[2];
                 uint8_t g = s[1];
-                uint8_t b = bgr ? s[0] : s[2];
+                uint8_t b = bgr ? s[2] : s[0];
                 d[x] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
             }
         } else {

@@ -15,7 +15,7 @@
 #include "adb.hpp"  // adb::Client, adb::Shell, adb::Sync, adb::Error, adb::to_string
 #include "adb_app.hpp"
 #include "agent/agent_jar.h"
-#include "esp_heap_caps.h"
+#include "bsp.h"
 #include "jpeg_fullrange_decode.h"
 #include "lvgl.hpp"
 #include "screen_manager.hpp"
@@ -245,27 +245,30 @@ ADBMirroringScreen::ADBMirroringScreen() = default;
 ADBMirroringScreen::~ADBMirroringScreen() {
     if (launcher_) { launcher_->stop(); launcher_.reset(); }
     free_decoder();
-    if (fb_) { heap_caps_free(fb_); fb_ = nullptr; }
 }
 
 void ADBMirroringScreen::build() {
+    // The LVGL root stays a static black, clickable surface — no widgets are
+    // composited over the stream, and nothing invalidates it after build, so LVGL
+    // leaves the framebuffers alone while the mirror owns them. A tap pops back.
     lv_obj_set_size(root_, PANEL_W, PANEL_H);
     lv_obj_set_style_bg_color(root_, lv_color_black(), 0);
     lv_obj_set_style_pad_all(root_, 0, 0);
+    lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_fn(root_, LV_EVENT_CLICKED,
+                        [](lv_event_t*) { screen_manager.pop(); });
 
-    // The screen is ONLY the stream canvas — no widgets composited on top (see the
-    // header). A tap anywhere pops back; that is an input handler, not a draw layer.
-    fb_ = static_cast<uint16_t*>(
-        heap_caps_malloc((size_t)PANEL_W * PANEL_H * 2, MALLOC_CAP_SPIRAM));
-    if (fb_) {
-        std::memset(fb_, 0, (size_t)PANEL_W * PANEL_H * 2);  // black letterbox
-        canvas_ = lv_canvas_create(root_);
-        lv_canvas_set_buffer(canvas_, fb_, PANEL_W, PANEL_H, LV_COLOR_FORMAT_RGB565);
-        lv_obj_set_pos(canvas_, 0, 0);
-        lv_obj_add_flag(canvas_, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_fn(canvas_, LV_EVENT_CLICKED,
-                            [](lv_event_t*) { screen_manager.pop(); });
+    // Grab the two bsp framebuffers (we decode strips straight into them) and
+    // present black until the first frame. The flush pushes the cleared buffers to
+    // the panel (and, on device, to PSRAM) so the letterbox stays black — strips
+    // never touch those pixels again.
+    fb_[0] = static_cast<uint16_t*>(bsp_display_get_frame_buffer(0));
+    fb_[1] = static_cast<uint16_t*>(bsp_display_get_frame_buffer(1));
+    for (int i = 0; i < 2; ++i) {
+        if (fb_[i]) std::memset(fb_[i], 0, (size_t)PANEL_W * PANEL_H * 2);
+        bsp_display_flush(i);
     }
+    back_ = 0;
 
     // Kick off the launch sequence. The launcher forwards link callbacks to this
     // screen (held weakly) and logs progress (no on-screen status — no overlay).
@@ -297,15 +300,16 @@ void ADBMirroringScreen::on_mirror_started(agent_link::Link*,
 
 void ADBMirroringScreen::on_video_strip(agent_link::Link*,
                                         const agent_link::VideoStrip& strip) {
-    // Reader thread: decode into fb_, then present the frame once it is complete.
-    decode_strip(strip);
+    // Reader thread (strips serialized here): decode straight into the back
+    // framebuffer, then present it and swap once the frame is complete. The
+    // displayed buffer is the other one, so it is never mid-write — no tearing,
+    // no LVGL involvement.
+    uint16_t* dst = fb_[back_];
+    if (!dst) return;
+    decode_strip(strip, dst);
     if (!strip.frame_end) return;
-    if (invalidate_pending_.exchange(true)) return;  // coalesce
-    lv_async_call([self = shared_from_this(), this]() {
-        invalidate_pending_.store(false);
-        if (exited() || !canvas_) return;
-        lv_obj_invalidate(canvas_);
-    });
+    bsp_display_flush(back_);
+    back_ ^= 1;
 }
 
 void ADBMirroringScreen::on_link_close(agent_link::Link*, adb::Error err) {
@@ -313,22 +317,21 @@ void ADBMirroringScreen::on_link_close(agent_link::Link*, adb::Error err) {
     std::fflush(stdout);
 }
 
-bool ADBMirroringScreen::decode_strip(const agent_link::VideoStrip& s) {
-    if (!fb_) return false;
+bool ADBMirroringScreen::decode_strip(const agent_link::VideoStrip& s, uint16_t* dst) {
+    if (!dst) return false;
     if (s.w == 0 || s.h == 0 || s.x + s.w > PANEL_W || s.y + s.h > PANEL_H) return false;
+    // The agent always sends full-panel-width frames (fit/letterbox baked in), so a
+    // strip is the full panel width and decodes tightly-packed straight into its
+    // framebuffer row band — its width equals the framebuffer pitch, so "packed" IS
+    // "in place". A narrower strip can't be placed without a stride the P4 HW JPEG
+    // decoder lacks, so drop it rather than misrender.
+    if (s.x != 0 || s.w != PANEL_W) return false;
 
-    // Lazily create the engine + a panel-sized DMA-capable output buffer.
+    // Lazily create the engine.
     if (!jpeg_) {
         jpeg_decode_engine_cfg_t ecfg = {};
         ecfg.timeout_ms = 1000;
         if (jpeg_new_decoder_engine(&ecfg, &jpeg_) != ESP_OK) { jpeg_ = nullptr; return false; }
-        jpeg_decode_memory_alloc_cfg_t ocfg = {};
-        ocfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-        size_t got = 0;
-        out_buf_ = static_cast<uint8_t*>(
-            jpeg_alloc_decoder_mem((size_t)PANEL_W * PANEL_H * 2, &ocfg, &got));
-        if (!out_buf_) return false;
-        out_cap_ = got;
     }
 
     // The device HW JPEG decoder needs the bitstream in a DMA-capable buffer;
@@ -344,26 +347,29 @@ bool ADBMirroringScreen::decode_strip(const agent_link::VideoStrip& s) {
     }
     std::memcpy(in_buf_, s.jpeg, s.jpeg_len);
 
+    // Full-width strip → tightly-packed decode lands in place: the destination is
+    // the framebuffer row band starting at row s.y (s.x == 0), and the decoded
+    // s.w(==PANEL_W)×s.h picture is exactly PANEL_W*s.h pixels contiguous — no
+    // scratch, no blit, no stride. (device: P4 HW JPEG straight to PSRAM; host:
+    // libjpeg straight to the buffer.)
     jpeg_decode_cfg_t dcfg = {};
     dcfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-    dcfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+    // BGR, not RGB: the panel is driven R-in-high-bits RGB565, and on the P4 HW
+    // JPEG decoder that byte order is produced by the BGR scramble — the RGB enum's
+    // RGB565 scramble mis-packs the 16-bit pixel (greens split across the byte
+    // boundary) and the image comes out as rainbow noise. Matches the proven
+    // Tab5-Screen-Streamer decoder.
+    dcfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
     dcfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+    uint16_t* out = dst + (size_t)s.y * PANEL_W;  // s.x == 0
     uint32_t out_size = 0;
-    if (jpeg_decoder_process_full_range(jpeg_, &dcfg, in_buf_, (uint32_t)s.jpeg_len,
-                                        out_buf_, (uint32_t)out_cap_, &out_size) != ESP_OK)
-        return false;
-
-    // Blit the decoded strip (s.w x s.h, tightly packed) into fb_ at (x,y).
-    const uint16_t* src = reinterpret_cast<const uint16_t*>(out_buf_);
-    for (uint16_t row = 0; row < s.h; ++row) {
-        uint16_t* dst = fb_ + (size_t)(s.y + row) * PANEL_W + s.x;
-        std::memcpy(dst, src + (size_t)row * s.w, (size_t)s.w * 2);
-    }
-    return true;
+    return jpeg_decoder_process_full_range(
+               jpeg_, &dcfg, in_buf_, (uint32_t)s.jpeg_len,
+               reinterpret_cast<uint8_t*>(out), (uint32_t)((size_t)s.w * s.h * 2),
+               &out_size) == ESP_OK;
 }
 
 void ADBMirroringScreen::free_decoder() {
     if (in_buf_) { free(in_buf_); in_buf_ = nullptr; in_cap_ = 0; }
-    if (out_buf_) { free(out_buf_); out_buf_ = nullptr; out_cap_ = 0; }
     if (jpeg_) { jpeg_del_decoder_engine(jpeg_); jpeg_ = nullptr; }
 }

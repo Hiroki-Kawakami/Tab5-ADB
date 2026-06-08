@@ -99,7 +99,12 @@ streams; Android→Tab5 JPEG strip stream — YUV420 q60, agent-side rotate/scal
 **Phase 2 (JPEG strip mirror) done & verified on a real Android device.** The Java agent
 (`Server` + `FramePipeline`/`TestPattern`/`ScreenCapture`) captures the screen via
 hidden `SurfaceControl`→`ImageReader`, runs the rotate→scale→strip→JPEG pipeline,
-and streams strips; the Tab5-side `agent_link::Link` parses frames and hands each
+and streams strips. **`FramePipeline` composites scale-fit + the black letterbox
+into a full `targetW×targetH` (720×1280) frame**, so every strip is full panel
+width (x=0, w=720) — this is what lets the Tab5 decode each strip straight into its
+framebuffer row band with no stride (the P4 JPEG 2D-DMA can't place a narrower
+picture into a wider buffer; see the JPEG decode seam). The Tab5-side
+`agent_link::Link` parses frames and hands each
 strip to a decode+framebuffer seam (`LinkListener::on_video_strip`). The headless
 harness `components/agent_link/test/test_mirror.cpp` drives the whole bring-up
 GUI-less over libusb (HELLO → `start_mirror` → strips), decodes strips with host
@@ -110,9 +115,10 @@ capture. `test_hello.cpp` still covers the HELLO-only path. Run with
 `nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'`; test
 approach in `android-agent/docs/testing.md`. **receive→decode→render done** — the
 `ADBMirroringScreen` in `app/` (see the UI section) launches the agent from the
-**embedded jar**, sends `MIRROR_START`, and renders the JPEG strip stream into a
-full-screen LVGL canvas, **verified headless in the simulator (libusb) against a
-real Android device**: the live home screen mirrors with correct full-range colors
+**embedded jar**, sends `MIRROR_START`, and renders the JPEG strip stream
+**directly into the bsp framebuffer** (strided decode + `bsp_display_flush`
+double-buffer, no LVGL compositing), **verified headless in the simulator (libusb)
+against a real Android device**: the live home screen mirrors with correct full-range colors
 (`./run.sh simverify simulator/verify/mirror.txt`). The agent dex is embedded as a
 C array — `app/agent/agent_jar.{h,c}`, `xxd -i` of
 `android-agent/build/tab5adb-agent.jar` (regenerate per the header when the agent
@@ -514,7 +520,7 @@ the host stack incl. `libjpeg`, runs `adb kill-server`, launches the test;
 artifacts in `test/build/`; approach in `android-agent/docs/testing.md`).
 receive→decode→**render done**: the app drives the link from `ADBMirroringScreen`
 (see the UI section) — `Link::open` → `start_mirror` → `on_video_strip` decoded
-into an LVGL canvas, verified headless against a real Android device.
+straight into the bsp framebuffer (no LVGL), verified headless against a real Android device.
 
 ### The JPEG decode seam (for the mirror render)
 
@@ -534,7 +540,32 @@ two standard rules:
   `components/jpeg_fullrange_decode/` component (device = the register-override
   driver; host = a passthrough to the libjpeg shim, which is already full-range).
   App code calls the one name and the simulator previews the fullrange-fixed
-  device output.
+  device output. **Colour gotcha (cost several HW cycles):** for **RGB565 output**
+  on the Tab5 panel use `rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR`, **not** `RGB`.
+  The panel is driven R-in-high-bits RGB565, and on the P4 the *BGR* scramble is
+  what produces that packing; the *RGB* enum's 565 scramble mis-packs the 16-bit
+  pixel (the 6-bit green straddles the byte boundary) so the image renders as
+  rainbow noise with the structure intact. (Matches the proven
+  `Tab5-Screen-Streamer` decoder, same panel.) The simulator's libjpeg shim
+  (`idf_compat/jpeg_decode.c`) mirrors this — its RGB565 BGR branch packs R-high —
+  so the sim previews the device-correct colours with the same `dcfg`.
+
+The API is **unchanged from the plain IDF `jpeg_decoder_process()` signature**
+(tightly-packed output) — no stride/offset parameter. That is deliberate: the
+**P4 JPEG 2D-DMA can only write a tightly-packed `process_h`×`process_v` picture**;
+it cannot place a narrower picture into a wider buffer with a row stride. (Two HW
+attempts to add that failed — HA-as-stride sheared the image with a black band per
+strip, and the X/Y-offset descriptor form left only a thin band per strip. Both
+crashed/misrendered on hardware.) So instead the **agent always streams
+full-panel-width frames** (it bakes scale-fit + the black letterbox into a
+720×1280 frame, see the agent section), each strip is the full panel width, and
+the mirror decodes a strip straight into framebuffer row `strip.y` with
+`decode_outbuf = fb + strip.y*pitch` — the strip width equals the framebuffer
+pitch, so a tight decode *is* a placed decode, zero-copy, **and the framebuffer is
+written exactly once** (no extra PSRAM-bandwidth blit). The stock per-call cache
+sync (`decoded_buf`, `size = w*h*2`) is naturally aligned (`strip.y` and `h` are
+16px multiples). Verified end-to-end in the simulator (and the headless
+`test_mirror`) against a real Android device.
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 
@@ -604,20 +635,31 @@ retry `Link::open("localabstract:tab5adb-agent")` until the agent is listening.
 `MirrorLauncher` is itself the `SyncListener`/`ShellListener`/`LinkListener` it
 hands to those calls and **forwards** the link callbacks to the screen (held
 weakly), logging launch progress (no on-screen status); on HELLO it calls
-`Link::start_mirror()` (720×1280 fit, video). Strips arrive on the **reader
-thread**: `on_video_strip` decodes each one through the `jpeg_fullrange_decode`
-seam (lazily-created engine + DMA-capable in/out scratch via
-`jpeg_alloc_decoder_mem`) and blits it into a panel-sized RGB565 `lv_canvas`
-buffer (PSRAM); only the canvas `invalidate` is marshalled to LVGL on `frame_end`
-(coalesced). The screen is **only the stream canvas — no LVGL widgets composited
-over it** (a back button / status label on top would force LVGL to re-blend them
-every frame, the draw cost we are avoiding for now); back navigation is a **tap on
-the canvas** (input handler, no draw layer). v1 also uses a single canvas buffer
-(no double-buffering), so a frame can tear if the reader writes mid-blit —
-acceptable for the first "just show the stream" milestone. The weak-listener
-`lock()` keeps the screen (hence its decode buffers) alive across any in-flight
-strip, so the dtor frees the engine/buffers race-free. Verified headless against a
-real Android device (`./run.sh simverify simulator/verify/mirror.txt`).
+`Link::start_mirror()` (720×1280 fit, video). **Rendering bypasses LVGL
+entirely** (the draw cost of compositing UI over a video stream is what we're
+avoiding): `on_video_strip` (reader thread) HW-JPEG-decodes each strip through the
+`jpeg_fullrange_decode` seam **straight into a bsp framebuffer**. The agent sends
+**full-panel-width** strips (scale-fit + letterbox are baked in agent-side, see the
+agent section), so a strip's width equals the framebuffer pitch and a tightly
+-packed decode into `fb + strip.y*pitch` lands in place — zero-copy, no scratch, no
+blit, the framebuffer written exactly once (the P4 JPEG 2D-DMA can't stride a
+narrower picture into a wider buffer, so full-width frames are what make
+decode-direct possible). The two bsp framebuffers (`bsp_display_get_frame_buffer(0/1)`)
+are a **double buffer**: decode the frame into the back one, `bsp_display_flush()`
+it, swap — so the displayed buffer is never mid-write (tear-free) and nothing is
+marshalled to LVGL. The LVGL root stays a **static black, clickable surface** (a
+**tap pops** back) that nothing invalidates after build, so `lv_timer_handler`
+leaves the framebuffers to the mirror; on pop the previous screen's full re-render
+reclaims them. The framebuffers are cleared + flushed once at build for the
+pre-stream black screen. **No LVGL widgets are composited over the stream** (no
+back button / status overlay — those would force per-frame re-blend); launch
+progress goes to the log. Strips are serialized on the reader thread, so the framebuffer /
+back-index state needs no lock; the weak-listener `lock()` keeps the screen alive
+across any in-flight strip so the dtor frees the engine race-free. **Verified
+headless against a real Android device** (`./run.sh simverify simulator/verify/mirror.txt`) and
+by the headless `test_mirror`; the device decode is the stock IDF tight path into
+the framebuffer (no exotic 2D-DMA features), so the device E2E is the remaining
+flash-and-check.
 
 ## Simulator details
 

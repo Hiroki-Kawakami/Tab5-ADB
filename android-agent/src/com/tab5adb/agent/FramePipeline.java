@@ -1,6 +1,8 @@
 package com.tab5adb.agent;
 
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Matrix;
 
 import java.io.ByteArrayOutputStream;
@@ -42,11 +44,17 @@ final class FramePipeline {
     /** Run the pipeline. Does not recycle {@code src} (the caller owns it). */
     List<Strip> process(Bitmap src) {
         Bitmap rotated = rotateToPortrait(src);
-        // Scale to the panel; `image` is the placed image, (offX,offY) its 16-aligned
-        // top-left on the panel.
-        Bitmap image;
-        int offX, offY;
         int rw = rotated.getWidth(), rh = rotated.getHeight();
+
+        // Always emit a full target-sized frame (`frame` is exactly targetW x
+        // targetH), so every strip spans the whole panel width (x=0, w=targetW).
+        // The Tab5 then HW-JPEG-decodes each strip straight into its framebuffer
+        // row band with no horizontal stride/offset — the ESP32-P4 2D-DMA can only
+        // write a tightly-packed picture, so a narrower (letterboxed) strip could
+        // not be placed into the wider panel buffer. `fill` already covers the
+        // target; `fit` composites the inscribed image onto a black canvas here, so
+        // the letterbox is baked into the JPEG (it compresses to almost nothing).
+        Bitmap frame;
         if (scaleMode == 1) {  // fill: cover then center-crop to exactly target
             double s = Math.max((double) targetW / rw, (double) targetH / rh);
             int sw = Math.max(targetW, ceil16((int) Math.round(rw * s)));
@@ -54,22 +62,25 @@ final class FramePipeline {
             Bitmap scaled = Bitmap.createScaledBitmap(rotated, sw, sh, true);
             int cx = floor16((sw - targetW) / 2);
             int cy = floor16((sh - targetH) / 2);
-            image = Bitmap.createBitmap(scaled, cx, cy, targetW, targetH);
-            if (scaled != image) scaled.recycle();
-            offX = 0;
-            offY = 0;
-        } else {  // fit: aspect-preserve inscribe, center with letterbox
+            frame = Bitmap.createBitmap(scaled, cx, cy, targetW, targetH);
+            if (scaled != frame) scaled.recycle();
+        } else {  // fit: aspect-preserve inscribe, center on a black letterbox canvas
             double s = Math.min((double) targetW / rw, (double) targetH / rh);
             int sw = clamp16((int) Math.round(rw * s), targetW);
             int sh = clamp16((int) Math.round(rh * s), targetH);
-            image = Bitmap.createScaledBitmap(rotated, sw, sh, true);
-            offX = floor16((targetW - sw) / 2);
-            offY = floor16((targetH - sh) / 2);
+            Bitmap scaled = Bitmap.createScaledBitmap(rotated, sw, sh, true);
+            int offX = floor16((targetW - sw) / 2);
+            int offY = floor16((targetH - sh) / 2);
+            frame = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(frame);
+            c.drawColor(Color.BLACK);
+            c.drawBitmap(scaled, offX, offY, null);  // drawBitmap needs no Typeface
+            if (scaled != rotated) scaled.recycle();
         }
-        if (rotated != src && rotated != image) rotated.recycle();
+        if (rotated != src && rotated != frame) rotated.recycle();
 
-        List<Strip> strips = stripify(image, offX, offY);
-        if (image != src) image.recycle();
+        List<Strip> strips = stripify(frame, 0, 0);  // full-width strips (offX=offY=0)
+        if (frame != src) frame.recycle();
         return strips;
     }
 
