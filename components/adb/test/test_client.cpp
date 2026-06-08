@@ -5,23 +5,10 @@
 //
 // First run with a fresh key: the phone shows "Allow USB debugging?" — tap Allow.
 //
-// Build & run (inside `nix develop`, phone connected, `adb kill-server` first so
-// nothing else holds the interface). From components/adb:
-//   cc=../../simulator/idf_compat
-//   gcc -c $cc/src/nvs.c $cc/src/esp_err.c \
-//       $cc/src/freertos_task.c $cc/src/freertos_queue.c \
-//       $cc/src/freertos_port.c $cc/src/freertos_timers.c \
-//       $cc/src/freertos_event_groups.c $cc/src/esp_timer.c \
-//       -I$cc/include
-//   g++ -std=c++17 -Iinc -I../embedded_adb/inc -I$cc/include \
-//       test/test_client.cpp src/adb_client.cpp src/adb_error.cpp \
-//       src/adb_shell.cpp src/adb_sync.cpp \
-//       ../embedded_adb/src/adb_protocol.cpp ../embedded_adb/src/adb_crypto.cpp \
-//       ../embedded_adb/src/adb_keystore.cpp ../embedded_adb/src/adb_connection.cpp \
-//       ../embedded_adb/src/adb_stream.cpp ../embedded_adb/src/transport_libusb.cpp \
-//       *.o \
-//       $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson) \
-//       -lpthread -o /tmp/test_client && /tmp/test_client
+// Build & run with the test runner (builds everything, runs `adb kill-server`,
+// launches the test). TEST selects which test/<TEST>.cpp to run:
+//   nix develop -c components/adb/test/run.sh              # this test (default)
+// (See test/run.sh for the underlying g++/gcc command if you need it by hand.)
 #include "adb.hpp"
 
 #include <nvs_flash.h>

@@ -3,17 +3,10 @@
 // few `shell:` commands and prints their output. The read loop runs on a
 // std::thread; the main thread issues run_service() calls.
 //
-// Build & run (inside `nix develop`, phone connected, `adb kill-server` done):
-//   gcc -std=c11 -I../../simulator/idf_compat/include $(pkg-config --cflags libcjson) \
-//       -c ../../simulator/idf_compat/src/nvs.c -o /tmp/nvs.o
-//   gcc -std=c11 -I../../simulator/idf_compat/include \
-//       -c ../../simulator/idf_compat/src/esp_err.c -o /tmp/esp_err.o
-//   g++ -std=c++17 -Iinc -I../../simulator/idf_compat/include \
-//       test/test_shell.cpp src/adb_protocol.cpp src/adb_crypto.cpp \
-//       src/adb_keystore.cpp src/transport_libusb.cpp src/adb_connection.cpp \
-//       src/adb_stream.cpp /tmp/nvs.o /tmp/esp_err.o \
-//       $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson) \
-//       -lpthread -o /tmp/test_shell && /tmp/test_shell
+// Build & run with the test runner (builds everything, runs `adb kill-server`,
+// launches the test):
+//   TEST=test_shell nix develop -c components/embedded_adb/test/run.sh
+// (See test/run.sh for the underlying g++/gcc command if you need it by hand.)
 #include "embedded_adb.hpp"
 
 #include <nvs_flash.h>

@@ -5,10 +5,9 @@
 //   - the Android public-key blob has the correct structure and invariants
 //     (modulus == N, exponent == 65537, n0inv == -1/N mod 2^32, rr == 2^4096 mod N)
 //
-// Build & run (inside `nix develop`):
-//   g++ -std=c++17 -Iinc test/test_crypto.cpp src/adb_crypto.cpp \
-//       $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509) -o /tmp/test_crypto
-//   /tmp/test_crypto
+// Build & run with the test runner (no device needed for this one):
+//   nix develop -c components/embedded_adb/test/run.sh    # TEST=test_crypto (default)
+// (See test/run.sh for the underlying g++ command if you need it by hand.)
 #include "adb_crypto.hpp"
 
 #include <mbedtls/base64.h>

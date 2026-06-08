@@ -3,14 +3,10 @@
 // + AUTH handshake. On first run with a new key the phone shows "Allow USB
 // debugging?" — tap Allow; the device then sends CNXN and we go Online.
 //
-// Build & run (inside `nix develop`, with a phone connected and `adb kill-server`
-// done so nothing else holds the interface):
-//   g++ -std=c++17 -Iinc -I../../simulator/idf_compat/include \
-//       test/test_connect.cpp src/adb_protocol.cpp src/adb_crypto.cpp \
-//       src/adb_keystore.cpp src/transport_libusb.cpp src/adb_connection.cpp \
-//       ../../simulator/idf_compat/src/nvs.c ../../simulator/idf_compat/src/esp_err.c \
-//       $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson) \
-//       -lpthread -o /tmp/test_connect && /tmp/test_connect
+// Build & run with the test runner (builds everything, runs `adb kill-server`,
+// launches the test):
+//   TEST=test_connect nix develop -c components/embedded_adb/test/run.sh
+// (See test/run.sh for the underlying g++/gcc command if you need it by hand.)
 #include "embedded_adb.hpp"
 
 #include <nvs_flash.h>

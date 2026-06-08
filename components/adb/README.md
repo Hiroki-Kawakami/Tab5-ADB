@@ -117,6 +117,23 @@ Synchronous methods return `Error`; async completions take it as the first
 payload. Backpressure: `Shell::write()` returns `Error::QueueFull` once unsent
 bytes exceed the per-stream cap (initial cap ≈ 64 KB; see implementation).
 
+## Running the host tests
+
+`test/` has headless harnesses run on the desktop against a real phone over
+libusb (no GUI). Use the runner — it builds the whole stack (this component +
+`embedded_adb` + the idf_compat freertos/nvs shims), runs `adb kill-server` so
+libusb can claim the interface, and launches the test:
+
+```sh
+nix develop -c components/adb/test/run.sh                 # TEST=test_client (default)
+TEST=test_shell nix develop -c components/adb/test/run.sh
+TEST=test_sync  nix develop -c components/adb/test/run.sh
+```
+
+Build artifacts go to `test/build/` (gitignored). The phone must be authorized
+(run `test_client` once and tap "Allow USB debugging?"). `embedded_adb` and
+`agent_link` have the same `test/run.sh` convention.
+
 ## Roadmap (commit-sized slices)
 
 1. **`Client::connect_usb` + `state()`/`banner()` + `close()`** — *done*.

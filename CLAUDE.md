@@ -347,16 +347,17 @@ on-device validation. (Run `adb kill-server` first so the host adb-server doesn'
 hold the interface.) SDL2/libusb/mbedTLS are linked to the `simulator` exe in
 `simulator/CMakeLists.txt`; `flake.nix` provides `libusb1` + `mbedtls` for the host.
 
-`components/embedded_adb/test/` has two host harnesses (build commands in each
-file's header comment):
-- `test_crypto.cpp` — no phone needed: DER round trip, token signature verify, and
-  the Android public-key blob invariants (modulus/exponent/n0inv/rr).
-- `test_connect.cpp` — **needs a phone** (USB debugging on, `adb kill-server`
-  first): runs the real CNXN+AUTH handshake over libusb. Compile the idf_compat
-  `.c` deps (`nvs.c`, `esp_err.c`) with `gcc` (not `g++` — they use C void* casts)
-  into `.o`, then link with the C++ sources + `libcjson`/`mbedtls`/`libusb-1.0`.
-  Verified end-to-end against a real Android device: first run prompts "Allow USB debugging?",
-  the key persists to NVS, and the second run reconnects with no prompt.
+`components/embedded_adb/test/` has three host harnesses, run via the component's
+**test runner** `nix develop -c components/embedded_adb/test/run.sh` (`TEST=<name>`
+selects `test/<name>.cpp`; the runner compiles the idf_compat `.c` deps with `gcc`
+— not `g++`, they use C void* casts — links everything, and runs `adb kill-server`
+for the device tests; artifacts in `test/build/`):
+- `test_crypto.cpp` (the default; **no phone**): DER round trip, token signature
+  verify, and the Android public-key blob invariants (modulus/exponent/n0inv/rr).
+- `test_connect.cpp` — **needs a phone** (USB debugging on): runs the real
+  CNXN+AUTH handshake over libusb. Verified end-to-end against a real Android device: first run
+  prompts "Allow USB debugging?", the key persists to NVS, and the second run
+  reconnects with no prompt.
 - `test_shell.cpp` — needs a phone (already authorized): runs the read loop on a
   `std::thread` and executes `shell:` commands via `run_service()`. Verified on a
   real Android device (`getprop`/`echo`/`id` return correct output). The read loop is started
