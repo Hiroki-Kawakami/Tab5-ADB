@@ -1,0 +1,4 @@
+# Render the initial screen and capture it.
+settle
+capture simulator/verify/out/home.jpg
+quit

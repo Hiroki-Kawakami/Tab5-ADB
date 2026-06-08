@@ -46,7 +46,8 @@ target_link_libraries(simulator SDL2::SDL2 lvgl cjson Threads::Threads PkgConfig
 # LVGL runtime, while the hardware seam (display/touch) lives in the m5stack-bsp
 # simulator backend below. It stays a direct source rather than a component.
 target_sources(simulator PRIVATE
-    platform/main.cpp)
+    platform/main.cpp
+    platform/sim_harness.cpp)
 target_include_directories(simulator PRIVATE platform)
 
 # ---------------------------------------------------------------------------

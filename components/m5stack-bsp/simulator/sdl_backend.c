@@ -15,6 +15,7 @@
 
 #include <SDL2/SDL.h>
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,13 +24,24 @@ static SDL_Window   *s_window;
 static SDL_Renderer *s_renderer;
 static SDL_Texture  *s_texture;
 
-static int    s_panel_w;
-static int    s_panel_h;
-static int    s_scale_div = 1;
-static size_t s_bpp = 2;            /* bytes per pixel */
+static int                s_panel_w;
+static int                s_panel_h;
+static int                s_scale_div = 1;
+static size_t             s_bpp = 2;          /* bytes per pixel */
+static bsp_pixel_format_t s_format = BSP_PIXEL_FORMAT_RGB565;
 
 static uint8_t *s_fb[2];
 static void    *s_fb_ptrs[2];
+
+/* Headless verification support (driven by the sim harness). When the
+ * SIMULATOR_HEADLESS env var is set we skip the SDL window/renderer/texture
+ * entirely — no host display, so it runs in non-interactive shells / CI and
+ * never touches the host screen. LVGL still renders straight into s_fb in
+ * DIRECT mode, so a finished frame is fully present without any window;
+ * s_last_flushed tracks which of the two buffers holds the most recently
+ * completed frame so a snapshot reads the right one. */
+static bool s_headless;
+static int  s_last_flushed;
 
 static bsp_display_t s_display;
 static bsp_touch_t   s_touch;
@@ -85,7 +97,8 @@ static void **display_get_framebuffers(bsp_display_t *self) {
 
 static esp_err_t display_flush(bsp_display_t *self, int fb_index) {
     (void)self;
-    if (!s_texture) return ESP_ERR_INVALID_STATE;
+    s_last_flushed = fb_index & 1;   /* recorded even headless, for snapshots */
+    if (!s_texture) return s_headless ? ESP_OK : ESP_ERR_INVALID_STATE;
     SDL_UpdateTexture(s_texture, NULL, s_fb[fb_index & 1], s_panel_w * (int)s_bpp);
     SDL_RenderCopy(s_renderer, s_texture, NULL, NULL);
     SDL_RenderPresent(s_renderer);
@@ -136,24 +149,31 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
     s_panel_h   = config->size.height;
     s_scale_div = config->scale_div > 0 ? config->scale_div : 1;
     s_bpp       = bsp_pixel_format_bytes(config->format);
+    s_format    = config->format;
+    s_headless  = getenv("SIMULATOR_HEADLESS") != NULL;
 
     SDL_SetMainReady();
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        fprintf(stderr, "SDL_Init(VIDEO): %s\n", SDL_GetError());
+    /* Headless still needs the SDL timer (LVGL's tick source is SDL_GetTicks)
+     * but no video subsystem — no window pops up and no display is required. */
+    Uint32 init_flags = s_headless ? SDL_INIT_TIMER : SDL_INIT_VIDEO;
+    if (SDL_Init(init_flags) != 0) {
+        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return ESP_FAIL;
     }
 
-    s_window = SDL_CreateWindow(config->title ? config->title : "BSP Simulator",
-                                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                s_panel_w / s_scale_div, s_panel_h / s_scale_div,
-                                SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
-    s_renderer = SDL_CreateRenderer(s_window, -1,
-                                    SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    s_texture = SDL_CreateTexture(s_renderer, sdl_pixel_format(config->format),
-                                  SDL_TEXTUREACCESS_STREAMING, s_panel_w, s_panel_h);
-    if (!s_window || !s_renderer || !s_texture) {
-        fprintf(stderr, "SDL init failed: %s\n", SDL_GetError());
-        return ESP_FAIL;
+    if (!s_headless) {
+        s_window = SDL_CreateWindow(config->title ? config->title : "BSP Simulator",
+                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                    s_panel_w / s_scale_div, s_panel_h / s_scale_div,
+                                    SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
+        s_renderer = SDL_CreateRenderer(s_window, -1,
+                                        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        s_texture = SDL_CreateTexture(s_renderer, sdl_pixel_format(config->format),
+                                      SDL_TEXTUREACCESS_STREAMING, s_panel_w, s_panel_h);
+        if (!s_window || !s_renderer || !s_texture) {
+            fprintf(stderr, "SDL init failed: %s\n", SDL_GetError());
+            return ESP_FAIL;
+        }
     }
 
     int fb_num = config->fb_num ? config->fb_num : 1;
@@ -167,9 +187,11 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
         s_fb_ptrs[i] = (i < fb_num) ? s_fb[i] : s_fb[0];
     }
 
-    SDL_SetRenderDrawColor(s_renderer, 0, 0, 0, 0xFF);
-    SDL_RenderClear(s_renderer);
-    SDL_RenderPresent(s_renderer);
+    if (s_renderer) {
+        SDL_SetRenderDrawColor(s_renderer, 0, 0, 0, 0xFF);
+        SDL_RenderClear(s_renderer);
+        SDL_RenderPresent(s_renderer);
+    }
 
     s_display.size             = config->size;
     s_display.format           = config->format;
@@ -186,4 +208,12 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
     *out_display = &s_display;
     *out_touch = &s_touch;
     return ESP_OK;
+}
+
+const void *sdl_backend_snapshot(int *width, int *height, bsp_pixel_format_t *format) {
+    if (!s_fb[0]) return NULL;   /* backend not created yet */
+    if (width)  *width  = s_panel_w;
+    if (height) *height = s_panel_h;
+    if (format) *format = s_format;
+    return s_fb[s_last_flushed & 1];
 }

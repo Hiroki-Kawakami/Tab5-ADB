@@ -1,8 +1,10 @@
 #include "lvgl.h"
 #include "adb_app.hpp"
+#include "sim_harness.h"
 
 #include <SDL2/SDL.h>
 
+#include <cstdlib>
 #include <unistd.h>
 
 // Simulator entry. SDL/LVGL must own the main thread on macOS, so the main
@@ -21,6 +23,14 @@ extern "C" int main(void) {
     // any module init (which may freely spawn FreeRTOS tasks). On device the
     // equivalent is app_main().
     adb_app();
+
+    // Automated UI verification: if SIMULATOR_SCRIPT names a script, drive the
+    // UI headlessly (synthetic touch + framebuffer capture) instead of the
+    // interactive SDL loop. The SDL backend honours SIMULATOR_HEADLESS so no
+    // host window/display is involved. See sim_harness.h.
+    if (const char *script = getenv("SIMULATOR_SCRIPT")) {
+        return sim_harness_run(script);
+    }
 
     while (1) {
         uint32_t sleep_time_ms = lv_timer_handler();

@@ -7,3 +7,4 @@ sdkconfig.old
 .direnv
 .DS_Store
 nvs_data.json
+simulator/verify/out

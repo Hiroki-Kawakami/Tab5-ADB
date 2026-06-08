@@ -626,6 +626,39 @@ itself is single-threaded on both targets, so a FreeRTOS task that needs to touc
 LVGL marshals via `lv_async_call` (device: `lvgl_port_lock`), the same on both
 targets.
 
+### Headless UI verification (the sim harness)
+
+Automated, host-display-free UI checks instead of osascript clicking/screenshotting
+the real SDL window (fragile, host-state-dependent, and hands the agent host-PC
+control). The **same `simulator` binary** runs the **same app/BSP code**, just with
+input/output redirected — two env vars, generic (not Tab5-specific) so other
+boards reuse them:
+- `SIMULATOR_HEADLESS=1` — `sdl_backend.c` skips the window/renderer/texture
+  (SDL inits TIMER only, for LVGL's `SDL_GetTicks` tick) and keeps only the
+  in-memory framebuffers. LVGL still renders into `s_fb` in DIRECT mode, so a
+  finished frame is fully present with no window; runs in non-interactive
+  shells / CI.
+- `SIMULATOR_SCRIPT=<path>` (`-` = stdin) — `main.cpp` runs
+  `sim_harness_run()` (in `simulator/platform/sim_harness.cpp`) instead of the
+  interactive loop. A tiny line-oriented interpreter that runs **on the main/LVGL
+  thread** (so capture never races rendering): `wait <ms>`, `settle [<max_ms>]`,
+  `capture <path.jpg>`, `quit`. `settle` pumps `lv_timer_handler` until no
+  animation runs for a few frames (drains `lv_async_call` work), so capture
+  before the frame settles is the caller's mistake.
+
+Layering split: the **primitives** live in the SDL backend (the hardware seam) —
+`sdl_backend.c` honours `SIMULATOR_HEADLESS` and exposes
+`sdl_backend_snapshot()` (the most-recently-flushed framebuffer + geometry/format,
+RGB565). The **orchestration** (script loop, `lv_timer_handler` pumping, JPEG
+encode via the already-linked libjpeg) lives in the platform-layer harness — so
+the BSP stays image-format-agnostic. The agent's loop becomes: write a script →
+run headless → `Read` the captured JPEG. Example: `simulator/verify/home.txt`
+(outputs to the gitignored `simulator/verify/out/`). Run:
+`SIMULATOR_HEADLESS=1 SIMULATOR_SCRIPT=simulator/verify/home.txt ./build/simulator`.
+**Done so far: headless + capture.** Next: synthetic **touch injection**
+(`tap`/`down`/`move`/`up` via an injected pointer state `touch_read` reports) for
+navigation/interaction checks, then a `run.sh` mode.
+
 ### Other simulator notes
 - LVGL config is `simulator/lv_conf.h` (found via `LV_CONF_INCLUDE_SIMPLE` +
   the project source dir). `LV_COLOR_DEPTH 16` (RGB565, matches the panel) and
