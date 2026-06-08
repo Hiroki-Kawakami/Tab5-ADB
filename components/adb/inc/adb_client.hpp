@@ -19,6 +19,7 @@
 
 #include "adb_connection.hpp"  // adb::ConnectionState, adb::AdbConnection
 #include "adb_error.hpp"       // adb::Error
+#include "adb_raw_stream.hpp"  // adb::Stream, adb::StreamListener
 #include "adb_shell.hpp"       // adb::Shell, adb::ShellListener
 #include "adb_sync.hpp"        // adb::Sync, adb::SyncListener
 
@@ -78,6 +79,15 @@ public:
     // nullptr if the client is not Online. The listener is held weakly (drop its
     // shared_ptr to detach). See docs/sync.md.
     std::shared_ptr<Sync> open_sync(std::weak_ptr<SyncListener> listener);
+
+    // Generic, service-agnostic stream: A_OPENs `service` (e.g.
+    // "localabstract:tab5adb-agent") and returns a raw bidirectional byte stream.
+    // This is the building block app-specific protocols in other components layer
+    // on (so they depend on `adb`, not embedded_adb). Returns a shared_ptr
+    // immediately (before the device's A_OKAY); StreamListener delivers data/close
+    // on the reader thread. nullptr if the client is not Online.
+    std::shared_ptr<Stream> open_stream(const std::string& service,
+                                        std::weak_ptr<StreamListener> listener);
 
     // Stop the reader task and release the connection. Idempotent. Blocks until
     // the reader task has exited (so no callback fires after it returns) — except

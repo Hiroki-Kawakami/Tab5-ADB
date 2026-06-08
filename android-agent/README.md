@@ -13,14 +13,17 @@ embedded ADB.
 
 ## Status
 
-Phase 1 skeleton: the server listens on `localabstract:tab5adb-agent` and serves
-a banner — enough to verify the build + `app_process` launch + socket path end to
-end with standard adb. Screen capture / offload services come later.
+The server listens on `localabstract:tab5adb-agent` and runs the protocol's
+**HELLO handshake**: on each connection it sends its HELLO CONTROL_REQUEST and
+checks the Tab5 CONTROL_RESPONSE (proto-version match), then holds the stream
+open. Screen capture / offload services come later (Phase 2). Verified against a
+real Android device by the headless Tab5-side harness `components/agent_link/test/test_hello.cpp`
+(no GUI; drives connect → push → launch → HELLO over libusb).
 
 The wire protocol — single-socket framing, the agent-initiated HELLO handshake,
 and the JPEG strip stream (audio reserved) — is specified in
 [`docs/protocol.md`](docs/protocol.md); that doc is the contract between the
-agent and the Tab5 side (`embedded_adb`/`adb` + app).
+agent and the Tab5 side (`embedded_adb`/`adb` + the `agent_link` component).
 
 ## Layout
 
@@ -32,7 +35,7 @@ run.sh                              # adb push + app_process (dev loop)
 
 Build artifacts go to `build/` (gitignored).
 
-## Build & run (dev loop, standard adb)
+## Build & verify
 
 Everything runs through the Nix dev shell (adb, JDK, android.jar, d8 all come
 from the flake — see the repo root). With a phone connected and USB debugging
@@ -40,23 +43,25 @@ authorized:
 
 ```sh
 nix develop -c android-agent/build.sh      # -> build/tab5adb-agent.jar
+```
+
+**Primary verification = the headless Tab5-side harness** (the real
+`embedded_adb`/`adb` + `agent_link` stack over libusb, no GUI). It pushes the jar,
+launches `app_process`, opens `localabstract:tab5adb-agent`, and runs the HELLO
+handshake against the phone — run it with
+`nix develop -c components/agent_link/test/run.sh` (the runner builds the host
+stack, runs `adb kill-server`, and launches the test). The test approach (headless,
+no LVGL, real Tab5-side stack) is documented in [`docs/testing.md`](docs/testing.md).
+
+`run.sh` still launches the agent standalone for manual poking, but the agent now
+speaks the binary HELLO protocol (it sends a HELLO frame and waits for the Tab5
+response), so a plain `nc`/`recv` over `adb forward` no longer reads a text banner
+— it is only a **debug fallback** to check whether a problem is in the agent or in
+the Tab5-side stream open:
+
+```sh
 nix develop -c android-agent/run.sh        # push + app_process, stays in foreground
-```
-
-In another shell, reach the socket from the PC and read the banner:
-
-```sh
-nix develop -c adb forward tcp:8080 localabstract:tab5adb-agent
-python3 -c 'import socket; print(socket.create_connection(("localhost",8080),3).recv(4096).decode())'
-# tab5adb-agent v0
-# model=real Android device
-# android=14 (sdk 34)
-```
-
-Stop and clean up:
-
-```sh
-nix develop -c sh -c 'adb forward --remove tcp:8080; adb shell pkill -f com.tab5adb.agent.Server'
+# clean up:  adb shell pkill -f com.tab5adb.agent.Server
 ```
 
 Verified against a real Android device (Android 14, API 34).

@@ -126,6 +126,17 @@ std::shared_ptr<Sync> Client::open_sync(std::weak_ptr<SyncListener> listener) {
     return Sync::create(conn, std::move(listener));
 }
 
+std::shared_ptr<Stream> Client::open_stream(const std::string& service,
+                                            std::weak_ptr<StreamListener> listener) {
+    AdbConnection* conn = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(life_mtx_);
+        if (!closing_) conn = conn_.get();
+    }
+    if (!conn || conn->state() != ConnectionState::Online) return nullptr;
+    return Stream::create(conn, service, std::move(listener));
+}
+
 void Client::close() {
     SemaphoreHandle_t done = nullptr;
     {

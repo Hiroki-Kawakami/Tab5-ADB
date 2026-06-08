@@ -82,13 +82,25 @@ against a **real phone plugged into the PC with standard adb** (push + `app_proc
 + `adb forward localabstract:`), so the Tab5 wiring isn't on the critical path.
 Only once the agent works does the Tab5 side get built: the firmware will push the
 embedded dex over the existing `sync:` service, launch it via `shell:`/`exec`, and
-connect via a new `localabstract:` stream open (the one missing piece in
-`embedded_adb`/`adb`). The dex is tiny (~1.4 KB for the Phase 1 skeleton), so the
-plan is to embed it gzip+`xxd` → C array, falling back to a dedicated partition if
-it grows. **Phase 1 done** (build + `app_process` launch + socket banner, verified
-against a Android 14). Next, *before* screen capture (Phase 2): the
-**wire-protocol spec + its docs** and the **test/verification approach**. See
-`android-agent/README.md`.
+connect via a `localabstract:` stream open. That open is **not** a missing engine
+piece — `embedded_adb`'s `AdbConnection::open_stream(service, …)` is generic, so
+`open_stream("localabstract:tab5adb-agent", …)` already works; what the Tab5 side
+needed was a generic `adb`-layer stream + the agent-protocol logic, both now built
+(see `agent_link` below). The dex is tiny (~3.5 KB), so the plan is to embed it
+gzip+`xxd` → C array, falling back to a dedicated partition if it grows.
+**Phase 1 done** (build + `app_process` launch + socket banner). **Wire protocol
+specified** in `android-agent/docs/protocol.md` (single-socket TYPE multiplexing,
+no payload CRC, agent-initiated HELLO over a forward `localabstract:` connection,
+Android→Tab5 JPEG strip stream — YUV420 q60, agent-side rotate/scale (fit/fill)/
+strip, 16px aligned; audio reserved). **HELLO handshake done & verified on a
+real Android device** (agent sends HELLO REQUEST + checks the Tab5 RESPONSE's proto match;
+Tab5-side `agent_link` answers): the headless harness
+`components/agent_link/test/test_hello.cpp` drives the whole bring-up GUI-less over
+libusb (connect → `Sync::push` the jar → `open_shell` to launch `app_process` →
+`Link::open` localabstract → HELLO round-trip), both sides logging `HELLO ok`. Run
+it with `nix develop -c components/agent_link/test/run.sh`; the test approach is
+documented in `android-agent/docs/testing.md`. Next: Phase 2 (JPEG strip
+capture/receive). See `android-agent/README.md`.
 
 ## Architecture
 
@@ -109,10 +121,13 @@ components/                  # SHARED  (both targets)
   embedded_adb/              #   ADB host-side client (C++) — usb_host vs libusb split
     inc/                     #     public API (embedded_adb.hpp, adb_protocol.hpp)
     src/                     #     protocol/crypto/keystore/connection/stream + transport_*
-  adb/                       #   app-facing object API over embedded_adb (Client/Shell/Sync)
-    inc/                     #     adb.hpp umbrella + adb_client.hpp, adb_error.hpp
+  adb/                       #   app-facing object API over embedded_adb (Client/Shell/Sync/Stream)
+    inc/                     #     adb.hpp umbrella + adb_client.hpp, adb_raw_stream.hpp, adb_error.hpp
     src/  test/              #     impl + host test
     README.md  docs/         #     README = front door; docs/<surface>.md = per-surface spec
+  agent_link/                #   Tab5-side link to tab5adb-agent (protocol.md) — over adb::Stream
+    inc/                     #     agent_link.hpp (Link/LinkListener) + agent_link_protocol.hpp (wire)
+    src/  test/              #     impl + host HELLO test (test_hello.cpp)
 esp32p4/                     # DEVICE build root (IDF project)
   main/                      #   entry point (app_main + device LVGL runtime via esp_lvgl_port)
 simulator/                   # SIMULATOR build root (see below)
@@ -434,6 +449,41 @@ the impl: (1) `AdbConnection::send_write()` does **not** split, so each sync
 format in `embedded_adb/inc/adb_sync_protocol.hpp` (alongside `adb_protocol.hpp`,
 no I/O). See `docs/sync.md`; verified by `test/test_sync.cpp` (libusb vs a real
 phone: push a buffer → stat it back). Later slices add `screencap`.
+
+`adb` also exposes a **generic, service-agnostic raw stream** —
+`Client::open_stream(service, StreamListener) -> shared_ptr<adb::Stream>`
+(`adb_raw_stream.hpp`), the untyped building block beside `Shell`/`Sync`. It is
+essentially `Shell` minus the `shell:` PTY semantics: a non-blocking `write()`
+backed by a per-stream writer task, `on_stream_data`/`on_stream_close` on the
+reader thread, listener held weakly. Its reason to exist is **dependency
+direction**: app-specific protocols in *other* components (e.g. `agent_link`)
+build on this so they depend on `adb`, never on `embedded_adb` directly.
+
+### The `agent_link` component (Tab5-side link to tab5adb-agent)
+
+The Tab5 end of the `tab5adb-agent` wire protocol
+(`android-agent/docs/protocol.md`): one TYPE-multiplexed ADB stream carrying
+control + video + (future) audio. **Dependency arrow is `agent_link` (App-specific)
+→ `adb` (generic) → `embedded_adb`**; the generic `adb::Client` never knows about
+`agent_link` (no `open_agent_link()` on `Client` — that would invert it). The
+entry point lives here: `agent_link::Link::open(shared_ptr<adb::Client>, listener,
+cfg)` calls `client->open_stream("localabstract:tab5adb-agent", …)` and layers
+framing on top. `Link` **is** an `adb::StreamListener` (passed to the stream as a
+`weak_ptr` — drop the `Link`'s `shared_ptr` to detach, Shell/Sync-style). Pure
+wire format (frame header §3, TYPE/FLAGS, HELLO §4, status codes) is in
+`inc/agent_link_protocol.hpp` (no I/O, the `agent_link` analogue of
+`adb_protocol.hpp`). Unlike `Sync`'s worker+pipe, the parser is **reactive on the
+reader thread**: `agent_link` is mostly a receiver (agent→Tab5 push), so
+`on_stream_data` accumulates bytes and dispatches whole frames; the HELLO response
+`write()` is non-blocking. So `on_link_hello`/`on_link_close` fire on the **reader
+thread** (LVGL marshalling is the app's job; the headless test needs none). This
+same parser carries the JPEG strip stream in Phase 2 by handing each `FRAME_END`
+to a decode+framebuffer seam (host libjpeg in the test, P4 HW JPEG + bsp FB in the
+app). **HELLO done & verified on a real Android device** by `test/test_hello.cpp` (run it with
+`nix develop -c components/agent_link/test/run.sh` — the runner builds the whole
+host stack, runs `adb kill-server`, and launches the test; artifacts in
+`test/build/`; test approach in `android-agent/docs/testing.md`). Next slices:
+JPEG strip receive (Phase 2).
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 

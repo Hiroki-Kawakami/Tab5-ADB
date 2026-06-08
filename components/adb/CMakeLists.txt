@@ -8,6 +8,7 @@
 idf_component_register(
     SRCS "src/adb_client.cpp"
          "src/adb_error.cpp"
+         "src/adb_raw_stream.cpp"
          "src/adb_shell.cpp"
          "src/adb_sync.cpp"
     INCLUDE_DIRS "inc"

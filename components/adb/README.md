@@ -33,6 +33,7 @@ API surface, grown slice by slice as each is implemented:
 | `exec` / `screencap` — one-shots | [`docs/one-shots.md`](docs/one-shots.md) | `exec` implemented (slice 2); `screencap` planned |
 | `Shell` — interactive shell session | [`docs/shell.md`](docs/shell.md) | implemented (slice 3) |
 | `Sync` — filesystem session | [`docs/sync.md`](docs/sync.md) | `push`/`stat`/`list` implemented (slice 5) |
+| `Stream` — generic raw service stream | [`docs/streams.md`](docs/streams.md) | implemented (slice 6) |
 
 When you implement a surface, write its `docs/*.md` **before** the code and link
 it here.
@@ -147,3 +148,12 @@ bytes exceed the per-stream cap (initial cap ≈ 64 KB; see implementation).
    thread (the one documented threading refinement — still never the UI thread).
    Verified by `test/test_sync.cpp` (libusb vs a real phone).
    Detail: [`docs/sync.md`](docs/sync.md).
+6. **`Stream`** — generic, service-agnostic raw stream
+   (`Client::open_stream(service, StreamListener) -> shared_ptr<Stream>`) — *done*.
+   The untyped building block beside `Shell`/`Sync` (Shell minus `shell:` PTY
+   semantics): non-blocking `write()` over a per-stream writer task,
+   `on_stream_data`/`on_stream_close` on the reader thread. Exists so app-specific
+   protocols in **other** components (e.g. `agent_link`) layer on `adb` without
+   depending on `embedded_adb` directly. Exercised end-to-end by
+   `components/agent_link/test/test_hello.cpp`. Detail:
+   [`docs/streams.md`](docs/streams.md).
