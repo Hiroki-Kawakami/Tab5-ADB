@@ -13,6 +13,7 @@ idf_component_register(
         "src/esp_timer.c"
         "src/esp_heap_caps.c"
         "src/nvs.c"
+        "src/jpeg_decode.c"   # IDF JPEG decode engine API, backed by libjpeg
         # host FreeRTOS API on pthreads
         "src/freertos_port.c"
         "src/freertos_task.c"

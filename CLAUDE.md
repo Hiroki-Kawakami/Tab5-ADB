@@ -139,6 +139,8 @@ components/                  # SHARED  (both targets)
   agent_link/                #   Tab5-side link to tab5adb-agent (protocol.md) — over adb::Stream
     inc/                     #     agent_link.hpp (Link/LinkListener) + agent_link_protocol.hpp (wire)
     src/  test/              #     impl + host HELLO test (test_hello.cpp)
+  jpeg_fullrange_decode/     #   full-range BT.601 JPEG decode (mirror strips); ESP_PLATFORM-branched
+    include/  src/           #     header + _p4.c (device: CSC-register override) / _sim.c (host delegate)
 esp32p4/                     # DEVICE build root (IDF project)
   main/                      #   entry point (app_main + device LVGL runtime via esp_lvgl_port)
 simulator/                   # SIMULATOR build root (see below)
@@ -505,6 +507,26 @@ the host stack incl. `libjpeg`, runs `adb kill-server`, launches the test;
 artifacts in `test/build/`; approach in `android-agent/docs/testing.md`). Next
 slices: receive→decode→**render** (a mirror screen in `app/`).
 
+### The JPEG decode seam (for the mirror render)
+
+`LinkListener::on_video_strip` hands the app a whole JPEG strip to decode into the
+`bsp` framebuffer. The decode is **the same call on both targets** —
+`jpeg_new_decoder_engine()` + `jpeg_decoder_process_full_range()` (+
+`jpeg_alloc_decoder_mem()` / `jpeg_del_decoder_engine()`) — split below per the
+two standard rules:
+
+- The IDF JPEG **engine API** (`driver/jpeg_decode.h`) is Espressif's, so the
+  host gets it in `simulator/idf_compat/` (libjpeg-backed). Device uses the real
+  `esp_driver_jpeg`.
+- `jpeg_decoder_process_full_range()` is **not** an Espressif API (it overrides
+  the 2D-DMA CSC matrix registers for full-range BT.601 — MJPEG/JFIF content is
+  full-range, but the IDF decoder bakes in the *limited-range* matrix and washes
+  the image out). So it's the shared, `ESP_PLATFORM`-branched
+  `components/jpeg_fullrange_decode/` component (device = the register-override
+  driver; host = a passthrough to the libjpeg shim, which is already full-range).
+  App code calls the one name and the simulator previews the fullrange-fixed
+  device output.
+
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 
 `app/` drives the connection from the LVGL UI: `HomeScreen` has a **Connect**
@@ -619,6 +641,13 @@ targets.
   - `esp_heap_caps` — `heap_caps_malloc`/`calloc`/`realloc`/`aligned_alloc`/`free`
     (host malloc; `MALLOC_CAP_*` flags accepted and ignored).
   - `nvs`/`nvs_flash` — JSON-backed NVS C API (see the NVS section).
+  - `driver/jpeg_decode` — the IDF JPEG decode engine API
+    (`jpeg_new_decoder_engine`/`jpeg_decoder_process`/`jpeg_alloc_decoder_mem`/
+    `jpeg_del_decoder_engine` + cfg/enum types), backed by **libjpeg**
+    (`src/jpeg_decode.c`). RGB565/RGB888 out only; libjpeg decodes JFIF
+    **full-range**, which is what the device's `jpeg_fullrange_decode` reproduces
+    (see that component). pkg `libjpeg` links to the `simulator` exe in
+    `simulator/CMakeLists.txt`.
   - `freertos` — pthread-backed FreeRTOS API: tasks, delays, queues, semaphores
     (binary/counting/mutex/recursive), event groups, task notifications, software
     timers, critical sections (`include/freertos/*.h` + `src/freertos_*.c`).
