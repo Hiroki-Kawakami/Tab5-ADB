@@ -48,7 +48,8 @@ Drive the UI from a script with no host window — synthetic touch in, captured
 JPEG frames out — instead of clicking/screenshotting the real window:
 
 ```sh
-./run.sh simverify simulator/verify/home.txt   # build + run headless, capture frames
+./run.sh simverify simulator/verify/home.txt     # build + run headless, capture frames
+./run.sh simverify simulator/verify/mirror.txt   # connect a phone + show the live mirror
 ```
 
 The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
@@ -77,4 +78,6 @@ The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
   pthread-backed FreeRTOS API — see its `README.md`).
 - `android-agent/` — `tab5adb-agent`, the Android-side companion (screen
   mirroring + offload). A scrcpy-style Java program launched via `app_process`
-  (no APK); built with the Android SDK from the flake. See its `README.md`.
+  (no APK); built with the Android SDK from the flake. See its `README.md`. The
+  app's **Mirroring** screen (`ADBMirroringScreen`) pushes the embedded jar
+  (`app/agent/agent_jar.*`), launches it, and renders its live JPEG stream.

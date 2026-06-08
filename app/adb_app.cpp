@@ -95,6 +95,8 @@ void adb_connect_async(std::function<void(bool)> on_result) {
 
 adb::Client* adb_client() { return g_client.get(); }
 
+std::shared_ptr<adb::Client> adb_client_shared() { return g_client; }
+
 }  // namespace app
 
 void adb_app() {

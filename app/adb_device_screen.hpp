@@ -2,10 +2,9 @@
 #include "screen.hpp"
 
 // Post-connection home for a device. A tappable summary header (model / status,
-// tap -> detail) sits above a grid of tool buttons (Mirror / Capture / Files /
-// Shell / Apps / Logcat / Power / Settings), each opening its own tool screen.
-// This is a UI draft: only Shell is wired to a real screen; the rest open a
-// placeholder. Device fields come from the CNXN banner (no live ADB calls yet).
+// tap -> detail) sits above a column of tool buttons. Mirroring, Shell, and File
+// Manager open real screens; the rest (Apps / Logcat / Power / Disconnect) are
+// still placeholders. Device fields come from the CNXN banner (no live ADB calls).
 class ADBDeviceScreen : public Screen {
 public:
     void build() override;

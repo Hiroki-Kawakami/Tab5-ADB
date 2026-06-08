@@ -8,6 +8,7 @@
 #include "adb.hpp"  // adb::Client
 #include "adb_app.hpp"
 #include "adb_file_manager_screen.hpp"
+#include "adb_mirroring_screen.hpp"
 #include "adb_shell_screen.hpp"
 #include "screen_manager.hpp"
 #include "resources/resources.h"
@@ -116,6 +117,9 @@ void ADBDeviceScreen::createToolsContainer() {
         lv_label_set_text(title_label, title);
         lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
     };
+    tool_button(LUCIDE_SMARTPHONE, "Mirroring", [](lv_event_t*){
+        screen_manager.push(std::make_shared<ADBMirroringScreen>());
+    });
     tool_button(LUCIDE_SQUARE_TERMINAL, "Shell", [](lv_event_t*){
         screen_manager.push(std::make_shared<ADBShellScreen>());
     });

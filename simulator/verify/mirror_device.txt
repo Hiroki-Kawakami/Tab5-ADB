@@ -1,0 +1,7 @@
+# Connect to the phone, then capture the device screen to locate the buttons.
+settle
+tap 360 640
+wait 6000
+settle
+capture simulator/verify/out/device.jpg
+quit

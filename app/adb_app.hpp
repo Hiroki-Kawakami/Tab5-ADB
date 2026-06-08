@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 
 // Panel geometry (M5Stack Tab5 / ILI9881C MIPI-DSI), native portrait.
 constexpr int PANEL_W = 720;
@@ -24,5 +25,10 @@ void adb_connect_async(std::function<void(bool ok)> on_result);
 // The live Client, valid after a successful connect (else nullptr). Use it for
 // everything connection-scoped, e.g. adb_client()->banner() / adb_client()->exec().
 adb::Client* adb_client();
+
+// The live Client as a shared_ptr (empty before connect). APIs that take
+// ownership of the connection for their lifetime — e.g. agent_link::Link::open —
+// need this rather than the raw pointer.
+std::shared_ptr<adb::Client> adb_client_shared();
 
 }  // namespace app

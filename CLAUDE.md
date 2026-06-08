@@ -108,10 +108,17 @@ libjpeg, and asserts framing/16-alignment/tiling; the agent's deterministic
 app_process has no default Typeface), and `TAB5ADB_REAL=1` smoke-tests real
 capture. `test_hello.cpp` still covers the HELLO-only path. Run with
 `nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'`; test
-approach in `android-agent/docs/testing.md`. **Next: receive→decode→render** — a
-mirror screen in `app/` (simulator: host libjpeg into an LVGL canvas over the
-same libusb `Client`; device: P4 HW JPEG into the bsp framebuffer), then real
-Tab5 E2E. See `android-agent/README.md`.
+approach in `android-agent/docs/testing.md`. **receive→decode→render done** — the
+`ADBMirroringScreen` in `app/` (see the UI section) launches the agent from the
+**embedded jar**, sends `MIRROR_START`, and renders the JPEG strip stream into a
+full-screen LVGL canvas, **verified headless in the simulator (libusb) against a
+real Android device**: the live home screen mirrors with correct full-range colors
+(`./run.sh simverify simulator/verify/mirror.txt`). The agent dex is embedded as a
+C array — `app/agent/agent_jar.{h,c}`, `xxd -i` of
+`android-agent/build/tab5adb-agent.jar` (regenerate per the header when the agent
+changes) — so the push+launch path needs no host file and works on device too.
+**Next: real Tab5 E2E** (P4 HW JPEG into the bsp framebuffer over the on-device
+USB host). See `android-agent/README.md`.
 
 ## Architecture
 
@@ -504,8 +511,10 @@ HELLO → `start_mirror` → strips and asserts framing/16-alignment/tiling via 
 libjpeg (run with `nix develop -c sh -c 'TEST=test_mirror
 components/agent_link/test/run.sh'`; default `TEST=test_hello`; the runner builds
 the host stack incl. `libjpeg`, runs `adb kill-server`, launches the test;
-artifacts in `test/build/`; approach in `android-agent/docs/testing.md`). Next
-slices: receive→decode→**render** (a mirror screen in `app/`).
+artifacts in `test/build/`; approach in `android-agent/docs/testing.md`).
+receive→decode→**render done**: the app drives the link from `ADBMirroringScreen`
+(see the UI section) — `Link::open` → `start_mirror` → `on_video_strip` decoded
+into an LVGL canvas, verified headless against a real Android device.
 
 ### The JPEG decode seam (for the mirror render)
 
@@ -583,6 +592,32 @@ so no `detach()`); marshalled lambdas capture `self = shared_from_this()` and
 skip on `Screen::exited()`. One extra guard: a `nav_gen_` counter (LVGL-thread
 only) bumped on every navigation drops **stale list completions** when the user
 taps faster than the device responds.
+
+`ADBDeviceScreen`'s **Mirroring** button pushes **`ADBMirroringScreen`**
+(`app/adb_mirroring_screen.*`) — the live screen-mirror viewer over `agent_link`.
+The screen **is** the `agent_link::LinkListener`, but the multi-step bring-up runs
+on a file-local **`MirrorLauncher`** worker task (the screen owns a `shared_ptr`
+and `stop()`s/joins it in `onExit()`/dtor, the adb-session lifetime pattern):
+`exec` pkill any stale agent → `Sync::push` the **embedded jar**
+(`app/agent/agent_jar.{h,c}`) to `/data/local/tmp` → `open_shell` `app_process` →
+retry `Link::open("localabstract:tab5adb-agent")` until the agent is listening.
+`MirrorLauncher` is itself the `SyncListener`/`ShellListener`/`LinkListener` it
+hands to those calls and **forwards** the link callbacks to the screen (held
+weakly), logging launch progress (no on-screen status); on HELLO it calls
+`Link::start_mirror()` (720×1280 fit, video). Strips arrive on the **reader
+thread**: `on_video_strip` decodes each one through the `jpeg_fullrange_decode`
+seam (lazily-created engine + DMA-capable in/out scratch via
+`jpeg_alloc_decoder_mem`) and blits it into a panel-sized RGB565 `lv_canvas`
+buffer (PSRAM); only the canvas `invalidate` is marshalled to LVGL on `frame_end`
+(coalesced). The screen is **only the stream canvas — no LVGL widgets composited
+over it** (a back button / status label on top would force LVGL to re-blend them
+every frame, the draw cost we are avoiding for now); back navigation is a **tap on
+the canvas** (input handler, no draw layer). v1 also uses a single canvas buffer
+(no double-buffering), so a frame can tear if the reader writes mid-blit —
+acceptable for the first "just show the stream" milestone. The weak-listener
+`lock()` keeps the screen (hence its decode buffers) alive across any in-flight
+strip, so the dtor frees the engine/buffers race-free. Verified headless against a
+real Android device (`./run.sh simverify simulator/verify/mirror.txt`).
 
 ## Simulator details
 
