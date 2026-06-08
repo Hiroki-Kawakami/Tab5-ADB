@@ -126,14 +126,37 @@ int main() {
                 pushed ? "ok" : "FAILED", adb::to_string(push_err.load()),
                 st.exists(), st.size, payload.size());
 
+    // List /sdcard and show a few entries (the FileManager UI's browse path).
+    std::atomic<bool> list_done{false};
+    std::atomic<adb::Error> list_err{adb::Error::Ok};
+    size_t list_count = 0;
+    std::vector<adb::DirEntry> entries;
+    sync->list("/sdcard", [&](adb::Error err, std::vector<adb::DirEntry> es) {
+        list_err = err;
+        list_count = es.size();
+        entries = std::move(es);
+        list_done = true;
+    });
+    for (int i = 0; i < 100 && !list_done; ++i) sleep_ms(100);
+    std::printf("list /sdcard: err=%s count=%zu\n",
+                adb::to_string(list_err.load()), list_count);
+    int shown = 0;
+    for (const auto& e : entries) {
+        if (e.name == "." || e.name == "..") continue;
+        std::printf("    %s %s (%u)\n", e.is_dir() ? "d" : "-", e.name.c_str(),
+                    e.size);
+        if (++shown >= 8) break;
+    }
+    bool listed = list_done && list_err.load() == adb::Error::Ok && list_count > 0;
+
     sync->close();
     sync.reset();   // drop the sync; the weak listener ref expires with it
     client->close();
 
     bool one_close = listener->closes() == 1;
-    bool ok = pushed && landed && one_close;
+    bool ok = pushed && landed && listed && one_close;
     std::printf("%s (closes=%d)\n",
-                ok ? "PASSED: push lands on the device and sync closes once"
+                ok ? "PASSED: push lands, list works, and sync closes once"
                    : "FAILED",
                 listener->closes());
     return ok ? 0 : 1;

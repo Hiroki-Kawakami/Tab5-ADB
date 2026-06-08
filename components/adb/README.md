@@ -32,7 +32,7 @@ API surface, grown slice by slice as each is implemented:
 | `Client` — connect + lifecycle, the factory | [`docs/client.md`](docs/client.md) | implemented (slice 1) |
 | `exec` / `screencap` — one-shots | [`docs/one-shots.md`](docs/one-shots.md) | `exec` implemented (slice 2); `screencap` planned |
 | `Shell` — interactive shell session | [`docs/shell.md`](docs/shell.md) | implemented (slice 3) |
-| `Sync` — filesystem session | [`docs/sync.md`](docs/sync.md) | `push`/`stat` implemented (slice 5, in progress) |
+| `Sync` — filesystem session | [`docs/sync.md`](docs/sync.md) | `push`/`stat`/`list` implemented (slice 5) |
 
 When you implement a surface, write its `docs/*.md` **before** the code and link
 it here.
@@ -140,8 +140,8 @@ bytes exceed the per-stream cap (initial cap ≈ 64 KB; see implementation).
    → extend `docs/one-shots.md`.
 5. **`Sync`** — `sync:` filesystem session; methods one-shot style. Built
    direction-by-direction (each gets its own UI): **`push` (Tab5→Android) first**
-   with `stat` as its verifier — *done*; then `list` (browse), `pull`
-   (Android→Tab5), and preview. `Client::open_sync(listener)` returns a
+   with `stat` as its verifier, then `list` (the browse UI) — *done*; then `pull`
+   (Android→Tab5) and preview. `Client::open_sync(listener)` returns a
    `shared_ptr<Sync>`; the session owns a private worker thread that drives the
    synchronous `sync:` sub-protocol, so its completions fire on that worker
    thread (the one documented threading refinement — still never the UI thread).

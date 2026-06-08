@@ -32,7 +32,7 @@ constexpr uint32_t ID_QUIT = 0x54495551;  // 'QUIT' — end the sync session
 constexpr uint32_t DATA_MAX = 64 * 1024;
 
 // Max path length adbd accepts in a request (file_sync_protocol.h SyncRequest).
-constexpr uint32_t PATH_MAX = 1024;
+constexpr uint32_t MAX_PATH_LEN = 1024;
 
 }  // namespace sync
 }  // namespace adb

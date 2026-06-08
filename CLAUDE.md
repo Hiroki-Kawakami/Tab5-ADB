@@ -375,12 +375,12 @@ spends a FreeRTOS task on it. Backpressure → `Error::QueueFull` past a ~64 KB
 per-stream cap; the listener is held as a `weak_ptr` (`lock()`ed before each
 dispatch), so dropping the listener's `shared_ptr` detaches. See
 `docs/shell.md`;
-verified by `test/test_shell.cpp` (libusb vs a real phone). **Slice 5** (in
-progress): the `Sync` session for the FileManager — `Client::open_sync(listener)`
+verified by `test/test_shell.cpp` (libusb vs a real phone). **Slice 5** (done):
+the `Sync` session for the FileManager — `Client::open_sync(listener)`
 returns a `shared_ptr<Sync>` over the `sync:` service; built **direction by
 direction** (each is its own UI), starting with **Tab5→Android `push` (SEND)**
-plus `stat` (STAT) as its verifier — `list`/`pull`/preview are the next
-directions. The `sync:` sub-protocol is request/response and **serial** (one
+plus `stat` (STAT) as its verifier, then `list` (LIST) for the browse UI. The
+`sync:` sub-protocol is request/response and **serial** (one
 request at a time on the one stream), so unlike `Shell`, `Sync` owns a private
 **worker task** that drives it synchronously: it writes requests and *blocks for
 responses* over an internal **byte pipe** (`std::condition_variable`) fed by the
@@ -434,6 +434,25 @@ on the LVGL thread. (`ScreenManager` owns screens via `shared_ptr` and sets
 `LV_FONT_UNSCII_16` is enabled
 on both targets for the terminal (sim `lv_conf.h`; device `sdkconfig`/
 `sdkconfig.defaults`). v1 is line-oriented (touch keyboard), not a raw VT.
+
+`ADBDeviceScreen`'s **File Manager** button pushes **`ADBFileManagerScreen`**
+(`app/adb_file_manager_screen.*`) — a virtual root that lists the available
+storages (Android `/sdcard`, `/`, and the Tab5 SD card) as cards. Tapping a
+storage pushes **`ADBFileBrowserScreen`** (`app/adb_file_browser_screen.*`), the
+read-only Android file browser over `Client::open_sync()` + `Sync::list()`. The
+browser **is** the `adb::SyncListener`: it opens a `sync:` session, lists the
+directory (folders first, then case-insensitive by name; `.`/`..` filtered) and
+tapping a folder descends into it. A `directory_stack_` holds the path history —
+each level caches its entries — and the nav **Back** button goes up a level, or
+pops the screen at the stack root. Same two threading concerns as the shell
+screen, but note the Sync refinement: `list()` completions fire on the **Sync
+worker thread** (not the reader thread), so they marshal to LVGL with
+`lv_async_call`; `onExit()` just does `close()` (the session holds the listener
+as a `weak_ptr` — the screen passes a `shared_ptr` aliasing `shared_from_this()`,
+so no `detach()`); marshalled lambdas capture `self = shared_from_this()` and
+skip on `Screen::exited()`. One extra guard: a `nav_gen_` counter (LVGL-thread
+only) bumped on every navigation drops **stale list completions** when the user
+taps faster than the device responds.
 
 ## Simulator details
 

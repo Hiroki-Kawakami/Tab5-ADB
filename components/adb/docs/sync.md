@@ -20,7 +20,7 @@ Built direction-by-direction (each direction is its own UI later):
 |---|---|---|
 | `push` (SEND) | **Tab5 → Android** | implemented |
 | `stat` (STAT) | metadata (verifier for push) | implemented |
-| `list` (LIST) | directory browse | planned (next) |
+| `list` (LIST) | directory browse | implemented |
 | `pull` (RECV) | **Android → Tab5** | planned |
 | preview | Android → memory | planned (built on `pull`) |
 
@@ -60,6 +60,11 @@ public:
   // Metadata of one path (lstat semantics: a symlink is not followed).
   void stat(const std::string& path, std::function<void(Error, FileStat)> cb);
 
+  // List a directory. The completion gets every entry the device reports,
+  // including "." and ".." — the caller filters/sorts for display.
+  void list(const std::string& path,
+            std::function<void(Error, std::vector<DirEntry>)> cb);
+
   // Tab5 -> Android. Streams `source` to `remote_path`, creating/truncating it
   // with permission bits `perm` (e.g. 0644) and setting its mtime to `mtime`
   // (epoch seconds; 0 = epoch). The source is pumped on the worker thread, so it
@@ -92,6 +97,8 @@ is the `adb` `Sync` session (it owns a thread; the engine does not).
 
 - **`stat(path)`** → send `STAT` + path; read a 16-byte `sync_stat_v1`
   (`id,mode,size,mtime`). `mode == 0` ⇒ does not exist.
+- **`list(path)`** → send `LIST` + path; read `DENT` headers
+  (`id,mode,size,mtime,namelen`) + name, until a header with `id == DONE`.
 - **`push(path, perm, mtime, source)`** (SEND v1):
   1. send `SEND` + `"<path>,<st_mode>"` (the mode is `perm | S_IFREG`, decimal).
   2. for each chunk from `source`: send `DATA` + `<size>` + bytes. Each `A_WRTE`
@@ -145,7 +152,7 @@ completion fires synchronously on the caller's thread with `Error::Cancelled`.
 - **`on_sync_close` reports `Error::Ok`** for every normal end (peer/our close);
   the cause is not distinguished yet — same deferral as `Shell`/`exec`.
 - **No compression** (`brotli`/`lz4`/`zstd` sync flags) — plain `SEND_V1`.
-- `list` / `pull` / preview are the next directions (see Status).
+- `pull` / preview are the next directions (see Status).
 
 ## Test
 

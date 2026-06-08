@@ -125,6 +125,14 @@ void Sync::stat(const std::string& path, std::function<void(Error, FileStat)> cb
     });
 }
 
+void Sync::list(const std::string& path,
+                std::function<void(Error, std::vector<DirEntry>)> cb) {
+    enqueue([this, path, cb = std::move(cb)](bool alive) {
+        if (alive) do_list(path, cb);
+        else if (cb) cb(Error::Cancelled, {});
+    });
+}
+
 void Sync::push(const std::string& remote_path, uint32_t perm, uint32_t mtime,
                 SyncSource source, std::function<void(Error)> cb) {
     enqueue([this, remote_path, perm, mtime, source = std::move(source),
@@ -153,6 +161,47 @@ void Sync::do_stat(const std::string& path, std::function<void(Error, FileStat)>
     st.size = get_le32(buf + 8);
     st.mtime = get_le32(buf + 12);
     if (cb) cb(Error::Ok, st);
+}
+
+void Sync::do_list(const std::string& path,
+                   std::function<void(Error, std::vector<DirEntry>)> cb) {
+    if (!write_request(sync::ID_LIST, path)) {
+        if (cb) cb(Error::StreamClosed, {});
+        return;
+    }
+    // LIST v1 streams a sync_dent_v1 (id,mode,size,mtime,namelen) + name per
+    // entry, terminated by a same-shaped header with id == DONE.
+    std::vector<DirEntry> entries;
+    for (;;) {
+        uint8_t hdr[20];
+        if (!read_exact(hdr, sizeof(hdr))) {
+            if (cb) cb(Error::StreamClosed, {});
+            return;
+        }
+        uint32_t id = get_le32(hdr);
+        if (id == sync::ID_DONE) break;
+        if (id != sync::ID_DENT) {
+            if (cb) cb(Error::Protocol, {});
+            return;
+        }
+        DirEntry e;
+        e.mode = get_le32(hdr + 4);
+        e.size = get_le32(hdr + 8);
+        e.mtime = get_le32(hdr + 12);
+        uint32_t namelen = get_le32(hdr + 16);
+        if (namelen > sync::MAX_PATH_LEN) {
+            if (cb) cb(Error::Protocol, {});
+            return;
+        }
+        std::string name(namelen, '\0');
+        if (namelen && !read_exact(&name[0], namelen)) {
+            if (cb) cb(Error::StreamClosed, {});
+            return;
+        }
+        e.name = std::move(name);
+        entries.push_back(std::move(e));
+    }
+    if (cb) cb(Error::Ok, std::move(entries));
 }
 
 void Sync::do_push(const std::string& path, uint32_t perm, uint32_t mtime,
@@ -215,7 +264,7 @@ bool Sync::send_bytes(const uint8_t* data, size_t len) {
 }
 
 bool Sync::write_request(uint32_t id, const std::string& path) {
-    if (path.size() > sync::PATH_MAX) return false;
+    if (path.size() > sync::MAX_PATH_LEN) return false;
     std::vector<uint8_t> buf(8 + path.size());
     put_le32(buf.data(), id);
     put_le32(buf.data() + 4, static_cast<uint32_t>(path.size()));

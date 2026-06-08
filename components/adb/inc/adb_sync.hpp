@@ -43,6 +43,18 @@ struct FileStat {
     bool is_reg() const { return (mode & 0170000) == 0100000; }
 };
 
+// One entry from a directory listing (lstat of the entry: a symlink is reported
+// as a symlink, not followed). `name` is the leaf name, not a full path.
+struct DirEntry {
+    std::string name;
+    uint32_t mode = 0;
+    uint32_t size = 0;
+    uint32_t mtime = 0;
+    bool is_dir() const { return (mode & 0170000) == 0040000; }
+    bool is_reg() const { return (mode & 0170000) == 0100000; }
+    bool is_symlink() const { return (mode & 0170000) == 0120000; }
+};
+
 // Sync session delegate. on_sync_close fires once, on the worker thread. The
 // Sync* first argument lets one listener serve several sessions.
 class SyncListener {
@@ -70,6 +82,11 @@ public:
 
     // lstat one path (a symlink is not followed). Completion fires once.
     void stat(const std::string& path, std::function<void(Error, FileStat)> cb);
+
+    // List a directory: completion gets the entries (lstat each; includes "."
+    // and ".." as the device sends them — the caller filters). Fires once.
+    void list(const std::string& path,
+              std::function<void(Error, std::vector<DirEntry>)> cb);
 
     // Tab5 -> Android: stream `source` to `remote_path`, creating/truncating it
     // with permission bits `perm` (e.g. 0644) and mtime `mtime` (epoch seconds).
@@ -103,6 +120,8 @@ private:
     void worker_loop();
 
     void do_stat(const std::string& path, std::function<void(Error, FileStat)> cb);
+    void do_list(const std::string& path,
+                 std::function<void(Error, std::vector<DirEntry>)> cb);
     void do_push(const std::string& path, uint32_t perm, uint32_t mtime,
                  SyncSource source, std::function<void(Error)> cb);
 
