@@ -20,6 +20,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
 extern "C" {
@@ -67,6 +68,10 @@ bool capture(const char *path) {
         return false;
     }
 
+    std::error_code ec;
+    std::filesystem::path out(path);
+    if (out.has_parent_path()) std::filesystem::create_directories(out.parent_path(), ec);
+
     FILE *f = fopen(path, "wb");
     if (!f) {
         fprintf(stderr, "[sim] capture: cannot open %s\n", path);
@@ -113,23 +118,41 @@ bool capture(const char *path) {
     return true;
 }
 
+/* A press/release must each span at least one LVGL indev read for the click to
+ * register, so a tap holds and waits a few frames on each edge. */
+constexpr uint32_t TOUCH_HOLD_MS = 80;
+
 /* Execute one trimmed, non-empty script line. Returns false to stop the run. */
 bool run_line(char *line) {
     char cmd[32] = {0};
-    char arg[1024] = {0};
-    int n = sscanf(line, "%31s %1023s", cmd, arg);
+    char a1[1024] = {0}, a2[1024] = {0};
+    int n = sscanf(line, "%31s %1023s %1023s", cmd, a1, a2);
     if (n < 1) return true;
     if (cmd[0] == '#') return true;
 
     if (strcmp(cmd, "quit") == 0) {
         return false;
     } else if (strcmp(cmd, "wait") == 0) {
-        pump_for(n >= 2 ? (uint32_t)atoi(arg) : 0);
+        pump_for(n >= 2 ? (uint32_t)atoi(a1) : 0);
     } else if (strcmp(cmd, "settle") == 0) {
-        settle(n >= 2 ? (uint32_t)atoi(arg) : 5000);
+        settle(n >= 2 ? (uint32_t)atoi(a1) : 5000);
     } else if (strcmp(cmd, "capture") == 0) {
-        if (n >= 2) capture(arg);
+        if (n >= 2) capture(a1);
         else fprintf(stderr, "[sim] capture: missing path\n");
+    } else if (strcmp(cmd, "tap") == 0) {
+        if (n >= 3) {
+            sdl_backend_inject_down(atoi(a1), atoi(a2));
+            pump_for(TOUCH_HOLD_MS);
+            sdl_backend_inject_up();
+            pump_for(TOUCH_HOLD_MS);
+        } else {
+            fprintf(stderr, "[sim] tap: need x y\n");
+        }
+    } else if (strcmp(cmd, "down") == 0 || strcmp(cmd, "move") == 0) {
+        if (n >= 3) sdl_backend_inject_down(atoi(a1), atoi(a2));
+        else fprintf(stderr, "[sim] %s: need x y\n", cmd);
+    } else if (strcmp(cmd, "up") == 0) {
+        sdl_backend_inject_up();
     } else {
         fprintf(stderr, "[sim] unknown command: %s\n", cmd);
     }

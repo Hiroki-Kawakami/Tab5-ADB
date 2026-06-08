@@ -1,0 +1,10 @@
+# Prove touch injection: capture the Connect button held (pressed style) vs released.
+settle
+capture simulator/verify/out/before.jpg
+down 360 640
+wait 120
+capture simulator/verify/out/pressed.jpg
+up
+wait 200
+capture simulator/verify/out/released.jpg
+quit

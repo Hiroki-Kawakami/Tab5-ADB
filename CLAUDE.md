@@ -641,23 +641,31 @@ boards reuse them:
 - `SIMULATOR_SCRIPT=<path>` (`-` = stdin) — `main.cpp` runs
   `sim_harness_run()` (in `simulator/platform/sim_harness.cpp`) instead of the
   interactive loop. A tiny line-oriented interpreter that runs **on the main/LVGL
-  thread** (so capture never races rendering): `wait <ms>`, `settle [<max_ms>]`,
-  `capture <path.jpg>`, `quit`. `settle` pumps `lv_timer_handler` until no
-  animation runs for a few frames (drains `lv_async_call` work), so capture
-  before the frame settles is the caller's mistake.
+  thread** (so capture/input never race rendering): `wait <ms>`,
+  `settle [<max_ms>]`, `capture <path.jpg>`, `tap <x> <y>`, `down <x> <y>`,
+  `move <x> <y>`, `up`, `quit`. `settle` pumps `lv_timer_handler` until no
+  animation runs for a few frames (drains `lv_async_call` work), so capturing
+  before the frame settles is the caller's mistake. `tap` = inject press →
+  hold a few frames → release → hold a few frames, so each edge spans an LVGL
+  indev read and the click registers; `down`/`move`/`up` build drags/swipes.
 
 Layering split: the **primitives** live in the SDL backend (the hardware seam) —
-`sdl_backend.c` honours `SIMULATOR_HEADLESS` and exposes
-`sdl_backend_snapshot()` (the most-recently-flushed framebuffer + geometry/format,
-RGB565). The **orchestration** (script loop, `lv_timer_handler` pumping, JPEG
-encode via the already-linked libjpeg) lives in the platform-layer harness — so
-the BSP stays image-format-agnostic. The agent's loop becomes: write a script →
-run headless → `Read` the captured JPEG. Example: `simulator/verify/home.txt`
-(outputs to the gitignored `simulator/verify/out/`). Run:
-`SIMULATOR_HEADLESS=1 SIMULATOR_SCRIPT=simulator/verify/home.txt ./build/simulator`.
-**Done so far: headless + capture.** Next: synthetic **touch injection**
-(`tap`/`down`/`move`/`up` via an injected pointer state `touch_read` reports) for
-navigation/interaction checks, then a `run.sh` mode.
+`sdl_backend.c` honours `SIMULATOR_HEADLESS`, reports the harness's injected
+pointer from `touch_read` (`sdl_backend_inject_down`/`_up`; headless has no
+mouse), and exposes `sdl_backend_snapshot()` (the most-recently-flushed
+framebuffer + geometry/format, RGB565). State is main-thread-only (the harness
+pumps `lv_timer_handler`, which calls `touch_read`), so no locking. The
+**orchestration** (script loop, `lv_timer_handler` pumping, JPEG encode via the
+already-linked libjpeg) lives in the platform-layer harness — so the BSP stays
+image-format-agnostic. The agent's loop becomes: write a script → run headless →
+`Read` the captured JPEG. Examples: `simulator/verify/home.txt` (capture),
+`simulator/verify/touch.txt` (tap → screen transition); `capture` auto-creates
+its output's parent dir, and the examples write to the gitignored
+`simulator/verify/out/`. Run via `./run.sh simverify <script>` (builds, then runs
+headless — sets both env vars), e.g. `./run.sh simverify simulator/verify/home.txt`.
+**Done & verified: headless rendering, framebuffer capture, and synthetic
+touch** (tap registers a click → real screen navigation). Next: a `run.sh`
+mode / per-screen verify scripts as the UI grows.
 
 ### Other simulator notes
 - LVGL config is `simulator/lv_conf.h` (found via `LV_CONF_INCLUDE_SIMPLE` +

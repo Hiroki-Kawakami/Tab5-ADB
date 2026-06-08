@@ -40,6 +40,13 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
                              bsp_display_t **out_display,
                              bsp_touch_t **out_touch);
 
+/* Inject a synthetic touch for the sim harness (headless mode only — there is
+ * no mouse). Coordinates are panel pixels. _down presses/holds (call again with
+ * new coords to drag); _up releases. touch_read reports the injected pointer
+ * until released. Call from the LVGL/main thread. */
+void sdl_backend_inject_down(int x, int y);
+void sdl_backend_inject_up(void);
+
 /* Return a pointer to the most recently flushed framebuffer (the completed
  * frame) plus its geometry / pixel format, for the sim harness to snapshot.
  * The pointer is owned by the backend; valid until the next flush. Returns

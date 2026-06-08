@@ -18,8 +18,11 @@
  *   wait <ms>            pump the LVGL loop for <ms>
  *   settle [<max_ms>]    pump until no LVGL timer/anim is pending (default 5000)
  *   capture <path.jpg>   write the latest frame as a JPEG
+ *   tap <x> <y>          synthetic press+release at panel coords (one click)
+ *   down <x> <y>         press/hold (no release) — start of a drag
+ *   move <x> <y>         move the held pointer (drag/swipe)
+ *   up                   release the held pointer
  *   quit                 stop the run (implicit at end of script)
- * (touch injection commands — tap/down/move/up — land in a later slice.)
  */
 
 #pragma once

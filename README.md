@@ -42,6 +42,19 @@ Notes:
   semantic gap: critical sections use a global lock (host tasks run in parallel).
   See `simulator/idf_compat/README.md` for the surface and details.
 
+### Headless UI verification
+
+Drive the UI from a script with no host window — synthetic touch in, captured
+JPEG frames out — instead of clicking/screenshotting the real window:
+
+```sh
+./run.sh simverify simulator/verify/home.txt   # build + run headless, capture frames
+```
+
+The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
+`quit`) runs the same `app/` code under `SIMULATOR_HEADLESS`; see
+`simulator/platform/sim_harness.h` and the examples in `simulator/verify/`.
+
 ## Layout
 
 - `app/` — application screens and logic (shared by device + simulator).
