@@ -59,3 +59,6 @@ Notes:
 - `simulator/` — host SDL2/LVGL build of `app/`: `platform/` is the SDL/LVGL
   entry; `idf_compat/` is the host compat component (ESP-IDF API shims + a
   pthread-backed FreeRTOS API — see its `README.md`).
+- `android-agent/` — `tab5adb-agent`, the Android-side companion (screen
+  mirroring + offload). A scrcpy-style Java program launched via `app_process`
+  (no APK); built with the Android SDK from the flake. See its `README.md`.

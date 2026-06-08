@@ -55,6 +55,41 @@ Runs `app/` on the desktop so UI / app logic can be developed without a board.
 `run.sh simulator` only re-runs `cmake --fresh` when `build/` is missing; delete
 `build/` to force a clean reconfigure (e.g. after editing `simulator/CMakeLists.txt`).
 
+### Android companion — `android-agent/` (`tab5adb-agent`)
+
+The program side-loaded onto the Android phone — **screen mirroring** (main
+purpose) plus offload of work the Tab5 can't do; mirroring is one service among
+several. It is a **scrcpy-style server, not an APK**: a plain **Java** program
+dexed into a jar, pushed to `/data/local/tmp`, and launched with `app_process` so
+it runs with shell uid (2000) and reaches hidden Android APIs (display capture,
+input injection) with no permission dialog. It listens on the abstract socket
+`localabstract:tab5adb-agent`; the Tab5 host reaches it over its embedded ADB.
+
+The flake gained the Android toolchain for this (`pkgs.jdk`, `pkgs.android-tools`
+for a standalone `adb`, and `androidenv.composeAndroidPackages` for `android.jar`
++ `d8`; `allowUnfree` / `android_sdk.accept_license` are set for the SDK). The
+shellHook exports `ANDROID_JAR` and puts `d8` on `PATH`.
+
+```sh
+nix develop -c android-agent/build.sh      # javac + d8 -> build/tab5adb-agent.jar
+nix develop -c android-agent/run.sh        # adb push + app_process (foreground)
+# from another shell, reach the socket from the PC:
+nix develop -c adb forward tcp:8080 localabstract:tab5adb-agent
+```
+
+Dev strategy mirrors `embedded_adb`'s: the agent is developed and verified
+against a **real phone plugged into the PC with standard adb** (push + `app_process`
++ `adb forward localabstract:`), so the Tab5 wiring isn't on the critical path.
+Only once the agent works does the Tab5 side get built: the firmware will push the
+embedded dex over the existing `sync:` service, launch it via `shell:`/`exec`, and
+connect via a new `localabstract:` stream open (the one missing piece in
+`embedded_adb`/`adb`). The dex is tiny (~1.4 KB for the Phase 1 skeleton), so the
+plan is to embed it gzip+`xxd` → C array, falling back to a dedicated partition if
+it grows. **Phase 1 done** (build + `app_process` launch + socket banner, verified
+against a Android 14). Next, *before* screen capture (Phase 2): the
+**wire-protocol spec + its docs** and the **test/verification approach**. See
+`android-agent/README.md`.
+
 ## Architecture
 
 ### Component layout — one directory per category
@@ -85,6 +120,9 @@ simulator/                   # SIMULATOR build root (see below)
   idf_compat/                #   SIM-only ESP-IDF compat component (see its README.md)
     include/  src/           #     host shims: esp_* (err/log/check/timer/heap/nvs)
                              #     + freertos/* (pthread-backed FreeRTOS API)
+android-agent/               # ANDROID  tab5adb-agent (scrcpy-style app_process server)
+  src/                       #   Java sources (com.tab5adb.agent.Server)
+  build.sh  run.sh           #   javac+d8 -> dex jar; adb push + app_process dev loop
 ```
 
 `m5stack-bsp` is the worked example of a target-divergent shared component: its
