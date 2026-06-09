@@ -367,22 +367,33 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   default USB host FIFO bias (`BALANCED`) gives the non-periodic TX FIFO only
   `dfifo_depth/16` lines → a **bulk OUT MPS limit of 256**, so claiming an Android
   phone's 512-byte high-speed bulk endpoints fails with `interface_claim →
-  ESP_ERR_NOT_SUPPORTED`. ADB is bulk-only, so we set `usb_host_config_t`'s
-  `fifo_settings_custom` to rx=256 / nptx=256 / ptx=0 lines (MPS limits ~1016 /
-  1024; the usable P4 DFIFO is <1024 lines once the host request queues are
-  reserved, so the sum can't be raised much). On device, advertise a modest CNXN
-  maxdata (16 KB) so the usb_host transport's per-payload DMA allocations stay
-  small. **Second gotcha (cost a long mirror-stability hunt):** a *single large*
-  bulk-IN transfer on the P4 usb_host **intermittently corrupts a payload byte**
-  (same length, wrong content; the failure rate climbs sharply with size — ~6 KB
-  reads were always clean, ~10 KB reads failed often). Not the FIFO (corruption,
-  not loss), not cache (the IDF M2C-invalidates IN buffers), not the wire (USB CRC
-  retransmits) — a DWC2 large-transfer quirk. `read_packet()` therefore reads each
-  payload in **≤4 KB chunks** (bulk IN is a byte stream, so one device bulk-write
-  splits cleanly across several host transfers); small transfers stay under the
-  corruption threshold. This was the real cause of the mirror's sporadic JPEG decode
-  errors — confirmed by an agent-side TX hash vs Tab5-side RX hash mismatch on
-  same-length frames.
+  ESP_ERR_NOT_SUPPORTED`. ADB is bulk-only and for the mirror the **hot direction
+  is bulk IN**, so we bias `usb_host_config_t`'s `fifo_settings_custom` toward RX:
+  **rx=512 / nptx=192 / ptx=0** lines (nptx 192 → OUT MPS limit ~768, ample for the
+  512-byte bulk OUT; Tab5→phone is light). On device, advertise a modest CNXN
+  maxdata (16 KB). **Second gotcha — the real one (cost a long mirror-stability
+  hunt, then a wrong fix, then the right one):** at high bulk-IN throughput (the
+  uncapped/GPU-offloaded mirror runs ~2-4 MB/s vs the old ~0.4) the P4 usb_host
+  **intermittently corrupts a payload byte** → a malformed JPEG strip → a
+  `jpeg.fullrange` HW decode error. The first hunt wrongly concluded "a DWC2
+  *large-transfer* quirk" and mitigated it by reading the payload in ≤4 KB chunks —
+  which only masked it at low rate. The **actual cause is RX-FIFO starvation**: the
+  old rx=256-line (1 KiB = 2 packets) FIFO overflowed when the USB DMA drain
+  stalled under sustained high-rate IN + concurrent PSRAM traffic (the MIPI-DSI
+  panel refresh + JPEG decode). Proof it's not a transfer-size quirk: the
+  `usb_host_uvc` reference streams clean **10 KiB** IN transfers on this same chip.
+  **Fix (verified on a real Tab5 + an Android phone: 0 decode errors at ~40-49 fps):**
+  the RX-biased FIFO above **plus** dropping the ≤4 KB chunking — `read_packet()`
+  reads each A_WRTE payload in **one** transfer (adbd writes the payload with a
+  single `usb_write`, so it arrives as one bulk-IN byte stream; the persistent
+  `hdr_xfer_`/`data_xfer_` are reused + grown lazily, no per-packet alloc). A
+  *UVC-style multi-in-flight transfer pool* was also tried (to keep the IN endpoint
+  busy during JPEG decode) but it **hung the reader after ~2 s under load** —
+  keeping N transfers in flight needs consumer-thread re-submission (cross-thread
+  `usb_host_transfer_submit`) for ADB's lossless backpressure, which UVC sidesteps
+  only because its in-callback re-submit can *drop* on overflow (fine for video,
+  not for ADB). The single-transfer-per-payload reader is already clean at 40-49
+  fps, so the pool's read-ahead wasn't the bottleneck; **not pursued.**
 - `adb_connection` / `adb_stream` — CNXN handshake + AUTH state machine, and
   `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing (`open_stream()` + `run_service()`
   for one-shot commands, classic per-OKAY flow control). The packet read loop is

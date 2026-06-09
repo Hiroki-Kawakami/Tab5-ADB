@@ -63,8 +63,10 @@ private:
 
     SemaphoreHandle_t in_sem_ = nullptr;
     SemaphoreHandle_t out_sem_ = nullptr;
-    usb_transfer_t* hdr_xfer_ = nullptr;  // persistent header IN transfer
+    usb_transfer_t* hdr_xfer_ = nullptr;   // persistent header IN transfer
     bool hdr_in_flight_ = false;
+    usb_transfer_t* data_xfer_ = nullptr;  // persistent payload IN transfer, grown lazily
+    size_t data_cap_ = 0;                  // its allocated capacity (MPS-rounded)
 };
 
 void UsbHostTransport::lib_task(void* arg) {
@@ -103,13 +105,18 @@ bool UsbHostTransport::open() {
     // The default (BALANCED) FIFO bias gives the non-periodic TX FIFO only
     // dfifo_depth/16 lines → a bulk OUT MPS limit of 256, which rejects an
     // Android device's 512-byte high-speed bulk endpoints (interface_claim
-    // returns ESP_ERR_NOT_SUPPORTED). ADB is bulk-only, so we set RX (IN) and
-    // NPTX (bulk OUT) to 256 lines each (MPS limits ~1016 / 1024); the periodic
-    // TX FIFO is unused. (The HW FIFO RAM is < 1024 lines once the host request
-    // queues are reserved, so larger sums fail validation — see the cache note in
-    // read_packet for the actual large-IN corruption fix.)
-    host_cfg.fifo_settings_custom.rx_fifo_lines = 256;
-    host_cfg.fifo_settings_custom.nptx_fifo_lines = 256;
+    // returns ESP_ERR_NOT_SUPPORTED). ADB is bulk-only, and for the mirror the
+    // hot direction is **bulk IN** (the screen stream), so we bias the FIFO
+    // toward RX: rx=512 lines (2 KiB, 4×512-byte packets) so the DWC2 RX FIFO can
+    // absorb DMA-drain latency spikes under sustained high-rate IN without
+    // overflowing, and nptx=192 lines (OUT MPS limit ~768, ample for the 512-byte
+    // bulk OUT — Tab5→phone is light: OKAY acks + control). The periodic TX FIFO
+    // is unused. (If usb_host_install fails here it's a FIFO-budget overflow — the
+    // P4 DWC2 DFIFO is finite; dial rx back. This bias is the fix for the
+    // high-throughput bulk-IN corruption — undersized RX, not transfer size: the
+    // usb_host_uvc reference does clean 10 KiB IN transfers on this same chip.)
+    host_cfg.fifo_settings_custom.rx_fifo_lines = 512;
+    host_cfg.fifo_settings_custom.nptx_fifo_lines = 192;
     host_cfg.fifo_settings_custom.ptx_fifo_lines = 0;
     esp_err_t err = usb_host_install(&host_cfg);
     if (err != ESP_OK) {
@@ -261,30 +268,31 @@ IoResult UsbHostTransport::read_packet(Packet& p) {
 
     uint32_t len = p.header.data_length;
     p.payload.resize(len);
-    // Read the payload in <=4 KiB chunks. A single large bulk-IN transfer on the
-    // P4 usb_host intermittently corrupts a payload byte (same length, wrong
-    // content — confirmed by a TX/RX hash mismatch), and the failure rate rises
-    // sharply with transfer size (≈6 KiB strips were always clean, ≈10 KiB strips
-    // failed often). Splitting into small transfers — each well under that
-    // threshold — sidesteps it. Bulk IN is a byte stream, so reading one device
-    // bulk-write across several host transfers is fine.
-    constexpr size_t kChunk = 4096;
-    size_t off = 0;
-    while (off < len) {
-        size_t want = len - off < kChunk ? len - off : kChunk;
-        usb_transfer_t* xf = nullptr;
-        if (usb_host_transfer_alloc(round_up(want, mps_in_), 0, &xf) != ESP_OK) {
+    if (len == 0) return IoResult::Ok;
+
+    // Read the whole payload in ONE transfer. adbd writes each A_WRTE payload with
+    // a single usb_write(), so it arrives as one bulk-IN byte stream (terminated by
+    // a short packet when len isn't an MPS multiple) — no need to split it. The
+    // earlier ≤4 KiB chunking was a band-aid for "large IN corrupts", but the real
+    // cause is an undersized RX FIFO starving under high-rate IN (see open()): the
+    // usb_host_uvc reference streams clean 10 KiB IN transfers on this same chip.
+    // The payload transfer is persistent and grown lazily (like hdr_xfer_) so the
+    // hot path does no per-packet allocation.
+    size_t need = round_up(len, mps_in_);
+    if (need > data_cap_) {
+        if (data_xfer_) { usb_host_transfer_free(data_xfer_); data_xfer_ = nullptr; }
+        if (usb_host_transfer_alloc(need, 0, &data_xfer_) != ESP_OK) {
+            data_cap_ = 0;
             return IoResult::Error;
         }
-        bool ok = submit_in(xf, want) &&
-                  xSemaphoreTake(in_sem_, portMAX_DELAY) == pdTRUE &&
-                  xf->status == USB_TRANSFER_STATUS_COMPLETED &&
-                  xf->actual_num_bytes >= static_cast<int>(want);
-        if (ok) std::memcpy(p.payload.data() + off, xf->data_buffer, want);
-        usb_host_transfer_free(xf);
-        if (!ok) return IoResult::Error;
-        off += want;
+        data_cap_ = need;
     }
+    bool ok = submit_in(data_xfer_, len) &&
+              xSemaphoreTake(in_sem_, portMAX_DELAY) == pdTRUE &&
+              data_xfer_->status == USB_TRANSFER_STATUS_COMPLETED &&
+              data_xfer_->actual_num_bytes >= static_cast<int>(len);
+    if (!ok) return IoResult::Error;
+    std::memcpy(p.payload.data(), data_xfer_->data_buffer, len);
     return IoResult::Ok;
 }
 
@@ -318,8 +326,10 @@ void UsbHostTransport::close() {
     if (!running_) return;
     running_ = false;
 
-    // Make sure the header transfer is not in flight before freeing it.
-    if (hdr_in_flight_ && dev_) {
+    // Make sure no IN transfer (header or payload) is in flight before freeing
+    // them. Both use ep_in_, so one endpoint flush covers either; drain whatever
+    // completion it produces so the freed buffer can't be written after free.
+    if (dev_) {
         usb_host_endpoint_flush(dev_, ep_in_);
         xSemaphoreTake(in_sem_, pdMS_TO_TICKS(500));
         hdr_in_flight_ = false;
@@ -327,6 +337,11 @@ void UsbHostTransport::close() {
     if (hdr_xfer_) {
         usb_host_transfer_free(hdr_xfer_);
         hdr_xfer_ = nullptr;
+    }
+    if (data_xfer_) {
+        usb_host_transfer_free(data_xfer_);
+        data_xfer_ = nullptr;
+        data_cap_ = 0;
     }
     if (dev_) {
         if (iface_ >= 0) usb_host_interface_release(client_, dev_, iface_);
