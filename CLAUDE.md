@@ -693,29 +693,52 @@ hands to those calls and **forwards** the link callbacks to the screen (held
 weakly), logging launch progress (no on-screen status); on HELLO it calls
 `Link::start_mirror()` (720×1280 fit, video). **Rendering bypasses LVGL
 entirely** (the draw cost of compositing UI over a video stream is what we're
-avoiding): `on_video_strip` (reader thread) HW-JPEG-decodes each strip through the
-`jpeg_fullrange_decode` seam **straight into a bsp framebuffer**. The agent sends
-**full-panel-width** strips (scale-fit + letterbox are baked in agent-side, see the
-agent section), so a strip's width equals the framebuffer pitch and a tightly
--packed decode into `fb + strip.y*pitch` lands in place — zero-copy, no scratch, no
-blit, the framebuffer written exactly once (the P4 JPEG 2D-DMA can't stride a
-narrower picture into a wider buffer, so full-width frames are what make
-decode-direct possible). The two bsp framebuffers (`bsp_display_get_frame_buffer(0/1)`)
-are a **double buffer**: decode the frame into the back one, `bsp_display_flush()`
-it, swap — so the displayed buffer is never mid-write (tear-free) and nothing is
-marshalled to LVGL. The LVGL root stays a **static black, clickable surface** (a
-**tap pops** back) that nothing invalidates after build, so `lv_timer_handler`
-leaves the framebuffers to the mirror; on pop the previous screen's full re-render
-reclaims them. The framebuffers are cleared + flushed once at build for the
-pre-stream black screen. **No LVGL widgets are composited over the stream** (no
-back button / status overlay — those would force per-frame re-blend); launch
-progress goes to the log. Strips are serialized on the reader thread, so the framebuffer /
-back-index state needs no lock; the weak-listener `lock()` keeps the screen alive
-across any in-flight strip so the dtor frees the engine race-free. **Verified
-headless against a real Android device** (`./run.sh simverify simulator/verify/mirror.txt`) and
-by the headless `test_mirror`; the device decode is the stock IDF tight path into
-the framebuffer (no exotic 2D-DMA features), so the device E2E is the remaining
-flash-and-check.
+avoiding) and **receive and decode run on separate threads** so the blocking
+HW-JPEG decode never stalls the adb reader thread — and thus the per-A_WRTE/A_OKAY
+flow control that gates the next USB IN transfer (decode-on-the-reader-thread made
+the device stall for every strip's decode latency, capping fps below the link's
+real throughput; this is the `Tab5-Screen-Streamer` split, which kept its USB
+receive free of decode). Two threads, handed slots through two FreeRTOS queues:
+- **producer = the adb reader thread** (`on_video_strip`): copies each strip's
+  JPEG bytes into the current **frame slot** (`FrameSlot.buf`, PSRAM, grown lazily;
+  the HW-JPEG input DMA reads PSRAM directly and the fullrange decoder syncs the
+  input cache `UNALIGNED`, so concatenated strips need no DMA bounce buffer and no
+  per-strip alignment — **one fewer copy** than the old per-strip DMA input) plus a
+  per-strip `{y,h,off,len}` descriptor; on `frame_end` it publishes the finished
+  frame and returns, so the link acks immediately and the USB stream keeps flowing.
+- **consumer = a private decode task** (`decode_loop`): drains finished frames,
+  HW-JPEG-decodes each strip through the `jpeg_fullrange_decode` seam **straight
+  into a bsp framebuffer**, presents it, recycles the slot. It owns `fb_`/`back_`
+  exclusively (no lock).
+
+Slot ownership moves `free_q_ → producer fills → ready_q_ → consumer decodes →
+free_q_`, so exactly one thread touches a slot at a time; `ready_q_` is cap-1
+(latest-frame-wins) and whoever pulls a slot out of it owns recycling it (the
+producer reclaims a superseded frame's slot before publishing the next), so a slow
+decoder **drops whole frames** instead of stalling the reader — and the producer
+never blocks. The agent sends **full-panel-width** strips (scale-fit + letterbox
+are baked in agent-side, see the agent section), so a strip's width equals the
+framebuffer pitch and a tightly-packed decode into `fb + strip.y*pitch` lands in
+place — zero-copy at decode, no scratch, no blit, the framebuffer written exactly
+once (the P4 JPEG 2D-DMA can't stride a narrower picture into a wider buffer, so
+full-width frames are what make decode-direct possible). The two bsp framebuffers
+(`bsp_display_get_frame_buffer(0/1)`) are a **double buffer**: decode into the back
+one, `bsp_display_flush()` it, swap — so the displayed buffer is never mid-write
+(tear-free) and nothing is marshalled to LVGL. The LVGL root stays a **static
+black, clickable surface** (a **tap pops** back) that nothing invalidates after
+build, so `lv_timer_handler` leaves the framebuffers to the mirror; on pop the
+previous screen's full re-render reclaims them. The framebuffers are cleared +
+flushed once at build for the pre-stream black screen. **No LVGL widgets are
+composited over the stream** (no back button / status overlay — those would force
+per-frame re-blend); launch progress goes to the log. `onExit()`/dtor stop the
+producer (the launcher closes the link) **before** joining the decode task, so it
+can't flush into a framebuffer the previous screen is reclaiming; the weak-listener
+`lock()` keeps the screen alive across any in-flight strip so teardown frees the
+engine race-free. The single-threaded decode path was **verified headless against
+a real Android device** (`./run.sh simverify simulator/verify/mirror.txt`) and by the headless
+`test_mirror`; the receive/decode split builds on both targets but its fps win is
+the **remaining device flash-and-check** (the ~55fps RGB565/Q60 ceiling motivating
+the split was the reader-thread serialization, not PSRAM bandwidth).
 
 ## Simulator details
 

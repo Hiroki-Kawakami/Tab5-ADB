@@ -1,6 +1,8 @@
 #pragma once
+#include <cstdint>
 #include <memory>
 
+#include "adb_app.hpp"     // PANEL_W, PANEL_H
 #include "agent_link.hpp"  // agent_link::Link, agent_link::LinkListener
 #include "driver/jpeg_decode.h"  // jpeg_decoder_handle_t (IDF on device, shim on host)
 #include "screen.hpp"
@@ -23,12 +25,21 @@
 // the previous screen's full re-render takes them back.
 //
 // The screen IS the agent_link::LinkListener; the multi-step launch + the retry
-// until the agent is listening run on a private MirrorLauncher worker task. Strip
-// decode + flush happen on the adb reader thread (where the link callbacks fire);
-// strips are serialized there, so the framebuffer / back-index state needs no
-// lock. NO LVGL widgets are composited over the stream (a back button / status
-// label would force LVGL to re-blend every frame — the draw cost we avoid):
-// navigation back is a tap on the root, launch progress goes to the log.
+// until the agent is listening run on a private MirrorLauncher worker task.
+//
+// Receive and decode run on SEPARATE threads so a strip's HW-JPEG decode never
+// stalls the adb reader thread (and thus the per-A_WRTE/A_OKAY flow control that
+// gates the next USB IN transfer): on the reader thread on_video_strip only
+// copies each strip's JPEG bytes into a frame slot and, on frame_end, hands the
+// finished frame to a private decode task; the reader then immediately acks and
+// keeps the USB stream flowing while the decode task HW-decodes into the
+// framebuffer in parallel. Slots are passed by ownership through two queues
+// (free_q_ -> producer fills -> ready_q_ -> consumer decodes -> free_q_), so a
+// slot is touched by exactly one thread at a time and the producer drops whole
+// frames when the consumer falls behind (latest-frame-wins). NO LVGL widgets are
+// composited over the stream (a back button / status label would force LVGL to
+// re-blend every frame — the draw cost we avoid): navigation back is a tap on the
+// root, launch progress goes to the log.
 class MirrorLauncher;
 
 class ADBMirroringScreen : public Screen, public agent_link::LinkListener {
@@ -39,36 +50,69 @@ public:
     void build() override;
     void onExit() override;  // stop the launcher (closes the link) before destroy
 
-    // agent_link::LinkListener — all on the adb reader thread.
+    // agent_link::LinkListener — on_video_strip fires on the adb reader thread.
     void on_link_hello(agent_link::Link* link, const agent_link::AgentInfo& info) override;
     void on_mirror_started(agent_link::Link* link, const agent_link::MirrorInfo& info) override;
     void on_video_strip(agent_link::Link* link, const agent_link::VideoStrip& strip) override;
     void on_link_close(agent_link::Link* link, adb::Error err) override;
 
 private:
+    // The smallest strip is 16px tall, so a panel holds at most this many strips.
+    static constexpr int kMaxStrips = PANEL_H / 16;
+    // Frame slots in flight: consumer holds one (decoding), producer holds one
+    // (filling), ready_q_ holds at most one — plus one of headroom so a steady
+    // stream never drops spuriously.
+    static constexpr int kSlots = 4;
+
+    // One received frame: its strips' JPEG bytes concatenated in `buf` (PSRAM,
+    // grown lazily) plus a descriptor per strip. The reader thread fills it; the
+    // decode task reads it. Ownership moves between them via free_q_/ready_q_, so
+    // only one thread touches a given slot at a time (no lock).
+    struct StripDesc { uint16_t y, h; uint32_t off, len; };
+    struct FrameSlot {
+        uint8_t* buf = nullptr;   // PSRAM; decoded straight from (no DMA-copy needed)
+        uint32_t cap = 0;
+        uint32_t write_off = 0;
+        StripDesc strips[kMaxStrips];
+        int strip_count = 0;
+        uint64_t bytes = 0;       // total JPEG bytes (stats)
+    };
+
+    // Decode task (consumer): drains ready_q_, HW-decodes each frame's strips into
+    // the back framebuffer, presents it, recycles the slot to free_q_.
+    static void decode_trampoline(void* arg);
+    void decode_loop();
     // Decode one full-width strip straight into framebuffer `dst`, packed at row
-    // strip.y (reader thread). Lazily creates the JPEG engine + DMA-capable input
-    // buffer. Returns false on a decode error or a non-full-width strip.
-    bool decode_strip(const agent_link::VideoStrip& strip, uint16_t* dst);
+    // `y` (decode task). Lazily creates the JPEG engine. Returns false on a decode
+    // error or a non-full-width strip.
+    bool decode_one(uint8_t* jpeg, uint32_t len, uint16_t y, uint16_t h,
+                    uint16_t* dst);
     void free_decoder();
 
     uint16_t* fb_[2] = {nullptr, nullptr};  // the two bsp framebuffers (not owned)
-    int back_ = 0;                          // index the reader decodes into
-    bool frame_ok_ = true;                  // all strips of the current frame decoded
+    int back_ = 0;                          // index the decode task draws into
 
-    // FPS instrumentation (reader thread only): count presented frames / strips /
-    // JPEG bytes and log a throughput line roughly once per second.
+    FrameSlot slots_[kSlots];
+    void* free_q_ = nullptr;   // QueueHandle_t<int>: slot indices the producer may fill
+    void* ready_q_ = nullptr;  // QueueHandle_t<int>, cap 1: the latest finished frame
+    int fill_slot_ = -1;       // slot the reader thread is currently filling (-1 = none)
+    bool fill_bad_ = false;    // current frame overflowed / had a bad strip → drop it
+
+    void* decode_task_ = nullptr;
+    void* decode_done_ = nullptr;     // binary sem given when the decode task exits
+    volatile bool decode_stop_ = false;
+
+    // FPS instrumentation (decode task only): presented frames / strips / JPEG
+    // bytes, logged roughly once per second.
     int64_t stats_start_us_ = 0;  // start of the current ~1s window (0 = not started)
-    uint32_t stats_frames_ = 0;   // frames presented in the window
-    uint32_t stats_strips_ = 0;   // strips received in the window
-    uint64_t stats_bytes_ = 0;    // JPEG bytes received in the window
+    uint32_t stats_frames_ = 0;
+    uint32_t stats_strips_ = 0;
+    uint64_t stats_bytes_ = 0;
 
-    // JPEG decode (reader thread only) — the device/host-shared seam
+    // JPEG decode (decode task only) — the device/host-shared seam
     // (jpeg_fullrange_decode); strips land straight in the framebuffer, so there
-    // is no decoded-pixel scratch, only the DMA-capable compressed input.
+    // is no decoded-pixel scratch and the slot buffer is the compressed input.
     jpeg_decoder_handle_t jpeg_ = nullptr;
-    uint8_t* in_buf_ = nullptr;   // strip JPEG bytes, DMA-capable; grown lazily
-    size_t in_cap_ = 0;
 
     std::shared_ptr<MirrorLauncher> launcher_;
 };

@@ -1,6 +1,7 @@
 #include "adb_mirroring_screen.hpp"
 
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
@@ -16,6 +17,7 @@
 #include "adb_app.hpp"
 #include "agent/agent_jar.h"
 #include "bsp.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "jpeg_fullrange_decode.h"
 #include "lvgl.hpp"
@@ -244,7 +246,18 @@ private:
 ADBMirroringScreen::ADBMirroringScreen() = default;
 
 ADBMirroringScreen::~ADBMirroringScreen() {
+    // Stop the producer (launcher closes the link → no more on_video_strip) before
+    // the consumer, so no slot is filled while we tear the decode task down.
     if (launcher_) { launcher_->stop(); launcher_.reset(); }
+    if (decode_task_) {
+        decode_stop_ = true;
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
+        decode_task_ = nullptr;
+    }
+    if (decode_done_) { vSemaphoreDelete(static_cast<SemaphoreHandle_t>(decode_done_)); decode_done_ = nullptr; }
+    if (ready_q_) { vQueueDelete(static_cast<QueueHandle_t>(ready_q_)); ready_q_ = nullptr; }
+    if (free_q_) { vQueueDelete(static_cast<QueueHandle_t>(free_q_)); free_q_ = nullptr; }
+    for (auto& s : slots_) { if (s.buf) { heap_caps_free(s.buf); s.buf = nullptr; } }
     free_decoder();
 }
 
@@ -271,6 +284,18 @@ void ADBMirroringScreen::build() {
     }
     back_ = 0;
 
+    // Receive/decode split: the reader thread fills frame slots (free_q_) and the
+    // decode task drains finished frames (ready_q_), so the blocking HW-JPEG decode
+    // runs off the reader thread. Hand all slots to the producer to start.
+    free_q_ = xQueueCreate(kSlots, sizeof(int));
+    ready_q_ = xQueueCreate(1, sizeof(int));
+    for (int i = 0; i < kSlots; ++i) xQueueSend(static_cast<QueueHandle_t>(free_q_), &i, 0);
+    decode_done_ = xSemaphoreCreateBinary();
+    decode_stop_ = false;
+    TaskHandle_t dt = nullptr;
+    xTaskCreate(&ADBMirroringScreen::decode_trampoline, "mirror_decode", 8192, this, 6, &dt);
+    decode_task_ = dt;
+
     // Kick off the launch sequence. The launcher forwards link callbacks to this
     // screen (held weakly) and logs progress (no on-screen status — no overlay).
     std::weak_ptr<agent_link::LinkListener> ui(
@@ -290,7 +315,15 @@ void ADBMirroringScreen::build() {
 }
 
 void ADBMirroringScreen::onExit() {
+    // Stop both threads before the popped screen's framebuffers are reclaimed by
+    // the previous screen's re-render: producer first (no more strips), then join
+    // the decode task so it can't flush into a buffer that is being reused.
     if (launcher_) { launcher_->stop(); launcher_.reset(); }
+    if (decode_task_) {
+        decode_stop_ = true;
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
+        decode_task_ = nullptr;
+    }
 }
 
 void ADBMirroringScreen::on_link_hello(agent_link::Link*,
@@ -301,42 +334,76 @@ void ADBMirroringScreen::on_mirror_started(agent_link::Link*,
 
 void ADBMirroringScreen::on_video_strip(agent_link::Link*,
                                         const agent_link::VideoStrip& strip) {
-    // Reader thread (strips serialized here): decode straight into the back
-    // framebuffer, then present it and swap once the frame is complete. The
-    // displayed buffer is the other one, so it is never mid-write — no tearing,
-    // no LVGL involvement.
-    uint16_t* dst = fb_[back_];
-    if (!dst) return;
-    if (strip.frame_start) frame_ok_ = true;
-    ++stats_strips_;
-    stats_bytes_ += strip.jpeg_len;
-    if (!decode_strip(strip, dst)) frame_ok_ = false;  // a strip failed to decode
-    if (!strip.frame_end) return;
-    // Only present a fully-decoded frame: a HW JPEG decode error would otherwise
-    // flush a half-updated buffer (the back buffer also still holds an older
-    // frame's pixels where this one's strips didn't land). Drop it and keep showing
-    // the last good frame instead.
-    if (frame_ok_) {
-        bsp_display_flush(back_);
-        back_ ^= 1;
-        ++stats_frames_;
+    // Reader thread (strips serialized here): only copy the strip into the current
+    // fill slot and, on frame_end, hand the finished frame to the decode task. No
+    // decode here, so the link acks immediately and the USB stream keeps flowing
+    // while the decode task works in parallel.
+
+    // Start of a frame: claim a free slot (reusing one we still hold from a frame
+    // that never terminated). If none is free the decode task is behind — drop the
+    // whole frame (latest-frame-wins backpressure), don't stall the reader.
+    if (strip.frame_start) {
+        if (fill_slot_ < 0) {
+            int s;
+            if (xQueueReceive(static_cast<QueueHandle_t>(free_q_), &s, 0) == pdTRUE) fill_slot_ = s;
+        }
+        fill_bad_ = (fill_slot_ < 0);
+        if (fill_slot_ >= 0) {
+            FrameSlot& f = slots_[fill_slot_];
+            f.write_off = 0;
+            f.strip_count = 0;
+            f.bytes = 0;
+        }
+    }
+    if (fill_slot_ < 0 || fill_bad_) return;  // dropping this frame
+
+    FrameSlot& f = slots_[fill_slot_];
+    // The agent always sends full-panel-width frames (fit/letterbox baked in), so a
+    // strip is the full panel width and decodes tightly-packed straight into its
+    // framebuffer row band — its width equals the framebuffer pitch, so "packed" is
+    // "in place". A narrower strip can't be placed without a stride the P4 HW JPEG
+    // decoder lacks, so drop the whole frame rather than misrender it.
+    if (strip.x != 0 || strip.w != PANEL_W || strip.h == 0 ||
+        strip.y + strip.h > PANEL_H || f.strip_count >= kMaxStrips || strip.jpeg_len == 0) {
+        fill_bad_ = true;
+        return;
     }
 
-    // Log throughput roughly once per second (reader thread).
-    int64_t now = esp_timer_get_time();
-    if (stats_start_us_ == 0) { stats_start_us_ = now; return; }
-    int64_t elapsed = now - stats_start_us_;
-    if (elapsed >= 1000000) {
-        double secs = elapsed / 1e6;
-        std::printf("mirror: %.1f fps (%.1f strips/s, %.1f KB/s)\n",
-                    stats_frames_ / secs, stats_strips_ / secs,
-                    stats_bytes_ / 1024.0 / secs);
-        std::fflush(stdout);
-        stats_start_us_ = now;
-        stats_frames_ = 0;
-        stats_strips_ = 0;
-        stats_bytes_ = 0;
+    // Grow the slot buffer to fit and concatenate the strip's JPEG bytes. The slot
+    // lives in PSRAM, which the HW-JPEG input DMA reads directly (the fullrange
+    // decoder syncs the input cache UNALIGNED), so no separate DMA-input copy and
+    // no alignment of the per-strip offset is needed — this is one fewer copy than
+    // a per-strip DMA bounce buffer.
+    uint32_t need = f.write_off + strip.jpeg_len;
+    if (need > f.cap) {
+        uint32_t cap = (need + 0xFFFFu) & ~0xFFFFu;  // round up to 64 KiB
+        auto* nb = static_cast<uint8_t*>(heap_caps_realloc(f.buf, cap, MALLOC_CAP_SPIRAM));
+        if (!nb) { fill_bad_ = true; return; }
+        f.buf = nb;
+        f.cap = cap;
     }
+    std::memcpy(f.buf + f.write_off, strip.jpeg, strip.jpeg_len);
+    StripDesc& d = f.strips[f.strip_count++];
+    d.y = strip.y;
+    d.h = strip.h;
+    d.off = f.write_off;
+    d.len = strip.jpeg_len;
+    f.write_off = need;
+    f.bytes += strip.jpeg_len;
+
+    if (!strip.frame_end) return;
+
+    // Frame complete: publish it (latest-frame-wins). If a prior frame is still
+    // queued unconsumed, reclaim its slot here so it is not leaked — whoever pulls
+    // a slot out of ready_q_ owns recycling it, and these queue ops are atomic, so
+    // the decode task and this reclaim can't both take the same frame.
+    int finished = fill_slot_;
+    fill_slot_ = -1;
+    int stale;
+    if (xQueueReceive(static_cast<QueueHandle_t>(ready_q_), &stale, 0) == pdTRUE) {
+        xQueueSend(static_cast<QueueHandle_t>(free_q_), &stale, 0);
+    }
+    xQueueSend(static_cast<QueueHandle_t>(ready_q_), &finished, 0);
 }
 
 void ADBMirroringScreen::on_link_close(agent_link::Link*, adb::Error err) {
@@ -344,41 +411,75 @@ void ADBMirroringScreen::on_link_close(agent_link::Link*, adb::Error err) {
     std::fflush(stdout);
 }
 
-bool ADBMirroringScreen::decode_strip(const agent_link::VideoStrip& s, uint16_t* dst) {
-    if (!dst) return false;
-    if (s.w == 0 || s.h == 0 || s.x + s.w > PANEL_W || s.y + s.h > PANEL_H) return false;
-    // The agent always sends full-panel-width frames (fit/letterbox baked in), so a
-    // strip is the full panel width and decodes tightly-packed straight into its
-    // framebuffer row band — its width equals the framebuffer pitch, so "packed" IS
-    // "in place". A narrower strip can't be placed without a stride the P4 HW JPEG
-    // decoder lacks, so drop it rather than misrender.
-    if (s.x != 0 || s.w != PANEL_W) return false;
+void ADBMirroringScreen::decode_trampoline(void* arg) {
+    static_cast<ADBMirroringScreen*>(arg)->decode_loop();
+}
 
-    // Lazily create the engine.
+void ADBMirroringScreen::decode_loop() {
+    // Consumer: drain finished frames, HW-decode each strip straight into the back
+    // framebuffer, present it, and recycle the slot. The decode task owns fb_/back_
+    // exclusively, so the double buffer needs no lock: decode into the back buffer,
+    // flush it, swap — the displayed buffer is never mid-write (tear-free), and LVGL
+    // is not involved.
+    while (!decode_stop_) {
+        int slot;
+        if (xQueueReceive(static_cast<QueueHandle_t>(ready_q_), &slot,
+                          pdMS_TO_TICKS(100)) != pdTRUE) {
+            continue;  // idle (static screen → no new frames) — re-check stop
+        }
+        FrameSlot& f = slots_[slot];
+        uint16_t* dst = fb_[back_];
+        bool ok = dst != nullptr;
+        for (int i = 0; ok && i < f.strip_count; ++i) {
+            const StripDesc& d = f.strips[i];
+            if (!decode_one(f.buf + d.off, d.len, d.y, d.h, dst)) ok = false;
+        }
+        // Present only a fully-decoded frame: a HW JPEG decode error would otherwise
+        // flush a half-updated buffer (the back buffer also still holds an older
+        // frame's pixels). Drop it and keep showing the last good frame instead.
+        if (ok) {
+            bsp_display_flush(back_);
+            back_ ^= 1;
+            ++stats_frames_;
+        }
+        stats_strips_ += f.strip_count;
+        stats_bytes_ += f.bytes;
+        xQueueSend(static_cast<QueueHandle_t>(free_q_), &slot, 0);  // recycle the slot
+
+        // Log throughput roughly once per second (decode task).
+        int64_t now = esp_timer_get_time();
+        if (stats_start_us_ == 0) { stats_start_us_ = now; continue; }
+        if (now - stats_start_us_ >= 1000000) {
+            double secs = (now - stats_start_us_) / 1e6;
+            std::printf("mirror: %.1f fps (%.1f strips/s, %.1f KB/s)\n",
+                        stats_frames_ / secs, stats_strips_ / secs,
+                        stats_bytes_ / 1024.0 / secs);
+            std::fflush(stdout);
+            stats_start_us_ = now;
+            stats_frames_ = 0;
+            stats_strips_ = 0;
+            stats_bytes_ = 0;
+        }
+    }
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(decode_done_));
+    vTaskDelete(nullptr);
+}
+
+bool ADBMirroringScreen::decode_one(uint8_t* jpeg, uint32_t len, uint16_t y,
+                                    uint16_t h, uint16_t* dst) {
+    if (!jpeg || len == 0 || !dst) return false;
+
+    // Lazily create the engine (decode task only).
     if (!jpeg_) {
         jpeg_decode_engine_cfg_t ecfg = {};
         ecfg.timeout_ms = 1000;
         if (jpeg_new_decoder_engine(&ecfg, &jpeg_) != ESP_OK) { jpeg_ = nullptr; return false; }
     }
 
-    // The device HW JPEG decoder needs the bitstream in a DMA-capable buffer;
-    // grow it to fit the largest strip seen.
-    if (s.jpeg_len > in_cap_) {
-        if (in_buf_) free(in_buf_);
-        jpeg_decode_memory_alloc_cfg_t icfg = {};
-        icfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
-        size_t got = 0;
-        in_buf_ = static_cast<uint8_t*>(jpeg_alloc_decoder_mem(s.jpeg_len, &icfg, &got));
-        if (!in_buf_) { in_cap_ = 0; return false; }
-        in_cap_ = got;
-    }
-    std::memcpy(in_buf_, s.jpeg, s.jpeg_len);
-
     // Full-width strip → tightly-packed decode lands in place: the destination is
-    // the framebuffer row band starting at row s.y (s.x == 0), and the decoded
-    // s.w(==PANEL_W)×s.h picture is exactly PANEL_W*s.h pixels contiguous — no
-    // scratch, no blit, no stride. (device: P4 HW JPEG straight to PSRAM; host:
-    // libjpeg straight to the buffer.)
+    // the framebuffer row band starting at row y (x == 0), and the decoded
+    // PANEL_W×h picture is exactly PANEL_W*h pixels contiguous — no scratch, no
+    // blit, no stride. (device: P4 HW JPEG straight to PSRAM; host: libjpeg.)
     jpeg_decode_cfg_t dcfg = {};
     dcfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
     // BGR, not RGB: the panel is driven R-in-high-bits RGB565, and on the P4 HW
@@ -388,15 +489,13 @@ bool ADBMirroringScreen::decode_strip(const agent_link::VideoStrip& s, uint16_t*
     // Tab5-Screen-Streamer decoder.
     dcfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
     dcfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
-    uint16_t* out = dst + (size_t)s.y * PANEL_W;  // s.x == 0
-    uint32_t outbuf = (uint32_t)((size_t)s.w * s.h * 2);
+    uint16_t* out = dst + (size_t)y * PANEL_W;  // x == 0
+    uint32_t outbuf = (uint32_t)((size_t)PANEL_W * h * 2);
     uint32_t out_size = 0;
-    return jpeg_decoder_process_full_range(
-               jpeg_, &dcfg, in_buf_, (uint32_t)s.jpeg_len,
+    return jpeg_decoder_process_full_range(jpeg_, &dcfg, jpeg, len,
                reinterpret_cast<uint8_t*>(out), outbuf, &out_size) == ESP_OK;
 }
 
 void ADBMirroringScreen::free_decoder() {
-    if (in_buf_) { free(in_buf_); in_buf_ = nullptr; in_cap_ = 0; }
     if (jpeg_) { jpeg_del_decoder_engine(jpeg_); jpeg_ = nullptr; }
 }
