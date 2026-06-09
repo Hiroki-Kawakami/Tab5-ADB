@@ -53,7 +53,9 @@ public final class Server {
     // Mirror stream defaults (§5.1).
     private static final int SPLIT_COUNT = 4;
     private static final int JPEG_QUALITY = 60;
-    private static final int TARGET_FPS = 15;
+    // 0 = no artificial pacing: stream as fast as the capture + pipeline produce
+    // frames (the encoder/capture rate is the cap). Set >0 to throttle.
+    private static final int TARGET_FPS = 0;
 
     private final boolean testPattern;
     private final int testW;
@@ -201,7 +203,7 @@ public final class Server {
         System.out.println("tab5adb-agent: streaming video (split=" + SPLIT_COUNT
                 + " q=" + JPEG_QUALITY + (testPattern ? ", test-pattern)" : ", screen)"));
 
-        long frameNs = 1_000_000_000L / TARGET_FPS;
+        long frameNs = TARGET_FPS > 0 ? 1_000_000_000L / TARGET_FPS : 0;
         int frame = 0;
         try {
             while (!Thread.interrupted()) {
@@ -220,8 +222,10 @@ public final class Server {
                 sendFrame(conn, strips);
                 frame++;
 
-                long dt = System.nanoTime() - t0;
-                if (dt < frameNs) sleep((frameNs - dt) / 1_000_000L);
+                if (frameNs > 0) {
+                    long dt = System.nanoTime() - t0;
+                    if (dt < frameNs) sleep((frameNs - dt) / 1_000_000L);
+                }
             }
         } catch (IOException eof) {
             // peer closed the stream — normal teardown

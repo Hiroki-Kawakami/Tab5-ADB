@@ -16,6 +16,7 @@
 #include "adb_app.hpp"
 #include "agent/agent_jar.h"
 #include "bsp.h"
+#include "esp_timer.h"
 #include "jpeg_fullrange_decode.h"
 #include "lvgl.hpp"
 #include "screen_manager.hpp"
@@ -307,6 +308,8 @@ void ADBMirroringScreen::on_video_strip(agent_link::Link*,
     uint16_t* dst = fb_[back_];
     if (!dst) return;
     if (strip.frame_start) frame_ok_ = true;
+    ++stats_strips_;
+    stats_bytes_ += strip.jpeg_len;
     if (!decode_strip(strip, dst)) frame_ok_ = false;  // a strip failed to decode
     if (!strip.frame_end) return;
     // Only present a fully-decoded frame: a HW JPEG decode error would otherwise
@@ -316,6 +319,23 @@ void ADBMirroringScreen::on_video_strip(agent_link::Link*,
     if (frame_ok_) {
         bsp_display_flush(back_);
         back_ ^= 1;
+        ++stats_frames_;
+    }
+
+    // Log throughput roughly once per second (reader thread).
+    int64_t now = esp_timer_get_time();
+    if (stats_start_us_ == 0) { stats_start_us_ = now; return; }
+    int64_t elapsed = now - stats_start_us_;
+    if (elapsed >= 1000000) {
+        double secs = elapsed / 1e6;
+        std::printf("mirror: %.1f fps (%.1f strips/s, %.1f KB/s)\n",
+                    stats_frames_ / secs, stats_strips_ / secs,
+                    stats_bytes_ / 1024.0 / secs);
+        std::fflush(stdout);
+        stats_start_us_ = now;
+        stats_frames_ = 0;
+        stats_strips_ = 0;
+        stats_bytes_ = 0;
     }
 }
 

@@ -56,6 +56,13 @@ private:
     int back_ = 0;                          // index the reader decodes into
     bool frame_ok_ = true;                  // all strips of the current frame decoded
 
+    // FPS instrumentation (reader thread only): count presented frames / strips /
+    // JPEG bytes and log a throughput line roughly once per second.
+    int64_t stats_start_us_ = 0;  // start of the current ~1s window (0 = not started)
+    uint32_t stats_frames_ = 0;   // frames presented in the window
+    uint32_t stats_strips_ = 0;   // strips received in the window
+    uint64_t stats_bytes_ = 0;    // JPEG bytes received in the window
+
     // JPEG decode (reader thread only) — the device/host-shared seam
     // (jpeg_fullrange_decode); strips land straight in the framebuffer, so there
     // is no decoded-pixel scratch, only the DMA-capable compressed input.
