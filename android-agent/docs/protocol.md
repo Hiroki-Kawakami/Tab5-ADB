@@ -296,6 +296,14 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 - **JPEG 品質 = 60 固定**（当面）。
 - **色形式 = YUV420（4:2:0）**。
 
+> **実装メモ（ワイヤ契約は不変）**: 上の 1〜2（回転・スケール・レターボックス）は**実画面キャプチャでは
+> GPU にオフロード**する。`SurfaceControl.setDisplayProjection`（回転コード + パネルサイズ
+> `ImageReader` 内の中央寄せ矩形）で SurfaceFlinger が回転・スケール・**黒レターボックス**まで一括で
+> コンポジットするので、agent は CPU でフルフレームの読み戻し/回転/スケール/合成コピーを行わない
+> （`Projection`/`ScreenCapture`）。よって出力は常に **720×1280 フル**で、各ストリップは `x=0, w=720`
+> （§5.2 のとおり）。`--test-pattern` だけは SurfaceFlinger が無いので 1〜4 を CPU（`FramePipeline`）
+> で行う。生成手段の差であり、送出されるフレーム/ストリップの形は同じ。
+
 ### 5.2 JPEG payload
 
 ```

@@ -41,7 +41,22 @@ final class FramePipeline {
         this.quality = quality;
     }
 
-    /** Run the pipeline. Does not recycle {@code src} (the caller owns it). */
+    /**
+     * Strip-only entry for the GPU capture path: {@code frame} is already the final
+     * targetW×targetH panel frame (rotate / scale-fit / letterbox done by the
+     * compositor in {@link ScreenCapture}/{@link Projection}), so just split it into
+     * strips + JPEG-encode. Every strip is full panel width (x=0, w=targetW), like
+     * {@link #process}. Does not recycle {@code frame} (the caller owns it).
+     */
+    List<Strip> stripsOf(Bitmap frame) {
+        return stripify(frame, 0, 0);
+    }
+
+    /**
+     * Run the full CPU pipeline (rotate → scale-fit/fill → letterbox → strip). Used
+     * by the deterministic {@link TestPattern} path, which has no SurfaceFlinger to
+     * offload the geometry to. Does not recycle {@code src} (the caller owns it).
+     */
     List<Strip> process(Bitmap src) {
         Bitmap rotated = rotateToPortrait(src);
         int rw = rotated.getWidth(), rh = rotated.getHeight();

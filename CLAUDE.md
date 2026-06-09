@@ -97,13 +97,29 @@ on a separate **Tab5-initiated `MIRROR_START`** carrying panel size / scale mode
 streams; Android→Tab5 JPEG strip stream — YUV420 q60, agent-side rotate/scale
 (fit/fill)/strip, 16px aligned; audio reserved as a `MIRROR_START` AUDIO bit).
 **Phase 2 (JPEG strip mirror) done & verified on a real Android device.** The Java agent
-(`Server` + `FramePipeline`/`TestPattern`/`ScreenCapture`) captures the screen via
-hidden `SurfaceControl`→`ImageReader`, runs the rotate→scale→strip→JPEG pipeline,
-and streams strips. **`FramePipeline` composites scale-fit + the black letterbox
-into a full `targetW×targetH` (720×1280) frame**, so every strip is full panel
-width (x=0, w=720) — this is what lets the Tab5 decode each strip straight into its
-framebuffer row band with no stride (the P4 JPEG 2D-DMA can't place a narrower
-picture into a wider buffer; see the JPEG decode seam). The Tab5-side
+(`Server` + `FramePipeline`/`Projection`/`TestPattern`/`ScreenCapture`) captures
+the screen via hidden `SurfaceControl`→`ImageReader` and streams it as JPEG
+strips. **Geometry (rotate → scale-fit → black letterbox) is GPU-offloaded for
+real capture**: `ScreenCapture` projects the source straight into a fixed
+720×1280 `ImageReader` via `setDisplayProjection` (rotation code + a centered
+destination rect computed by the host-testable pure-arithmetic `Projection`; the
+area outside it is the virtual display's black background = the letterbox), so the
+compositor does the work on the GPU and `acquire()` already returns the final
+panel-sized frame — **no CPU readback at source res, no rotate/scale/composite
+Bitmap copies** (this is what got the mirror from a 15fps-capped ~23fps CPU path
+to ~33-37fps; the old per-frame full-frame allocs were also GC-thrashing). The
+agent **always emits a full `targetW×targetH` (720×1280) frame**, so every strip
+is full panel width (x=0, w=720) — this is what lets the Tab5 decode each strip
+straight into its framebuffer row band with no stride (the P4 JPEG 2D-DMA can't
+place a narrower picture into a wider buffer; see the JPEG decode seam).
+`FramePipeline.stripsOf()` just splits that frame + JPEG-encodes; the
+`--test-pattern` path keeps the **CPU** geometry (`FramePipeline.process()`: there
+is no SurfaceFlinger to offload to in the headless test), so the GPU-projection
+arithmetic is covered instead by the host-JVM `android-agent/test/ProjectionTest`
+(`nix develop -c android-agent/test/run.sh`) and its visual result by simverify on
+a device. The agent has **no artificial FPS cap** (`Server.TARGET_FPS = 0` =
+encoder/capture-rate driven; a static screen yields no new `ImageReader` frame, so
+nothing is sent and the Tab5 keeps the last frame). The Tab5-side
 `agent_link::Link` parses frames and hands each
 strip to a decode+framebuffer seam (`LinkListener::on_video_strip`). The headless
 harness `components/agent_link/test/test_mirror.cpp` drives the whole bring-up
@@ -162,7 +178,8 @@ simulator/                   # SIMULATOR build root (see below)
     include/  src/           #     host shims: esp_* (err/log/check/timer/heap/nvs)
                              #     + freertos/* (pthread-backed FreeRTOS API)
 android-agent/               # ANDROID  tab5adb-agent (scrcpy-style app_process server)
-  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/TestPattern/ScreenCapture
+  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/Projection/TestPattern/ScreenCapture
+  test/                      #   host-JVM unit test (ProjectionTest) + run.sh — no phone
   build.sh  run.sh           #   javac+d8 -> dex jar; adb push + app_process dev loop
 ```
 

@@ -198,7 +198,8 @@ public final class Server {
         ScreenCapture capture = null;
         if (!testPattern) {
             int[] src = sourceSize();
-            capture = new ScreenCapture(src[0], src[1]);
+            // The GPU does rotate/scale-fit/letterbox into a panel-sized frame.
+            capture = new ScreenCapture(src[0], src[1], mp.targetW, mp.targetH, mp.scaleMode);
         }
         System.out.println("tab5adb-agent: streaming video (split=" + SPLIT_COUNT
                 + " q=" + JPEG_QUALITY + (testPattern ? ", test-pattern)" : ", screen)"));
@@ -215,7 +216,9 @@ public final class Server {
                 }
                 List<FramePipeline.Strip> strips;
                 try {
-                    strips = pipeline.process(src);
+                    // Real capture is already a panel-sized frame (GPU geometry) → just
+                    // strip it; the test pattern is a raw source → run the CPU pipeline.
+                    strips = testPattern ? pipeline.process(src) : pipeline.stripsOf(src);
                 } finally {
                     src.recycle();
                 }

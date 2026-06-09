@@ -16,12 +16,17 @@ embedded ADB.
 On each connection the server runs the protocol's **HELLO handshake** (link
 establishment only — proto / version / capability), then waits for the Tab5 to
 send **MIRROR_START** and **streams the screen as JPEG strips** (Phase 2, done):
-it captures via the hidden `SurfaceControl`→`ImageReader` display APIs and runs a
-rotate → scale (fit/fill) → horizontal-strip → JPEG (YUV420 q60) pipeline. A
-`--test-pattern` mode streams a deterministic frame instead (for headless
-verification without the capture APIs). Verified against a real Android device by the
-Tab5-side harnesses `test_hello.cpp` (HELLO) and `test_mirror.cpp` (strip mirror,
-incl. a real-capture smoke test).
+it captures via the hidden `SurfaceControl`→`ImageReader` display APIs and streams
+horizontal-strip → JPEG (YUV420 q60). The **rotate → scale (fit/fill) → black
+letterbox** geometry is GPU-offloaded — `ScreenCapture` projects the source
+straight into a fixed 720×1280 `ImageReader` via `setDisplayProjection` (the
+compositor does it, no CPU readback/copies; rect math in `Projection`), so the
+pipeline only splits + encodes. A `--test-pattern` mode streams a deterministic
+frame through the CPU geometry (`FramePipeline`) instead (for headless
+verification without the capture APIs). No artificial FPS cap (capture-rate
+driven). Verified against a real Android device by the Tab5-side harnesses `test_hello.cpp`
+(HELLO) and `test_mirror.cpp` (strip mirror, incl. a real-capture smoke test), and
+the host-JVM `test/ProjectionTest` for the projection math.
 
 The wire protocol — single-socket framing, the agent-initiated HELLO (link-only)
 handshake, the Tab5-initiated MIRROR_START, and the JPEG strip stream (audio
@@ -34,9 +39,11 @@ the contract between the agent and the Tab5 side (`embedded_adb`/`adb` + the
 ```
 src/com/tab5adb/agent/
   Server.java         # entry point (main); sockets, HELLO + MIRROR_START, stream loop
-  FramePipeline.java  # rotate -> scale (fit/fill) -> strip -> JPEG (§5.1)
+  FramePipeline.java  # strip + JPEG (stripsOf); CPU rotate/scale geometry for --test-pattern (§5.1)
+  Projection.java     # pure GPU-projection math (rotate/scale-fit/center); host-JVM testable
   TestPattern.java    # deterministic source frame for --test-pattern verification
-  ScreenCapture.java  # real capture: SurfaceControl mirror display -> ImageReader
+  ScreenCapture.java  # real capture: SurfaceControl projection -> 720x1280 ImageReader (GPU geometry)
+test/                 # host-JVM unit test (ProjectionTest) + run.sh — no phone
 build.sh              # javac + d8  -> build/tab5adb-agent.jar
 run.sh                # adb push + app_process (dev loop)
 ```

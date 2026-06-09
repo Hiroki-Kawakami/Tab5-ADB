@@ -14,4 +14,4 @@ idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS "."
     REQUIRES m5stack-bsp "lvgl++" screen_manager lvgl adb agent_link
-             jpeg_fullrange_decode esp_driver_jpeg)
+             jpeg_fullrange_decode esp_driver_jpeg esp_timer)
