@@ -94,12 +94,19 @@ specified** in `android-agent/docs/protocol.md` (single-socket TYPE multiplexing
 no payload CRC; agent-initiated **HELLO = link establishment only** — proto /
 version / capability — over a forward `localabstract:` connection; mirror starts
 on a separate **Tab5-initiated `MIRROR_START`** carrying panel size / scale mode /
-streams; Android→Tab5 JPEG strip stream — YUV420 q60, agent-side rotate/scale
+streams; a Tab5-initiated **`MIRROR_STOP`** stops the stream and returns the agent
+to READY **without dropping the link** (so a later `MIRROR_START` resumes);
+Android→Tab5 JPEG strip stream — YUV420 q60, agent-side rotate/scale
 (fit/fill)/strip, 16px aligned; audio reserved as a `MIRROR_START` AUDIO bit).
 **Phase 2 (JPEG strip mirror) done & verified on a real Android device.** The Java agent
 (`Server` + `FramePipeline`/`Projection`/`TestPattern`/`ScreenCapture`) captures
 the screen via hidden display APIs into a fixed 720×1280 `ImageReader` and streams
-it as JPEG strips. **Geometry (rotate → scale-fit → black letterbox) is
+it as JPEG strips. **Control and video run concurrently** (§4.4): a dedicated
+**control reader thread** reads every inbound frame (HELLO response, MIRROR_START,
+MIRROR_STOP) while the main thread sends JPEG, so `MIRROR_STOP` is never blocked
+behind the video flow; on MIRROR_STOP the session loop stops streaming and goes
+back to waiting for the next MIRROR_START (READY) on the same socket. Frame writes
+from both threads are serialized in `Conn` (`synchronized writeFrame`). **Geometry (rotate → scale-fit → black letterbox) is
 GPU-offloaded for real capture** via one of two creation paths (scrcpy's order),
 both landing the final upright/scaled/letterboxed panel-sized frame in the reader
 so `acquire()` needs **no CPU readback at source res, no rotate/scale/composite
@@ -145,7 +152,7 @@ a device. The agent has **no artificial FPS cap** (`Server.TARGET_FPS = 0` =
 encoder/capture-rate driven; a static screen yields no new `ImageReader` frame, so
 nothing is sent and the Tab5 keeps the last frame). The Tab5-side
 `agent_link::Link` parses frames and hands each
-strip to a decode+framebuffer seam (`LinkListener::on_video_strip`). The headless
+strip to a decode+framebuffer seam (`VideoListener::on_video_strip`). The headless
 harness `components/agent_link/test/test_mirror.cpp` drives the whole bring-up
 GUI-less over libusb (HELLO → `start_mirror` → strips), decodes strips with host
 libjpeg, and asserts framing/16-alignment/tiling; the agent's deterministic
@@ -154,8 +161,9 @@ app_process has no default Typeface), and `TAB5ADB_REAL=1` smoke-tests real
 capture. `test_hello.cpp` still covers the HELLO-only path. Run with
 `nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'`; test
 approach in `android-agent/docs/testing.md`. **receive→decode→render done** — the
-`ADBMirroringScreen` in `app/` (see the UI section) launches the agent from the
-**embedded jar**, sends `MIRROR_START`, and renders the JPEG strip stream
+`ADBMirroringScreen` in `app/` (see the UI section) gets the agent connected via
+`app::AgentClient` (which owns the **embedded-jar** push + `app_process` launch +
+HELLO), sends `MIRROR_START`, and renders the JPEG strip stream
 **directly into the bsp framebuffer** (strided decode + `bsp_display_flush`
 triple-buffer, no LVGL compositing), **verified headless in the simulator (libusb)
 against a real Android device**: the live home screen mirrors with correct full-range colors
@@ -190,7 +198,7 @@ components/                  # SHARED  (both targets)
     src/  test/              #     impl + host test
     README.md  docs/         #     README = front door; docs/<surface>.md = per-surface spec
   agent_link/                #   Tab5-side link to tab5adb-agent (protocol.md) — over adb::Stream
-    inc/                     #     agent_link.hpp (Link/LinkListener) + agent_link_protocol.hpp (wire)
+    inc/                     #     agent_link.hpp (Link + LinkLifecycleListener/VideoListener) + agent_link_protocol.hpp (wire)
     src/  test/              #     impl + host HELLO test (test_hello.cpp)
   jpeg_fullrange_decode/     #   full-range BT.601 JPEG decode (mirror strips); ESP_PLATFORM-branched
     include/  src/           #     header + _p4.c (device: CSC-register override) / _sim.c (host delegate)
@@ -572,29 +580,43 @@ wire format (frame header §3, TYPE/FLAGS, HELLO §4, status codes) is in
 `adb_protocol.hpp`). Unlike `Sync`'s worker+pipe, the parser is **reactive on the
 reader thread**: `agent_link` is mostly a receiver (agent→Tab5 push), so
 `on_stream_data` accumulates bytes and dispatches whole frames; the HELLO response
-`write()` is non-blocking. So `on_link_hello`/`on_link_close` fire on the **reader
-thread** (LVGL marshalling is the app's job; the headless test needs none).
+`write()` is non-blocking. **Listeners are split per TYPE/channel** (mirroring the
+wire's TYPE multiplexing) so independent consumers attach to just their slice: the
+link *owner* (`app::AgentClient`) passes a **`LinkLifecycleListener`** to `open()`
+for `on_link_hello`/`on_link_close` (the connection state machine), and a *feature*
+registers a **`VideoListener`** with `Link::set_video_listener(weak)` for
+`on_mirror_started`/`on_video_strip` — held weakly, set/cleared from any thread
+(guarded by `video_mtx_`), so the feature comes and goes while the owner keeps the
+link alive. Both fire on the **reader thread** (LVGL marshalling is the app's job).
+Future AUDIO / EVENT channels add the same kind of `set_*` setter.
 `Link::start_mirror(MirrorConfig)` sends the Tab5-initiated `MIRROR_START`
-(non-blocking; call from `on_link_hello`), and the same parser carries the JPEG
-strip stream: each whole JPEG frame (the frame layer reassembles A_WRTE splits) is
-handed to a **decode+framebuffer seam** = `LinkListener::on_video_strip(VideoStrip)`
-(rect + JPEG bytes + frame_start/end), so `Link` stays free of libjpeg / HW-JPEG
-(host libjpeg in the test, P4 HW JPEG + bsp FB in the app). `tx_seq_` is atomic
-because `start_mirror` (app thread) and the HELLO response (reader thread) both
-write frames. **HELLO + Phase 2 mirror done & verified on a real Android device**:
-`test/test_hello.cpp` covers the HELLO-only path; `test/test_mirror.cpp` drives
-HELLO → `start_mirror` → strips and asserts framing/16-alignment/tiling via host
-libjpeg (run with `nix develop -c sh -c 'TEST=test_mirror
+(non-blocking; call after `on_link_hello` once the video listener is registered);
+`Link::stop_mirror()` sends **`MIRROR_STOP`** (§4.4) — the agent stops the JPEG
+stream and returns to READY but the **link stays open**, so a later `start_mirror()`
+resumes (this is what lets a feature stop without dropping the agent). The same
+parser carries the JPEG strip stream: each whole JPEG frame (the frame layer
+reassembles A_WRTE splits) is handed to a **decode+framebuffer seam** =
+`VideoListener::on_video_strip(VideoStrip)` (rect + JPEG bytes + frame_start/end),
+so `Link` stays free of libjpeg / HW-JPEG (host libjpeg in the test, P4 HW JPEG +
+bsp FB in the app). `tx_seq_` is atomic because `start_mirror`/`stop_mirror` (app
+thread) and the HELLO response (reader thread) both write frames. **HELLO + Phase 2
+mirror done & verified on a real Android device**:
+`test/test_hello.cpp` covers the HELLO-only path (a `LinkLifecycleListener`);
+`test/test_mirror.cpp` (a `LinkLifecycleListener` + `VideoListener`) drives HELLO →
+`set_video_listener` → `start_mirror` → strips, asserts framing/16-alignment/tiling
+via host libjpeg, then exercises **`stop_mirror` → `start_mirror` again on the same
+link** (the resume cycle) (run with `nix develop -c sh -c 'TEST=test_mirror
 components/agent_link/test/run.sh'`; default `TEST=test_hello`; the runner builds
 the host stack incl. `libjpeg`, runs `adb kill-server`, launches the test;
 artifacts in `test/build/`; approach in `android-agent/docs/testing.md`).
-receive→decode→**render done**: the app drives the link from `ADBMirroringScreen`
-(see the UI section) — `Link::open` → `start_mirror` → `on_video_strip` decoded
-straight into the bsp framebuffer (no LVGL), verified headless against a real Android device.
+receive→decode→**render done**: the app drives the link via `app::AgentClient` +
+`ADBMirroringScreen` (see the UI section) — `ensure_connected` → `set_video_listener`
+→ `start_mirror` → `on_video_strip` decoded straight into the bsp framebuffer (no
+LVGL), verified headless against a real Android device.
 
 ### The JPEG decode seam (for the mirror render)
 
-`LinkListener::on_video_strip` hands the app a whole JPEG strip to decode into the
+`VideoListener::on_video_strip` hands the app a whole JPEG strip to decode into the
 `bsp` framebuffer. The decode is **the same call on both targets** —
 `jpeg_new_decoder_engine()` + `jpeg_decoder_process_full_range()` (+
 `jpeg_alloc_decoder_mem()` / `jpeg_del_decoder_engine()`) — split below per the
@@ -645,6 +667,49 @@ non-idle FSM. (These mattered during a long mirror-stability hunt whose real cau
 turned out to be the **usb_host transport corrupting large bulk-IN payloads** — see
 the `embedded_adb` transport note; once that was fixed the decode errors vanished.)
 
+### `app::AgentClient` (app-global tab5adb-agent manager)
+
+`app/agent_client.{hpp,cpp}` — the app-global owner of the **tab5adb-agent
+connection**, decoupled from any one screen so multiple features can use the agent.
+Where `agent_link::Link` is the per-stream protocol engine, `AgentClient` owns the
+**agent process lifecycle** + a lazy connection state machine — the same layering as
+`adb::Client` (lifecycle) over `AdbConnection` (protocol). It deliberately does
+**not** forward per-feature protocol; features drive the protocol on the `Link`
+directly, so `AgentClient` never grows per-feature methods (the design choice that
+keeps it from becoming a thin `Link` wrapper).
+
+- **Lazy bring-up.** `ensure_connected(cb)` runs the §2.2 sequence on a private
+  worker task — `exec` pkill stale agent → `Sync::push` the **embedded jar**
+  (`app/agent/agent_jar.{h,c}`) → `open_shell` `app_process` → retry `Link::open`
+  until the agent answers HELLO. It is the `SyncListener`/`ShellListener` for the
+  push + agent stdout and the `LinkLifecycleListener` for the link. Nothing happens
+  until the first `ensure_connected` (a feature's first use), not at adb connect.
+  `cb` fires on the **LVGL thread** (like `adb_connect_async`): true once Ready,
+  false on failure; already-Ready posts immediately; concurrent calls coalesce.
+- **Persistence.** Holds the agent `Shell` (its stdout) + the `Link` alive across
+  the transient screens. `state()`/`ready()`/`link()` are callable from any thread;
+  `link()` returns a `shared_ptr<agent_link::Link>` (held across the call even if the
+  link drops). Features get the video channel by `link()->set_video_listener()` and
+  drive `start_mirror()`/`stop_mirror()` on it — `stop_mirror()` **keeps the link**,
+  so a feature stops without dropping the agent (the whole point).
+- **Teardown.** `on_link_close` (the agent died) and `on_adb_disconnected()` (the
+  adb holder calls it on `Closed`) both go to Disconnected and drop the session
+  objects — deferred via `lv_async_call` so the shared_ptr resets never run on the
+  `Link`'s own callback stack — so a later `ensure_connected` re-launches.
+
+The standard feature flow (see `ADBMirroringScreen`): `ready()` to decide whether to
+show a waiting UI → `ensure_connected` → on the LVGL-thread callback
+`set_video_listener(self)` + `start_mirror()`; on exit `stop_mirror()` +
+`set_video_listener({})`.
+
+The `app::agent_client()` singleton is a **deliberately-leaked** heap `shared_ptr`
+(never destroyed): other statics call into it from their destructors at process exit
+(e.g. `ScreenManager` tearing down a live `ADBMirroringScreen`, whose dtor calls
+`agent_client().link()`), and cross-TU static destruction order is unspecified — a
+normal Meyers static raced and `std::mutex::lock()` threw on the destroyed mutex.
+The leak keeps the controlling ref (so `shared_from_this` works) for the whole
+process; the device firmware never exits so nothing actually leaks.
+
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 
 `app/` drives the connection from the LVGL UI: `HomeScreen` has a **Connect**
@@ -658,7 +723,9 @@ Online it pushes `ADBDeviceScreen`, which shows banner-derived fields
 (model/name/device) and fetches a few live `getprop`s via a single
 `app::adb_client()->exec(...)` one-shot (its completion fires on the reader thread,
 so the label update is marshalled back to LVGL). The app pulls in no
-protocol/transport details, only the `adb` component's typed surface.
+protocol/transport details, only the `adb` component's typed surface. On `Closed`
+the holder also calls `app::agent_client().on_adb_disconnected()` so the
+tab5adb-agent connection is torn down with the adb link.
 
 `ADBDeviceScreen` has an **Open Terminal** button that pushes **`ADBShellScreen`**
 (`app/adb_shell_screen.*`) — an interactive terminal over `Client::open_shell()`.
@@ -704,16 +771,17 @@ taps faster than the device responds.
 
 `ADBDeviceScreen`'s **Mirroring** button pushes **`ADBMirroringScreen`**
 (`app/adb_mirroring_screen.*`) — the live screen-mirror viewer over `agent_link`.
-The screen **is** the `agent_link::LinkListener`, but the multi-step bring-up runs
-on a file-local **`MirrorLauncher`** worker task (the screen owns a `shared_ptr`
-and `stop()`s/joins it in `onExit()`/dtor, the adb-session lifetime pattern):
-`exec` pkill any stale agent → `Sync::push` the **embedded jar**
-(`app/agent/agent_jar.{h,c}`) to `/data/local/tmp` → `open_shell` `app_process` →
-retry `Link::open("localabstract:tab5adb-agent")` until the agent is listening.
-`MirrorLauncher` is itself the `SyncListener`/`ShellListener`/`LinkListener` it
-hands to those calls and **forwards** the link callbacks to the screen (held
-weakly), logging launch progress (no on-screen status); on HELLO it calls
-`Link::start_mirror()` (720×1280 fit, video). **Rendering bypasses LVGL
+The screen **is** the `agent_link::VideoListener`; the agent lifecycle (jar push +
+`app_process` launch + HELLO) is **not** the screen's job — it belongs to the
+app-global **`app::AgentClient`** (see the AgentClient section). `onEnter()` checks
+`app::agent_client().ready()`: if the agent is already live it starts immediately
+(no wait); otherwise it shows a centered **"Connecting…"** LVGL label and calls
+`ensure_connected(cb)` (cb on the LVGL thread). On success `start_mirror_ui()` drops
+the label, enters DM overlay mode, registers the screen as the link's video listener
+(`link()->set_video_listener(self)`), and calls `link()->start_mirror()` (720×1280
+fit, video). `onExit()` calls `link()->stop_mirror()` + `set_video_listener({})` —
+**the agent link stays connected** so re-entering resumes instantly — then joins the
+decode task and exits overlay. **Rendering bypasses LVGL
 entirely** (the draw cost of compositing UI over a video stream is what we're
 avoiding) and **receive and decode run on separate threads** so the blocking
 HW-JPEG decode never stalls the adb reader thread — and thus the per-A_WRTE/A_OKAY
@@ -751,17 +819,19 @@ so the displayed buffer is never mid-write (tear-free) **and** the buffer drawn
 into was last displayed two frames ago, so the decode task never blocks on the DPI
 panel's scan-out/vsync sync before reusing one (normal full-screen LVGL still uses
 just the first two as a double buffer; the simulator's SDL backend now allocates up
-to 3 too). Nothing is marshalled to LVGL. The LVGL root stays a **static
-black, clickable surface** (a **tap pops** back) that nothing invalidates after
-build, so `lv_timer_handler` leaves the framebuffers to the mirror; on pop the
-previous screen's full re-render reclaims them. The framebuffers are cleared +
-flushed once at build for the pre-stream black screen. **No LVGL widgets are
-composited over the stream** (no back button / status overlay — those would force
-per-frame re-blend); launch progress goes to the log. `onExit()`/dtor stop the
-producer (the launcher closes the link) **before** joining the decode task, so it
-can't flush into a framebuffer the previous screen is reclaiming; the weak-listener
-`lock()` keeps the screen alive across any in-flight strip so teardown frees the
-engine race-free. The single-threaded decode path was **verified headless against
+to 3 too). Nothing is marshalled to LVGL once streaming. Before the mirror starts
+the LVGL root is **black** and hosts a transient **"Connecting…"** label (rendered
+by the normal LVGL runtime while `AgentClient` brings the agent up); once
+`start_mirror_ui()` enters DM overlay mode the label is gone and nothing invalidates
+the root, so `lv_timer_handler` leaves the framebuffers to the mirror, while a small
+LVGL overlay display renders the opaque control bar DM composites at flush time
+(navigation = the bar's **Back** button; a tap on the video area toggles the bar).
+On pop the previous screen's full re-render reclaims the framebuffers.
+`onExit()`/dtor stop the producer (`stop_mirror()` + `set_video_listener({})` — the
+agent link is kept connected) **before** joining the decode task, so it can't flush
+into a framebuffer the previous screen is reclaiming; the weak-listener `lock()`
+keeps the screen alive across any in-flight strip so teardown frees the engine
+race-free. The single-threaded decode path was **verified headless against
 a real Android device** (`./run.sh simverify simulator/verify/mirror.txt`) and by the headless
 `test_mirror`; the receive/decode split builds on both targets but its fps win is
 the **remaining device flash-and-check** (the ~55fps RGB565/Q60 ceiling motivating

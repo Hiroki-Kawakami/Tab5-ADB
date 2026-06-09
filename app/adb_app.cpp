@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "adb.hpp"  // adb::Client, adb::ClientListener
+#include "agent_client.hpp"
 #include "bsp.h"
 #include "display_manager.hpp"
 #include "lvgl.hpp"
@@ -33,6 +34,10 @@ public:
             report(true);
         } else if (s == adb::ConnectionState::Closed) {
             report(false);  // closed before/without ever reaching Online
+            // The adb link is gone, so the tab5adb-agent connection is too: tear it
+            // down (a later feature use re-launches it). on_state is on the reader
+            // thread; AgentClient marshals its own cleanup.
+            agent_client().on_adb_disconnected();
         }
     }
 

@@ -21,7 +21,14 @@ import java.util.List;
  * sends its HELLO CONTROL_REQUEST (link establishment only — proto / version /
  * capability, §4.4), reads the Tab5 HELLO response, then waits for the Tab5 to
  * send MIRROR_START (panel size / scale mode / streams). It answers MIRROR_START
- * and streams the screen as JPEG strips (§5) until the peer closes.
+ * and streams the screen as JPEG strips (§5) until it receives MIRROR_STOP — at
+ * which point it stops streaming and returns to READY (the socket stays open, so
+ * a later MIRROR_START resumes), or until the peer closes the socket.
+ *
+ * <p>Control and video run concurrently (§4.4): a dedicated reader thread reads
+ * every inbound frame (the HELLO response, MIRROR_START, MIRROR_STOP) while the
+ * main thread sends the JPEG stream, so MIRROR_STOP is never blocked behind the
+ * video flow. Frame writes from both threads are serialized in {@link Conn}.
  *
  * <p>{@code --test-pattern} streams a deterministic {@link TestPattern} instead of
  * the real screen, so the headless test can verify the pipeline + framing without
@@ -40,6 +47,7 @@ public final class Server {
     private static final int FLAG_FRAME_END = 0x02;
     private static final int CMD_HELLO = 0x01;
     private static final int CMD_MIRROR_START = 0x10;
+    private static final int CMD_MIRROR_STOP = 0x11;
     private static final int STATUS_OK = 0x00;
     private static final int STATUS_ENOTSUP = 0x02;
     private static final int PROTO_VERSION = 1;
@@ -47,7 +55,7 @@ public final class Server {
     private static final int VIDEO_CODEC_JPEG = 0x01;
 
     private static final int AGENT_VER_MAJOR = 0;
-    private static final int AGENT_VER_MINOR = 2;
+    private static final int AGENT_VER_MINOR = 3;
     private static final int AGENT_VER_PATCH = 0;
 
     // Mirror stream defaults (§5.1).
@@ -101,20 +109,16 @@ public final class Server {
         }
     }
 
-    /** HELLO handshake, MIRROR_START handshake, then stream the screen as JPEG. */
+    /**
+     * One connection: send HELLO, then a control reader thread reads every inbound
+     * frame while this (main) thread runs the session loop — wait for MIRROR_START,
+     * stream JPEG until MIRROR_STOP (back to READY) or the peer closes, repeat.
+     */
     private void serve(LocalSocket client) throws Exception {
         Conn conn = new Conn(client.getOutputStream(),
                 new DataInputStream(client.getInputStream()));
 
-        helloHandshake(conn);
-        MirrorParams mp = mirrorHandshake(conn);
-        if (mp == null) return;  // MIRROR_START rejected / no video requested
-        streamVideo(conn, mp);
-    }
-
-    // --- HELLO (link establishment, §4.4) ---
-
-    private void helloHandshake(Conn conn) throws Exception {
+        // Agent-initiated HELLO request (§4.4); its response is read by the reader.
         byte[] args = new byte[8];
         args[0] = (byte) PROTO_VERSION;
         args[1] = (byte) AGENT_VER_MAJOR;
@@ -125,10 +129,65 @@ public final class Server {
         conn.sendControlRequest(CMD_HELLO, 0x01, args);
         System.out.println("tab5adb-agent: sent HELLO (caps=video)");
 
-        Frame resp = conn.readFrame();
-        if (resp.type != TYPE_CONTROL_RESPONSE) {
-            throw new IllegalStateException("expected CONTROL_RESPONSE, got type " + resp.type);
+        Thread reader = new Thread(() -> readLoop(conn), "tab5adb-control-reader");
+        reader.setDaemon(true);
+        reader.start();
+
+        // Wait for the HELLO response (or a disconnect) before serving features.
+        synchronized (conn.lock) {
+            while (!conn.helloOk && !conn.closed) conn.lock.wait();
         }
+
+        // Session loop: each MIRROR_START streams until MIRROR_STOP / disconnect,
+        // then we return to READY and wait for the next MIRROR_START on this link.
+        while (!conn.closed) {
+            MirrorParams mp;
+            synchronized (conn.lock) {
+                while (conn.pendingStart == null && !conn.closed) conn.lock.wait();
+                mp = conn.pendingStart;
+                conn.pendingStart = null;
+            }
+            if (conn.closed) break;
+            streamVideo(conn, mp);  // returns on MIRROR_STOP (READY) or disconnect
+        }
+        reader.join();
+    }
+
+    // --- control reader thread: reads every inbound frame, dispatches by TYPE ---
+
+    /** Read frames until the peer closes; on exit mark the connection closed. */
+    private void readLoop(Conn conn) {
+        try {
+            while (true) handleFrame(conn, conn.readFrame());
+        } catch (IOException eof) {
+            // peer closed the stream — normal teardown
+        } catch (Exception e) {
+            System.err.println("tab5adb-agent: reader: " + e);
+        } finally {
+            synchronized (conn.lock) {
+                conn.closed = true;
+                conn.lock.notifyAll();
+            }
+        }
+    }
+
+    private void handleFrame(Conn conn, Frame f) throws IOException {
+        if (f.type == TYPE_CONTROL_RESPONSE) {
+            handleHelloResponse(conn, f);
+        } else if (f.type == TYPE_CONTROL_REQUEST) {
+            byte[] p = f.payload;
+            if (p.length < 2) throw new IllegalStateException("short control request");
+            int cmd = p[0] & 0xFF, reqId = p[1] & 0xFF;
+            if (cmd == CMD_MIRROR_START) handleMirrorStart(conn, p, reqId);
+            else if (cmd == CMD_MIRROR_STOP) handleMirrorStop(conn, reqId);
+            // unknown cmd: ignore (forward compat, §4.4)
+        }
+        // unknown TYPE / EVENT: ignore (§3.1)
+    }
+
+    // --- HELLO response (§4.4) ---
+
+    private void handleHelloResponse(Conn conn, Frame resp) {
         byte[] p = resp.payload;
         if (p.length < 3 || (p[0] & 0xFF) != CMD_HELLO) {
             throw new IllegalStateException("malformed HELLO response");
@@ -144,31 +203,23 @@ public final class Server {
             throw new IllegalStateException("proto mismatch: agent " + PROTO_VERSION + " vs Tab5 " + proto);
         }
         conn.maxPayload = maxPayload;
+        synchronized (conn.lock) {
+            conn.helloOk = true;
+            conn.lock.notifyAll();
+        }
         System.out.println("tab5adb-agent: HELLO ok caps=0x" + Integer.toHexString(caps)
                 + " max_payload=" + maxPayload);
     }
 
-    // --- MIRROR_START (start mirror, §4.4) ---
+    // --- MIRROR_START / MIRROR_STOP (§4.4) ---
 
     private static final class MirrorParams {
         int targetW, targetH, scaleMode, streams;
     }
 
-    /** Wait for the Tab5 MIRROR_START, answer it, return the params (null if no video). */
-    private MirrorParams mirrorHandshake(Conn conn) throws Exception {
-        Frame req = conn.readFrame();
-        if (req.type != TYPE_CONTROL_REQUEST) {
-            throw new IllegalStateException("expected CONTROL_REQUEST, got type " + req.type);
-        }
-        byte[] p = req.payload;
-        if (p.length < 2 || (p[0] & 0xFF) != CMD_MIRROR_START) {
-            throw new IllegalStateException("expected MIRROR_START, got cmd "
-                    + (p.length > 0 ? (p[0] & 0xFF) : -1));
-        }
-        int reqId = p[1] & 0xFF;
-        if (p.length < 2 + 8) {
-            throw new IllegalStateException("malformed MIRROR_START");
-        }
+    /** Parse + answer MIRROR_START; hand the params to the session loop. */
+    private void handleMirrorStart(Conn conn, byte[] p, int reqId) throws IOException {
+        if (p.length < 2 + 8) throw new IllegalStateException("malformed MIRROR_START");
         MirrorParams mp = new MirrorParams();
         mp.targetW = readU16(p, 2);
         mp.targetH = readU16(p, 4);
@@ -179,7 +230,7 @@ public final class Server {
 
         if ((mp.streams & CAP_VIDEO) == 0) {  // we only offer video today
             conn.sendControlResponse(CMD_MIRROR_START, reqId, STATUS_ENOTSUP, null);
-            return null;
+            return;
         }
 
         int[] src = sourceSize();
@@ -190,7 +241,23 @@ public final class Server {
         result[5] = 0;                        // reserved
         writeU16(result, 6, 0);               // reserved
         conn.sendControlResponse(CMD_MIRROR_START, reqId, STATUS_OK, result);
-        return mp;
+
+        // Hand off to the session loop; clear any stale stop from a prior session.
+        synchronized (conn.lock) {
+            conn.pendingStart = mp;
+            conn.stopRequested = false;
+            conn.lock.notifyAll();
+        }
+    }
+
+    /** MIRROR_STOP: signal the stream loop to stop (back to READY), ack OK. */
+    private void handleMirrorStop(Conn conn, int reqId) throws IOException {
+        System.out.println("tab5adb-agent: MIRROR_STOP");
+        synchronized (conn.lock) {
+            conn.stopRequested = true;
+            conn.lock.notifyAll();
+        }
+        conn.sendControlResponse(CMD_MIRROR_STOP, reqId, STATUS_OK, null);
     }
 
     // --- video stream (§5) ---
@@ -206,7 +273,8 @@ public final class Server {
         ScreenCapture capture = null;
         int captureRotation = -1;  // device rotation the current capture was built for
         try {
-            while (!Thread.interrupted()) {
+            // Stream until MIRROR_STOP (-> READY) or the reader sees the peer close.
+            while (!conn.stopRequested && !conn.closed) {
                 long t0 = System.nanoTime();
                 if (!testPattern) {
                     // The Tab5 is fixed to the device's physical orientation (§5.1), so
@@ -244,11 +312,16 @@ public final class Server {
                 }
             }
         } catch (IOException eof) {
-            // peer closed the stream — normal teardown
+            // write failed = peer closed the stream; let the reader mark it closed
+            synchronized (conn.lock) {
+                conn.closed = true;
+                conn.lock.notifyAll();
+            }
         } finally {
             if (capture != null) capture.close();
         }
-        System.out.println("tab5adb-agent: stream ended after " + frame + " frames");
+        System.out.println("tab5adb-agent: stream " + (conn.stopRequested ? "stopped" : "ended")
+                + " after " + frame + " frames");
     }
 
     private Bitmap nextSource(ScreenCapture capture, int frame) {
@@ -284,8 +357,17 @@ public final class Server {
     private static final class Conn {
         final OutputStream out;
         final DataInputStream in;
-        int outSeq = 0;        // outgoing frame counter (§3 SEQ), one per direction
-        long maxPayload = 0;   // Tab5's accepted payload cap (from HELLO)
+        int outSeq = 0;                 // outgoing frame counter (§3 SEQ), per direction
+        volatile long maxPayload = 0;   // Tab5's accepted payload cap (from HELLO)
+
+        // Session state shared between the reader thread and the main (stream)
+        // thread. `lock` guards the wait/notify handoff; the volatile flags are
+        // also read in the stream loop without the lock.
+        final Object lock = new Object();
+        volatile boolean helloOk = false;     // HELLO response received + accepted
+        volatile boolean closed = false;      // peer disconnected / fatal error
+        volatile boolean stopRequested = false;  // MIRROR_STOP for the live stream
+        MirrorParams pendingStart = null;     // MIRROR_START to start (guarded by lock)
 
         Conn(OutputStream out, DataInputStream in) {
             this.out = out;
@@ -309,7 +391,10 @@ public final class Server {
             writeFrame(TYPE_CONTROL_RESPONSE, 0, payload);
         }
 
-        void writeFrame(int type, int flags, byte[] payload) throws IOException {
+        // Serialized: the reader thread (control responses) and the main thread
+        // (HELLO request + JPEG frames) both write, so a whole frame is emitted
+        // atomically and SEQ stays consistent.
+        synchronized void writeFrame(int type, int flags, byte[] payload) throws IOException {
             byte[] hdr = new byte[8];
             hdr[0] = (byte) MAGIC;
             hdr[1] = (byte) type;

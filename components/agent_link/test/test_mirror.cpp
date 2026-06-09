@@ -110,7 +110,8 @@ void write_ppm(const char* path, const std::vector<uint8_t>& rgb, int w, int h) 
 class Listener : public adb::ClientListener,
                  public adb::SyncListener,
                  public adb::ShellListener,
-                 public agent_link::LinkListener {
+                 public agent_link::LinkLifecycleListener,
+                 public agent_link::VideoListener {
 public:
     // --- ClientListener ---
     void on_state(adb::Client*, adb::ConnectionState s) override {
@@ -132,18 +133,16 @@ public:
     }
     void on_shell_close(adb::Shell*, adb::Error) override {}
 
-    // --- LinkListener ---
+    // --- LinkLifecycleListener ---
     void on_link_hello(agent_link::Link* link, const agent_link::AgentInfo& info) override {
         std::printf(">>> on_link_hello: proto=%u agent=%u.%u.%u caps=0x%04x\n",
                     info.proto_version, info.version_major, info.version_minor,
                     info.version_patch, info.capabilities);
         hello_link_ = link;
-        hello_ = true;
-        // READY: kick off the mirror (default cfg = 720x1280 fit, video).
-        adb::Error e = link->start_mirror();
-        std::printf(">>> start_mirror: %s\n", adb::to_string(e));
+        hello_ = true;  // the main flow registers the video listener + start_mirror
     }
 
+    // --- VideoListener ---
     void on_mirror_started(agent_link::Link*, const agent_link::MirrorInfo& info) override {
         std::printf(">>> on_mirror_started: source=%ux%u codec=%u\n",
                     info.source_width, info.source_height, info.video_codec);
@@ -346,15 +345,42 @@ int main(int argc, char** argv) {
         sleep_ms(300);
     }
 
-    // Collect a few clean frames (start_mirror fired from on_link_hello).
+    // READY: register the video channel listener, then start the mirror — the app
+    // flow (the feature attaches + starts after on_link_hello, not from inside it).
+    if (listener->hello() && link) {
+        link->set_video_listener(listener);
+        adb::Error e = link->start_mirror();  // default cfg = 720x1280 fit, video
+        std::printf(">>> start_mirror: %s\n", adb::to_string(e));
+    }
+
+    // Collect a few clean frames.
     for (int i = 0; i < 100 && listener->frames_done() < kMinFrames; ++i) sleep_ms(100);
+
+    // Exercise MIRROR_STOP -> READY -> MIRROR_START on the SAME link: the stream
+    // must pause then resume without re-establishing the link (the AgentClient
+    // "keep the link, stop the feature" flow).
+    bool cycle_ok = true;
+    if (link && listener->mirror_started()) {
+        link->stop_mirror();
+        sleep_ms(700);                              // let the stream wind down
+        int after_stop = listener->frames_done();
+        adb::Error e = link->start_mirror();        // resume on the same link
+        std::printf(">>> stop/restart: start_mirror=%s (frames at stop=%d)\n",
+                    adb::to_string(e), after_stop);
+        for (int i = 0; i < 100 && listener->frames_done() < after_stop + kMinFrames; ++i)
+            sleep_ms(100);
+        cycle_ok = listener->frames_done() >= after_stop + kMinFrames;
+        std::printf(">>> stop/restart: resumed to %d frames (%s)\n",
+                    listener->frames_done(), cycle_ok ? "ok" : "FAILED");
+    }
 
     bool hello = listener->hello();
     bool started = listener->mirror_started();
     int frames = listener->frames_done();
     int bad = listener->bad_strips();
-    std::printf("hello=%s mirror_started=%s frames=%d bad_strips=%d\n",
-                hello ? "ok" : "FAILED", started ? "ok" : "FAILED", frames, bad);
+    std::printf("hello=%s mirror_started=%s frames=%d bad_strips=%d cycle=%s\n",
+                hello ? "ok" : "FAILED", started ? "ok" : "FAILED", frames, bad,
+                cycle_ok ? "ok" : "FAILED");
 
     // Teardown: close the link, then the shell (kills the agent), then the client.
     if (link) link->close();
@@ -365,7 +391,7 @@ int main(int argc, char** argv) {
     client->close();
 
     bool one_close = listener->hello_link_closes() == 1;
-    bool ok = hello && started && frames >= kMinFrames && bad == 0 && one_close;
+    bool ok = hello && started && frames >= kMinFrames && bad == 0 && one_close && cycle_ok;
     std::printf("%s (frames=%d bad_strips=%d hello_link_closes=%d)\n",
                 ok ? "PASSED: mirror streams clean JPEG strips, link closes once"
                    : "FAILED",

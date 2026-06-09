@@ -37,7 +37,7 @@ enum Flag : uint8_t {
 enum Cmd : uint8_t {
     kCmdHello = 0x01,         // A->T: agent_link link establishment (link-only)
     kCmdMirrorStart = 0x10,   // T->A: start mirror (video + future audio)
-    kCmdMirrorStop = 0x11,    // T->A: stop mirror (reserved)
+    kCmdMirrorStop = 0x11,    // T->A: stop mirror -> READY (link kept), §4.4
     kCmdMirrorSetParam = 0x12,  // T->A: live param change (reserved)
 };
 

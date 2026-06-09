@@ -10,7 +10,7 @@ namespace {
 constexpr const char* kSocket = "localabstract:tab5adb-agent";
 }  // namespace
 
-Link::Link(std::weak_ptr<LinkListener> listener, const HelloConfig& cfg)
+Link::Link(std::weak_ptr<LinkLifecycleListener> listener, const HelloConfig& cfg)
     : listener_(std::move(listener)), cfg_(cfg) {}
 
 Link::~Link() {
@@ -20,7 +20,7 @@ Link::~Link() {
 }
 
 std::shared_ptr<Link> Link::open(std::shared_ptr<adb::Client> client,
-                                 std::weak_ptr<LinkListener> listener,
+                                 std::weak_ptr<LinkLifecycleListener> listener,
                                  const HelloConfig& cfg) {
     if (!client || client->state() != adb::ConnectionState::Online) return nullptr;
 
@@ -38,6 +38,11 @@ std::shared_ptr<Link> Link::open(std::shared_ptr<adb::Client> client,
 
 bool Link::is_open() const { return stream_ && stream_->is_open(); }
 
+void Link::set_video_listener(std::weak_ptr<VideoListener> video) {
+    std::lock_guard<std::mutex> lk(video_mtx_);
+    video_ = std::move(video);
+}
+
 adb::Error Link::start_mirror(const MirrorConfig& cfg) {
     if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
 
@@ -53,6 +58,22 @@ adb::Error Link::start_mirror(const MirrorConfig& cfg) {
     a[4] = cfg.scale_mode;
     a[5] = cfg.streams;
     wr_u16(a + 6, 0);  // reserved
+
+    uint8_t frame[kFrameHeaderSize + sizeof(payload)];
+    write_header(frame, kTypeControlRequest, /*flags=*/0,
+                 tx_seq_.fetch_add(1), static_cast<uint32_t>(sizeof(payload)));
+    std::memcpy(frame + kFrameHeaderSize, payload, sizeof(payload));
+    return stream_->write(frame, sizeof(frame));
+}
+
+adb::Error Link::stop_mirror() {
+    if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+
+    // CONTROL_REQUEST payload (§4.1): cmd, req_id, no args (MIRROR_STOP, §4.4).
+    // req_id 0x03; the response is matched by cmd alone.
+    uint8_t payload[2];
+    payload[0] = kCmdMirrorStop;
+    payload[1] = 0x03;
 
     uint8_t frame[kFrameHeaderSize + sizeof(payload)];
     write_header(frame, kTypeControlRequest, /*flags=*/0,
@@ -146,8 +167,8 @@ void Link::handle_control_request(const uint8_t* p, size_t len) {
     if (auto l = listener_.lock()) l->on_link_hello(this, info);
 }
 
-// CONTROL_RESPONSE (§4.2): replies to a Tab5-initiated request. Today the only
-// such request is MIRROR_START.
+// CONTROL_RESPONSE (§4.2): replies to a Tab5-initiated request — MIRROR_START or
+// MIRROR_STOP.
 void Link::handle_control_response(const uint8_t* p, size_t len) {
     if (len < 3) {
         fail(adb::Error::Protocol);
@@ -155,6 +176,13 @@ void Link::handle_control_response(const uint8_t* p, size_t len) {
     }
     const uint8_t cmd = p[0];
     const uint8_t status = p[2];
+
+    // MIRROR_STOP ack: the agent is back in READY. The feature has already (or is
+    // about to) clear its video listener, so there is nothing to dispatch; a
+    // non-OK status doesn't tear the link down (stop is best-effort, the link
+    // stays usable). Just consume it.
+    if (cmd == kCmdMirrorStop) return;
+
     if (cmd != kCmdMirrorStart) return;  // unknown cmd: ignore (forward compat)
 
     if (status != kStatusOk) {  // agent refused MIRROR_START
@@ -171,7 +199,9 @@ void Link::handle_control_response(const uint8_t* p, size_t len) {
     info.source_height = rd_u16(r + 2);
     info.video_codec = r[4];
     // r[5..7] reserved.
-    if (auto l = listener_.lock()) l->on_mirror_started(this, info);
+    std::shared_ptr<VideoListener> v;
+    { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
+    if (v) v->on_mirror_started(this, info);
 }
 
 // JPEG (§5.2): one strip = subheader (x,y,w,h) + JPEG bytes. The frame layer has
@@ -193,7 +223,9 @@ void Link::handle_jpeg(const FrameHeader& h, const uint8_t* payload) {
     strip.jpeg_len = h.length - kJpegSubheaderSize;
     strip.frame_start = (h.flags & kFlagFrameStart) != 0;
     strip.frame_end = (h.flags & kFlagFrameEnd) != 0;
-    if (auto l = listener_.lock()) l->on_video_strip(this, strip);
+    std::shared_ptr<VideoListener> v;
+    { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
+    if (v) v->on_video_strip(this, strip);
 }
 
 void Link::send_hello_response(uint8_t req_id, uint8_t status) {

@@ -155,7 +155,7 @@ v1 で実際に使うのは agent 発の `HELLO`（リンク確立）と Tab5 �
 |---|---|---|---|---|
 | `0x01` | `HELLO` | A→T | **agent_link 接続確立**。proto 版・agent バージョン・capability の確認のみ | 下記 |
 | `0x10` | `MIRROR_START`     | T→A | **mirror 開始**（映像＋音声。v1 は映像のみ）。パネル寸法/スケールモード/開始ストリームを運ぶ | 下記 |
-| `0x11` | `MIRROR_STOP`      | T→A | **予約**: mirror 停止（映像＋音声） | 未定 |
+| `0x11` | `MIRROR_STOP`      | T→A | **mirror 停止**（映像＋音声）。`STREAMING`→`READY`（リンクは維持） | 下記 |
 | `0x12` | `MIRROR_SET_PARAM` | T→A | **予約**: スケールモード/品質/分割数等のライブ変更 | 未定 |
 
 予約: `0x02..0x0F` 制御一般 / `0x13..0x1F` mirror 制御 / `0x20..` 拡張。
@@ -240,6 +240,24 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
   `status = ENOTSUP` を返す。提供可能なビットだけを開始してもよい（運用は実装で確定）。
 - `status = OK` の応答を返した後、agent は §5 の JPEG ストリームを流し始める。
 - 将来フィールド（音声パラメータ等）を足すときは **末尾に追記**（append-only）。
+
+#### MIRROR_STOP (cmd = 0x11) — mirror 停止
+
+`STREAMING` 中に **Tab5 が CONTROL_REQUEST として送る**。映像（＋将来は音声）の送出を止めさせ、
+**`READY` に戻す**。**ストリーム（agent_link 接続）は閉じない** — Tab5 はこの後も同じリンクで
+`MIRROR_START` を送れば mirror を再開でき、別機能の制御メッセージも引き続き使える。mirror 機能を
+閉じても agent プロセス／リンクを生かしたまま帯域だけ止めるのが目的（Tab5 側 `AgentClient` の運用）。
+
+**要求 (CONTROL_REQUEST) args**（Tab5 → agent）: **なし**（`cmd` + `req_id` のみ）。
+
+**応答 (CONTROL_RESPONSE) result**（agent → Tab5）: **なし**（`status` のみ）。`status = OK` で停止受理。
+
+- agent は MIRROR_STOP を受けたら送出ループを止め、応答を返して `READY` に戻る。停止後に届く可能性の
+  ある「最後の JPEG フレーム」は Tab5 が破棄してよい（最新フレーム優先・§8）。
+- 既に `READY`（mirror 未開始）で受けた場合も `status = OK`（冪等）。
+- Tab5 は MIRROR_STOP の応答を待たずにローカルの受信を止めてよい（応答は確認用）。
+- 映像と並行して制御を処理するため、agent は **送出ループと別に制御フレームを read** し、MIRROR_STOP
+  を JPEG の流量にブロックされず受け取る（§4.4 のノート）。
 
 ### 4.6 capability ビット（共通）
 
@@ -386,7 +404,8 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 ```
             connect + HELLO(ok)        MIRROR_START(ok)
   IDLE ──────────────────────────▶ READY ─────────────────▶ STREAMING(JPEG[, AUDIO])
-   ▲                                 │                              │
+   ▲                                 │  ▲                           │
+   │                                 │  └────── MIRROR_STOP ────────┘
    └─────────────────────────────────┴──────────────────────────────┘
               ストリーム切断 / agent 終了 / USB 抜け / WiFi 途絶
 ```
@@ -394,8 +413,9 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 - `IDLE`: 未接続、または接続直後 HELLO 前。
 - `READY`: HELLO 確立後（agent_link 接続済み、mirror 未開始）。制御メッセージのやりとりは可能。
 - `STREAMING`: `MIRROR_START` 後。agent が JPEG（将来は AUDIO も）を流す。
-- 切断で `IDLE` に戻り、§2.2 のシーケンスで再接続する。`MIRROR_STOP`（§4.4 予約）で `READY` に戻る
-  経路は将来追加する。
+- `STREAMING` で `MIRROR_STOP`（§4.4）を受けると **`READY` に戻る**（リンクは維持。再度 `MIRROR_START`
+  で `STREAMING` へ）。
+- 切断で `IDLE` に戻り、§2.2 のシーケンスで再接続する。
 
 ---
 

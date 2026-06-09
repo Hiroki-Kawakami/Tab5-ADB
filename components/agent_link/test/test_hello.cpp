@@ -45,7 +45,7 @@ void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms
 class Listener : public adb::ClientListener,
                  public adb::SyncListener,
                  public adb::ShellListener,
-                 public agent_link::LinkListener {
+                 public agent_link::LinkLifecycleListener {
 public:
     // --- ClientListener ---
     void on_state(adb::Client*, adb::ConnectionState s) override {
@@ -70,7 +70,7 @@ public:
     }
     void on_shell_close(adb::Shell*, adb::Error) override {}
 
-    // --- LinkListener ---
+    // --- LinkLifecycleListener ---
     void on_link_hello(agent_link::Link* link, const agent_link::AgentInfo& info) override {
         std::printf(">>> on_link_hello: proto=%u agent=%u.%u.%u caps=0x%04x\n",
                     info.proto_version, info.version_major, info.version_minor,

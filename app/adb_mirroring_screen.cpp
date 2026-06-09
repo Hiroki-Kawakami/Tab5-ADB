@@ -5,239 +5,19 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-#include <algorithm>
-#include <chrono>
-#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <memory>
-#include <mutex>
 
-#include "adb.hpp"  // adb::Client, adb::Shell, adb::Sync, adb::Error, adb::to_string
+#include "adb.hpp"  // adb::Error, adb::to_string
 #include "adb_app.hpp"
-#include "agent/agent_jar.h"
+#include "agent_client.hpp"
 #include "display_manager.hpp"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "jpeg_fullrange_decode.h"
 #include "lvgl.hpp"
 #include "screen_manager.hpp"
-
-namespace {
-
-constexpr const char* kRemoteJar = "/data/local/tmp/tab5adb-agent.jar";
-// Launch the agent with app_process (shell uid 2000, reaches hidden APIs); no
-// --test-pattern, so it mirrors the live screen via SurfaceControl capture.
-constexpr const char* kLaunchCmd =
-    "CLASSPATH=/data/local/tmp/tab5adb-agent.jar app_process / com.tab5adb.agent.Server";
-constexpr const char* kKillCmd = "pkill -f com.tab5adb.agent.Server; true";
-
-}  // namespace
-
-// ---------------------------------------------------------------------------
-// MirrorLauncher — owns the multi-step "get the agent running and linked"
-// sequence on a private worker task, and forwards the agent_link callbacks to
-// the screen (held weakly). It is the SyncListener/ShellListener for the push +
-// app_process launch and the LinkListener for the link, so the screen only sees
-// the UI-facing callbacks. Lifetime mirrors the adb sessions: the screen owns a
-// shared_ptr and join()s the task in stop() before it is destroyed.
-// ---------------------------------------------------------------------------
-class MirrorLauncher : public agent_link::LinkListener,
-                       public adb::SyncListener,
-                       public adb::ShellListener,
-                       public std::enable_shared_from_this<MirrorLauncher> {
-public:
-    static std::shared_ptr<MirrorLauncher> start(
-        std::shared_ptr<adb::Client> client,
-        std::weak_ptr<agent_link::LinkListener> ui,
-        std::function<void(std::string)> on_status) {
-        auto self = std::shared_ptr<MirrorLauncher>(new MirrorLauncher(
-            std::move(client), std::move(ui), std::move(on_status)));
-        self->done_ = xSemaphoreCreateBinary();
-        TaskHandle_t task = nullptr;
-        xTaskCreate(&MirrorLauncher::trampoline, "mirror_launch", 8192, self.get(),
-                    5, &task);
-        self->task_ = task;
-        return self;
-    }
-
-    ~MirrorLauncher() override { stop(); }
-
-    // LVGL thread (onExit/dtor): signal the task to bail, close the link/shell/
-    // sync, and join the task so nothing runs after the screen is destroyed.
-    void stop() {
-        std::shared_ptr<adb::Sync> sync;
-        std::shared_ptr<adb::Shell> shell;
-        std::shared_ptr<agent_link::Link> link;
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            stop_ = true;
-            sync = sync_;
-            shell = shell_;
-            link = link_;
-        }
-        cv_.notify_all();
-        if (link) link->close();
-        if (shell) shell->close();
-        if (sync) sync->close();
-
-        bool join;
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            join = done_ && !joined_ &&
-                   xTaskGetCurrentTaskHandle() != static_cast<TaskHandle_t>(task_);
-            if (join) joined_ = true;
-        }
-        if (join) xSemaphoreTake(static_cast<SemaphoreHandle_t>(done_), portMAX_DELAY);
-    }
-
-    // --- agent_link::LinkListener (reader thread): record + forward to the UI ---
-    void on_link_hello(agent_link::Link* l, const agent_link::AgentInfo& i) override {
-        { std::lock_guard<std::mutex> lk(mtx_); hello_ = true; }
-        cv_.notify_all();
-        if (auto s = ui_.lock()) s->on_link_hello(l, i);
-    }
-    void on_mirror_started(agent_link::Link* l, const agent_link::MirrorInfo& i) override {
-        if (auto s = ui_.lock()) s->on_mirror_started(l, i);
-    }
-    void on_video_strip(agent_link::Link* l, const agent_link::VideoStrip& s) override {
-        if (auto u = ui_.lock()) u->on_video_strip(l, s);
-    }
-    void on_link_close(agent_link::Link* l, adb::Error e) override {
-        { std::lock_guard<std::mutex> lk(mtx_); link_closed_ = true; }
-        cv_.notify_all();
-        if (auto s = ui_.lock()) s->on_link_close(l, e);
-    }
-
-    // --- adb::SyncListener / ShellListener (push + agent stdout) ---
-    void on_sync_close(adb::Sync*, adb::Error) override {}
-    void on_shell_data(adb::Shell*, const uint8_t* d, size_t n) override {
-        std::fwrite("agent| ", 1, 7, stdout);
-        std::fwrite(d, 1, n, stdout);
-        std::fflush(stdout);
-    }
-    void on_shell_close(adb::Shell*, adb::Error) override {}
-
-private:
-    MirrorLauncher(std::shared_ptr<adb::Client> client,
-                   std::weak_ptr<agent_link::LinkListener> ui,
-                   std::function<void(std::string)> on_status)
-        : client_(std::move(client)), ui_(std::move(ui)),
-          on_status_(std::move(on_status)) {}
-
-    static void trampoline(void* arg) { static_cast<MirrorLauncher*>(arg)->run(); }
-
-    void status(const std::string& s) { if (on_status_) on_status_(s); }
-    bool stopping() { std::lock_guard<std::mutex> lk(mtx_); return stop_; }
-
-    // Wait until pred() (or stop) is true, or ms elapses. pred reads members
-    // guarded by mtx_, which the wait holds.
-    template <class Pred>
-    void wait_for(Pred pred, int ms) {
-        std::unique_lock<std::mutex> lk(mtx_);
-        cv_.wait_for(lk, std::chrono::milliseconds(ms),
-                     [&] { return stop_ || pred(); });
-    }
-    void sleep_ms(int ms) { wait_for([] { return false; }, ms); }
-
-    void run() {
-        // 1. Kill any stale agent from a previous session.
-        status("Stopping previous agent...");
-        client_->exec(kKillCmd, [w = weak_from_this()](adb::Error, const std::string&) {
-            if (auto s = w.lock()) { std::lock_guard<std::mutex> lk(s->mtx_); s->kill_done_ = true; s->cv_.notify_all(); }
-        });
-        wait_for([this] { return kill_done_; }, 3000);
-        if (stopping()) return finish();
-
-        // 2. Push the embedded agent jar.
-        status("Pushing agent...");
-        if (!push_jar()) {
-            if (!stopping()) status("Failed to push agent");
-            return finish();
-        }
-        if (stopping()) return finish();
-
-        // 3. Launch it with app_process; its stdout/stderr stream over this shell.
-        status("Launching agent...");
-        shell_ = client_->open_shell(weak_from_this(), kLaunchCmd);
-
-        // 4. Open the link, retrying until the agent is listening (protocol.md §2.2).
-        status("Connecting to agent...");
-        for (int attempt = 0; attempt < 40 && !hello_ && !stopping(); ++attempt) {
-            { std::lock_guard<std::mutex> lk(mtx_); link_closed_ = false; }
-            auto link = agent_link::Link::open(client_, weak_from_this());
-            if (!link) { sleep_ms(200); continue; }
-            { std::lock_guard<std::mutex> lk(mtx_); link_ = link; }
-            wait_for([this] { return hello_ || link_closed_; }, 1500);
-            if (hello_) break;
-            { std::lock_guard<std::mutex> lk(mtx_); link_.reset(); }  // detach + close
-            link->close();
-            sleep_ms(300);
-        }
-
-        if (hello_ && !stopping()) {
-            status("Starting mirror...");
-            link_->start_mirror();  // 720x1280 fit, video (default MirrorConfig)
-        } else if (!hello_ && !stopping()) {
-            status("Agent did not respond");
-        }
-        finish();
-    }
-
-    bool push_jar() {
-        sync_ = client_->open_sync(weak_from_this());
-        if (!sync_) return false;
-        auto off = std::make_shared<size_t>(0);
-        bool ok = false;
-        push_done_ = false;
-        sync_->push(
-            kRemoteJar, 0644, /*mtime=*/0,
-            [off](uint8_t* b, size_t cap) -> int {
-                size_t rem = agent_jar_len - *off;
-                size_t n = std::min(cap, rem);
-                std::memcpy(b, agent_jar + *off, n);
-                *off += n;
-                return static_cast<int>(n);  // 0 at EOF
-            },
-            [w = weak_from_this()](adb::Error e) {
-                if (auto s = w.lock()) { std::lock_guard<std::mutex> lk(s->mtx_); s->push_err_ = e; s->push_done_ = true; s->cv_.notify_all(); }
-            });
-        wait_for([this] { return push_done_; }, 15000);
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            ok = push_done_ && push_err_ == adb::Error::Ok;
-        }
-        sync_->close();
-        { std::lock_guard<std::mutex> lk(mtx_); sync_.reset(); }
-        return ok;
-    }
-
-    void finish() {
-        xSemaphoreGive(static_cast<SemaphoreHandle_t>(done_));
-        vTaskDelete(nullptr);
-    }
-
-    std::shared_ptr<adb::Client> client_;
-    std::weak_ptr<agent_link::LinkListener> ui_;
-    std::function<void(std::string)> on_status_;
-
-    std::mutex mtx_;
-    std::condition_variable cv_;
-    bool stop_ = false;
-    bool kill_done_ = false;
-    bool push_done_ = false;
-    adb::Error push_err_ = adb::Error::Transport;
-    bool hello_ = false;
-    bool link_closed_ = false;
-
-    std::shared_ptr<adb::Shell> shell_;
-    std::shared_ptr<adb::Sync> sync_;
-    std::shared_ptr<agent_link::Link> link_;
-
-    void* task_ = nullptr;
-    void* done_ = nullptr;
-    bool joined_ = false;
-};
 
 // ---------------------------------------------------------------------------
 // ADBMirroringScreen
@@ -246,18 +26,17 @@ private:
 ADBMirroringScreen::ADBMirroringScreen() = default;
 
 ADBMirroringScreen::~ADBMirroringScreen() {
-    // Stop the producer (launcher closes the link → no more on_video_strip) before
-    // the consumer, so no slot is filled while we tear the decode task down.
-    if (launcher_) { launcher_->stop(); launcher_.reset(); }
+    // onExit normally runs first on pop and does the orderly teardown; this is the
+    // idempotent backstop. Stop the producer (clear our video listener so no more
+    // on_video_strip arrives) before joining the consumer.
+    if (auto l = app::agent_client().link()) l->set_video_listener({});
     if (decode_task_) {
         decode_stop_ = true;
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
         decode_task_ = nullptr;
     }
-    // Idempotent with onExit (which normally runs first on pop): drop the toggle
-    // timer + overlay mode if they somehow survived.
     if (poll_timer_) { lv_timer_delete(static_cast<lv_timer_t*>(poll_timer_)); poll_timer_ = nullptr; }
-    display_manager.exit_overlay();
+    if (overlay_active_) { display_manager.exit_overlay(); overlay_active_ = false; }
     if (decode_done_) { vSemaphoreDelete(static_cast<SemaphoreHandle_t>(decode_done_)); decode_done_ = nullptr; }
     if (ready_q_) { vQueueDelete(static_cast<QueueHandle_t>(ready_q_)); ready_q_ = nullptr; }
     if (free_q_) { vQueueDelete(static_cast<QueueHandle_t>(free_q_)); free_q_ = nullptr; }
@@ -266,18 +45,24 @@ ADBMirroringScreen::~ADBMirroringScreen() {
 }
 
 void ADBMirroringScreen::build() {
-    // The LVGL root on the MAIN display stays a static black surface — it renders
-    // once at load then never invalidates, so the main display leaves the
-    // framebuffers alone while the mirror owns them (the video and, in overlay
-    // mode, the control bar are composited by the DisplayManager instead). It is
-    // not clickable: navigation is the bar's Back button (set up in onEnter).
+    // The LVGL root on the MAIN display: black, and (until the mirror starts) the
+    // host of a centered "Connecting…" label rendered by the normal LVGL runtime.
+    // Once mirroring starts we switch to DM overlay mode, after which the root
+    // never invalidates so the main display leaves the framebuffers to the mirror.
     lv_obj_set_size(root_, PANEL_W, PANEL_H);
     lv_obj_set_style_bg_color(root_, lv_color_black(), 0);
     lv_obj_set_style_pad_all(root_, 0, 0);
 
-    // Grab the two bsp framebuffers (we decode strips straight into them). They are
-    // cleared to black in onEnter via enter_overlay(clear_framebuffers) — once the
-    // main display is isolated from them — so the pre-stream / letterbox stays black.
+    waiting_label_ = lv_label_create(root_);
+    lv_obj_t* wl = static_cast<lv_obj_t*>(waiting_label_);
+    lv_label_set_text(wl, "Connecting to agent...");
+    lv_obj_set_style_text_color(wl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(wl, &lv_font_montserrat_28, 0);
+    lv_obj_center(wl);
+
+    // Grab the bsp framebuffers (we decode strips straight into them). They are
+    // cleared to black in start_mirror_ui via enter_overlay(clear_framebuffers) —
+    // once the main display is isolated from them — so the letterbox stays black.
     for (int i = 0; i < kFbCount; ++i)
         fb_[i] = static_cast<uint8_t*>(display_manager.framebuffer(i));
     back_ = 0;
@@ -285,7 +70,8 @@ void ADBMirroringScreen::build() {
 
     // Receive/decode split: the reader thread fills frame slots (free_q_) and the
     // decode task drains finished frames (ready_q_), so the blocking HW-JPEG decode
-    // runs off the reader thread. Hand all slots to the producer to start.
+    // runs off the reader thread. The decode task idles (no frames) until the
+    // mirror starts. Hand all slots to the producer to start.
     free_q_ = xQueueCreate(kSlots, sizeof(int));
     ready_q_ = xQueueCreate(1, sizeof(int));
     for (int i = 0; i < kSlots; ++i) xQueueSend(static_cast<QueueHandle_t>(free_q_), &i, 0);
@@ -294,32 +80,41 @@ void ADBMirroringScreen::build() {
     TaskHandle_t dt = nullptr;
     xTaskCreate(&ADBMirroringScreen::decode_trampoline, "mirror_decode", 8192, this, 6, &dt);
     decode_task_ = dt;
-
-    // Kick off the launch sequence. The launcher forwards link callbacks to this
-    // screen (held weakly) and logs progress (no on-screen status — no overlay).
-    std::weak_ptr<agent_link::LinkListener> ui(
-        std::static_pointer_cast<agent_link::LinkListener>(
-            std::static_pointer_cast<ADBMirroringScreen>(shared_from_this())));
-    auto status_cb = [](std::string t) {
-        std::printf("mirror: %s\n", t.c_str());
-        std::fflush(stdout);
-    };
-
-    auto client = app::adb_client_shared();
-    if (client && client->state() == adb::ConnectionState::Online) {
-        launcher_ = MirrorLauncher::start(std::move(client), ui, std::move(status_cb));
-    } else {
-        std::printf("mirror: not connected\n");
-    }
 }
 
 void ADBMirroringScreen::onEnter() {
-    // Switch the DisplayManager into overlay mode: the mirror owns the
-    // framebuffers (JPEG decode), and a small LVGL display renders the opaque
-    // control bar that DM composites at flush time. The bar is a full-width strip
-    // at the bottom of the panel (no rotation, scale 1).
+    // Ensure the tab5adb-agent is connected (lazy: launched on first use, reused on
+    // re-entry). If it is already live there is no wait — start the mirror straight
+    // away; otherwise keep the "Connecting…" label up until ensure_connected's LVGL
+    // -thread callback fires.
+    if (app::agent_client().ready()) {
+        start_mirror_ui();
+        return;
+    }
+    std::weak_ptr<ADBMirroringScreen> self =
+        std::static_pointer_cast<ADBMirroringScreen>(shared_from_this());
+    app::agent_client().ensure_connected([self](bool ok) {
+        auto s = self.lock();
+        if (!s || s->exited()) return;  // navigated away while connecting
+        if (ok) {
+            s->start_mirror_ui();
+        } else if (s->waiting_label_) {
+            lv_label_set_text(static_cast<lv_obj_t*>(s->waiting_label_),
+                              "Agent connection failed");
+        }
+    });
+}
+
+void ADBMirroringScreen::start_mirror_ui() {
+    // Drop the waiting label, switch the DisplayManager into overlay mode (the
+    // mirror owns the framebuffers; a small LVGL display renders the opaque control
+    // bar DM composites at flush time), register as the link's video listener, and
+    // MIRROR_START. The bar is a full-width strip at the bottom of the panel.
+    if (waiting_label_) { lv_obj_delete(static_cast<lv_obj_t*>(waiting_label_)); waiting_label_ = nullptr; }
+
     lv_area_t rect = {0, PANEL_H - kBarH, PANEL_W - 1, PANEL_H - 1};
     lv_obj_t* bar = display_manager.enter_overlay({rect, 0, 1.0f, /*clear=*/true});
+    overlay_active_ = true;
 
     lv_obj_set_style_bg_color(bar, lv_color_hex(0x1E1E1E), 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
@@ -345,6 +140,17 @@ void ADBMirroringScreen::onEnter() {
             static_cast<ADBMirroringScreen*>(lv_timer_get_user_data(t))->poll_touch();
         },
         30, this);
+
+    // Register on the established link, then start mirroring. The video channel
+    // (on_mirror_started / on_video_strip) fires on the adb reader thread.
+    auto l = app::agent_client().link();
+    if (!l) {
+        std::printf("mirror: link gone after connect\n");
+        return;
+    }
+    l->set_video_listener(std::static_pointer_cast<agent_link::VideoListener>(
+        std::static_pointer_cast<ADBMirroringScreen>(shared_from_this())));
+    l->start_mirror();  // 720x1280 fit, video (default MirrorConfig)
 }
 
 void ADBMirroringScreen::poll_touch() {
@@ -358,10 +164,17 @@ void ADBMirroringScreen::poll_touch() {
 }
 
 void ADBMirroringScreen::onExit() {
-    // Stop both threads before the popped screen's framebuffers are reclaimed by
-    // the previous screen's re-render: producer first (no more strips), then join
-    // the decode task so it can't flush into a buffer that is being reused.
-    if (launcher_) { launcher_->stop(); launcher_.reset(); }
+    // Stop the mirror but KEEP the agent link alive for next time (the AgentClient
+    // contract): MIRROR_STOP tells the agent to stop streaming, and clearing our
+    // video listener stops any strip still in flight from reaching us. The link /
+    // agent process stay connected so re-entering this screen resumes instantly.
+    if (auto l = app::agent_client().link()) {
+        l->stop_mirror();
+        l->set_video_listener({});  // detach the producer (no more on_video_strip)
+    }
+    // Producer detached; join the decode task before the framebuffers are reclaimed
+    // by the previous screen's re-render, so it can't flush into a buffer being
+    // reused.
     if (decode_task_) {
         decode_stop_ = true;
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
@@ -371,11 +184,8 @@ void ADBMirroringScreen::onExit() {
     // overlay (restores the indev to the main display + frees the overlay display)
     // and the toggle timer. The previous screen's re-render reclaims the panel.
     if (poll_timer_) { lv_timer_delete(static_cast<lv_timer_t*>(poll_timer_)); poll_timer_ = nullptr; }
-    display_manager.exit_overlay();
+    if (overlay_active_) { display_manager.exit_overlay(); overlay_active_ = false; }
 }
-
-void ADBMirroringScreen::on_link_hello(agent_link::Link*,
-                                       const agent_link::AgentInfo&) {}
 
 void ADBMirroringScreen::on_mirror_started(agent_link::Link*,
                                            const agent_link::MirrorInfo&) {}
@@ -452,11 +262,6 @@ void ADBMirroringScreen::on_video_strip(agent_link::Link*,
         xQueueSend(static_cast<QueueHandle_t>(free_q_), &stale, 0);
     }
     xQueueSend(static_cast<QueueHandle_t>(ready_q_), &finished, 0);
-}
-
-void ADBMirroringScreen::on_link_close(agent_link::Link*, adb::Error err) {
-    std::printf("mirror: link closed (%s)\n", adb::to_string(err));
-    std::fflush(stdout);
 }
 
 void ADBMirroringScreen::decode_trampoline(void* arg) {

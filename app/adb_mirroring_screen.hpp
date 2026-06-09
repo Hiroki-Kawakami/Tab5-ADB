@@ -3,7 +3,7 @@
 #include <memory>
 
 #include "adb_app.hpp"     // PANEL_W, PANEL_H
-#include "agent_link.hpp"  // agent_link::Link, agent_link::LinkListener
+#include "agent_link.hpp"  // agent_link::Link, agent_link::VideoListener
 #include "driver/jpeg_decode.h"  // jpeg_decoder_handle_t (IDF on device, shim on host)
 #include "screen.hpp"
 
@@ -25,8 +25,13 @@
 // clickable surface) so lv_timer_handler does not touch the framebuffers; on pop,
 // the previous screen's full re-render takes them back.
 //
-// The screen IS the agent_link::LinkListener; the multi-step launch + the retry
-// until the agent is listening run on a private MirrorLauncher worker task.
+// The agent lifecycle (jar push + app_process launch + HELLO) is owned by the
+// app-global app::AgentClient, NOT this screen: on enter the screen calls
+// ensure_connected() (showing a "Connecting…" label until ready, or reusing an
+// already-live agent with no wait), then registers itself as the link's
+// agent_link::VideoListener and calls Link::start_mirror(). On exit it sends
+// Link::stop_mirror() and clears its video listener but LEAVES THE AGENT
+// CONNECTED, so re-entering the screen resumes instantly.
 //
 // Receive and decode run on SEPARATE threads so a strip's HW-JPEG decode never
 // stalls the adb reader thread (and thus the per-A_WRTE/A_OKAY flow control that
@@ -39,26 +44,25 @@
 // slot is touched by exactly one thread at a time and the producer drops whole
 // frames when the consumer falls behind (latest-frame-wins). NO LVGL widgets are
 // composited over the stream (a back button / status label would force LVGL to
-// re-blend every frame — the draw cost we avoid): navigation back is a tap on the
-// root, launch progress goes to the log.
-class MirrorLauncher;
-
-class ADBMirroringScreen : public Screen, public agent_link::LinkListener {
+// re-blend every frame — the draw cost we avoid): navigation back is the bar's
+// Back button, launch progress goes to the log.
+class ADBMirroringScreen : public Screen, public agent_link::VideoListener {
 public:
     ADBMirroringScreen();
     ~ADBMirroringScreen() override;
 
     void build() override;
-    void onEnter() override;  // enter DM overlay mode + build the control bar
-    void onExit() override;   // stop the launcher (closes the link) before destroy
+    void onEnter() override;  // ensure the agent is connected, then start the mirror
+    void onExit() override;   // stop the mirror (link kept) + tear the decode down
 
-    // agent_link::LinkListener — on_video_strip fires on the adb reader thread.
-    void on_link_hello(agent_link::Link* link, const agent_link::AgentInfo& info) override;
+    // agent_link::VideoListener — both fire on the adb reader thread.
     void on_mirror_started(agent_link::Link* link, const agent_link::MirrorInfo& info) override;
     void on_video_strip(agent_link::Link* link, const agent_link::VideoStrip& strip) override;
-    void on_link_close(agent_link::Link* link, adb::Error err) override;
 
 private:
+    // Once the agent is connected (or already live): swap the waiting label for the
+    // overlay control bar, register as the link's video listener, and MIRROR_START.
+    void start_mirror_ui();
     // The smallest strip is 16px tall, so a panel holds at most this many strips.
     static constexpr int kMaxStrips = PANEL_H / 16;
     // Frame slots in flight: the consumer holds the decoding slot AND retains the
@@ -133,5 +137,9 @@ private:
     // is no decoded-pixel scratch and the slot buffer is the compressed input.
     jpeg_decoder_handle_t jpeg_ = nullptr;
 
-    std::shared_ptr<MirrorLauncher> launcher_;
+    // LVGL thread only. The "Connecting…" label shown until the agent is ready;
+    // overlay_active_ tracks whether we entered DM overlay mode (so onExit only
+    // exits it once we actually started mirroring).
+    void* waiting_label_ = nullptr;  // lv_obj_t*
+    bool overlay_active_ = false;
 };

@@ -17,7 +17,11 @@ On each connection the server runs the protocol's **HELLO handshake** (link
 establishment only — proto / version / capability), then waits for the Tab5 to
 send **MIRROR_START** and **streams the screen as JPEG strips** (Phase 2, done):
 it captures via hidden display APIs into a fixed 720×1280 `ImageReader` and streams
-horizontal-strip → JPEG (YUV420 q60). The **rotate → scale → black letterbox**
+horizontal-strip → JPEG (YUV420 q60). A **dedicated control-reader thread** reads
+inbound frames concurrently with the JPEG send loop, so a Tab5 **MIRROR_STOP** stops
+the stream and returns the agent to READY **without closing the socket** — a later
+MIRROR_START resumes on the same link (this is what lets the Tab5 keep the agent
+connected while leaving the mirror feature). The **rotate → scale → black letterbox**
 geometry is GPU-offloaded — `ScreenCapture` tries the static hidden
 `DisplayManager.createVirtualDisplay` first (mirrors display 0 into the panel-sized
 reader, aspect-fit; the path that works on **Android 14/15** where
@@ -32,7 +36,7 @@ driven). Verified against a real Android device by the Tab5-side harnesses `test
 the host-JVM `test/ProjectionTest` for the projection math.
 
 The wire protocol — single-socket framing, the agent-initiated HELLO (link-only)
-handshake, the Tab5-initiated MIRROR_START, and the JPEG strip stream (audio
+handshake, the Tab5-initiated MIRROR_START / MIRROR_STOP, and the JPEG strip stream (audio
 reserved) — is specified in [`docs/protocol.md`](docs/protocol.md); that doc is
 the contract between the agent and the Tab5 side (`embedded_adb`/`adb` + the
 `agent_link` component).

@@ -70,14 +70,18 @@ nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'
 1. connect → `Sync::push` jar → `open_shell` で agent を **`--test-pattern` 付き**起動（決定的な
    `TestPattern`＝グリッド＋上向き矢印＋四隅カラーブロック。実画面 capture は介さず、パイプライン/
    framing/受信/デコードを検証）。
-2. `on_link_hello`（READY）で `Link::start_mirror()` → `MIRROR_START` 往復、`on_mirror_started` で
-   ソース寸法を受領。
+2. `on_link_hello`（READY、`LinkLifecycleListener`）後、メインフローで
+   `Link::set_video_listener()`（`VideoListener` 登録）→ `Link::start_mirror()` →
+   `MIRROR_START` 往復、`on_mirror_started` でソース寸法を受領（app と同じ手順 — 機能は
+   `on_link_hello` の中ではなく確立後に attach + start する）。
 3. `on_video_strip` ごとに **構造アサート**: 16 整列 / パネル内 / libjpeg でデコード成功 /
    デコード寸法＝サブヘッダ `w×h`。**フレーム単位のタイリング**: `FRAME_START..FRAME_END` 間で
    `SPLIT_COUNT`(=4) 本・`x`/`w` 一定・`y` 連続・Σ`h`＝画像高。
 4. ストリップを 720×1280 のメモリ FB に合成（app の bsp FB＋P4 HW JPEG seam の host 版＝libjpeg＋
    メモリ）し、1 フレームを `build/mirror_frame.ppm`（runner の cwd 基準＝リポジトリルート）に書き出す
    （回転 / fit 配置の目視用）。
+5. `Link::stop_mirror()` → `MIRROR_START` を再送し、**同じリンク上で**ストリームが止まって再開する
+   ことを確認（`AgentClient` の「リンク維持・機能だけ停止」フロー）。
 
 **合否**: `MIRROR_START` 受理 ＋ クリーンなフレーム ≥3 ＋ `bad_strips==0` ＋ `Link` の `on_link_close`
 が exactly-once。実機で検証済み（fit: 1080×2160 → 640×1280 レターボックス）。
