@@ -352,9 +352,20 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   phone's 512-byte high-speed bulk endpoints fails with `interface_claim →
   ESP_ERR_NOT_SUPPORTED`. ADB is bulk-only, so we set `usb_host_config_t`'s
   `fifo_settings_custom` to rx=256 / nptx=256 / ptx=0 lines (MPS limits ~1016 /
-  1024; P4 DFIFO is 1024 lines, sum must be ≤ that). On device, advertise a modest
-  CNXN maxdata (16 KB) so the usb_host transport's per-payload DMA allocations stay
-  small.
+  1024; the usable P4 DFIFO is <1024 lines once the host request queues are
+  reserved, so the sum can't be raised much). On device, advertise a modest CNXN
+  maxdata (16 KB) so the usb_host transport's per-payload DMA allocations stay
+  small. **Second gotcha (cost a long mirror-stability hunt):** a *single large*
+  bulk-IN transfer on the P4 usb_host **intermittently corrupts a payload byte**
+  (same length, wrong content; the failure rate climbs sharply with size — ~6 KB
+  reads were always clean, ~10 KB reads failed often). Not the FIFO (corruption,
+  not loss), not cache (the IDF M2C-invalidates IN buffers), not the wire (USB CRC
+  retransmits) — a DWC2 large-transfer quirk. `read_packet()` therefore reads each
+  payload in **≤4 KB chunks** (bulk IN is a byte stream, so one device bulk-write
+  splits cleanly across several host transfers); small transfers stay under the
+  corruption threshold. This was the real cause of the mirror's sporadic JPEG decode
+  errors — confirmed by an agent-side TX hash vs Tab5-side RX hash mismatch on
+  same-length frames.
 - `adb_connection` / `adb_stream` — CNXN handshake + AUTH state machine, and
   `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing (`open_stream()` + `run_service()`
   for one-shot commands, classic per-OKAY flow control). The packet read loop is
@@ -566,6 +577,14 @@ written exactly once** (no extra PSRAM-bandwidth blit). The stock per-call cache
 sync (`decoded_buf`, `size = w*h*2`) is naturally aligned (`strip.y` and `h` are
 16px multiples). Verified end-to-end in the simulator (and the headless
 `test_mirror`) against a real Android device.
+
+Two robustness measures live alongside the decode: `frame_ok_` drops any frame a
+strip fails to decode (don't present a half-updated buffer), and
+`jpeg_fullrange_decode_p4.c`'s error path soft-resets the JPEG FSM before
+`dma2d_force_end()` so a decode error can't leave the DMA2D RX ISR to panic on a
+non-idle FSM. (These mattered during a long mirror-stability hunt whose real cause
+turned out to be the **usb_host transport corrupting large bulk-IN payloads** — see
+the `embedded_adb` transport note; once that was fixed the decode errors vanished.)
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 

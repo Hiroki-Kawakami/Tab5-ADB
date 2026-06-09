@@ -497,6 +497,13 @@ esp_err_t jpeg_decoder_process_full_range(
     return ESP_OK;
 
 err1:
+    // A decode error (malformed/HW-unfriendly frame) leaves the JPEG FSM stuck
+    // mid-frame. Soft-reset the JPEG peripheral BEFORE ending the DMA so the RX
+    // channel can go idle — otherwise the DMA's late RX-EOF ISR asserts
+    // dma2d_ll_rx_is_fsm_idle() and panics the whole device. The stock IDF flow
+    // only force_end()s here, which is enough for clean inputs but not when frames
+    // actually error (e.g. an Android Bitmap.compress strip the HW chokes on).
+    jpeg_ll_soft_rst(decoder_engine->codec_base->hal.dev);
     dma2d_force_end(decoder_engine->trans_desc, &need_yield);
 err2:
     xSemaphoreGive(decoder_engine->codec_base->codec_mutex);

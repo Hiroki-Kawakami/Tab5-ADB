@@ -54,6 +54,7 @@ private:
 
     uint16_t* fb_[2] = {nullptr, nullptr};  // the two bsp framebuffers (not owned)
     int back_ = 0;                          // index the reader decodes into
+    bool frame_ok_ = true;                  // all strips of the current frame decoded
 
     // JPEG decode (reader thread only) — the device/host-shared seam
     // (jpeg_fullrange_decode); strips land straight in the framebuffer, so there

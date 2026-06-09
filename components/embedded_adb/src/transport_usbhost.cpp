@@ -103,9 +103,11 @@ bool UsbHostTransport::open() {
     // The default (BALANCED) FIFO bias gives the non-periodic TX FIFO only
     // dfifo_depth/16 lines → a bulk OUT MPS limit of 256, which rejects an
     // Android device's 512-byte high-speed bulk endpoints (interface_claim
-    // returns ESP_ERR_NOT_SUPPORTED). ADB is bulk-only, so give RX (IN) and
-    // NPTX (bulk OUT) 256 lines each (MPS limits ~1016 / 1024) and none to the
-    // periodic TX FIFO. (P4 DFIFO = 1024 lines; valid as long as the sum ≤ 1024.)
+    // returns ESP_ERR_NOT_SUPPORTED). ADB is bulk-only, so we set RX (IN) and
+    // NPTX (bulk OUT) to 256 lines each (MPS limits ~1016 / 1024); the periodic
+    // TX FIFO is unused. (The HW FIFO RAM is < 1024 lines once the host request
+    // queues are reserved, so larger sums fail validation — see the cache note in
+    // read_packet for the actual large-IN corruption fix.)
     host_cfg.fifo_settings_custom.rx_fifo_lines = 256;
     host_cfg.fifo_settings_custom.nptx_fifo_lines = 256;
     host_cfg.fifo_settings_custom.ptx_fifo_lines = 0;
@@ -259,18 +261,29 @@ IoResult UsbHostTransport::read_packet(Packet& p) {
 
     uint32_t len = p.header.data_length;
     p.payload.resize(len);
-    if (len > 0) {
+    // Read the payload in <=4 KiB chunks. A single large bulk-IN transfer on the
+    // P4 usb_host intermittently corrupts a payload byte (same length, wrong
+    // content — confirmed by a TX/RX hash mismatch), and the failure rate rises
+    // sharply with transfer size (≈6 KiB strips were always clean, ≈10 KiB strips
+    // failed often). Splitting into small transfers — each well under that
+    // threshold — sidesteps it. Bulk IN is a byte stream, so reading one device
+    // bulk-write across several host transfers is fine.
+    constexpr size_t kChunk = 4096;
+    size_t off = 0;
+    while (off < len) {
+        size_t want = len - off < kChunk ? len - off : kChunk;
         usb_transfer_t* xf = nullptr;
-        if (usb_host_transfer_alloc(round_up(len, mps_in_), 0, &xf) != ESP_OK) {
+        if (usb_host_transfer_alloc(round_up(want, mps_in_), 0, &xf) != ESP_OK) {
             return IoResult::Error;
         }
-        bool ok = submit_in(xf, len) &&
+        bool ok = submit_in(xf, want) &&
                   xSemaphoreTake(in_sem_, portMAX_DELAY) == pdTRUE &&
                   xf->status == USB_TRANSFER_STATUS_COMPLETED &&
-                  xf->actual_num_bytes >= static_cast<int>(len);
-        if (ok) std::memcpy(p.payload.data(), xf->data_buffer, len);
+                  xf->actual_num_bytes >= static_cast<int>(want);
+        if (ok) std::memcpy(p.payload.data() + off, xf->data_buffer, want);
         usb_host_transfer_free(xf);
         if (!ok) return IoResult::Error;
+        off += want;
     }
     return IoResult::Ok;
 }

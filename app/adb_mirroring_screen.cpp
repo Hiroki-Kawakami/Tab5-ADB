@@ -306,10 +306,17 @@ void ADBMirroringScreen::on_video_strip(agent_link::Link*,
     // no LVGL involvement.
     uint16_t* dst = fb_[back_];
     if (!dst) return;
-    decode_strip(strip, dst);
+    if (strip.frame_start) frame_ok_ = true;
+    if (!decode_strip(strip, dst)) frame_ok_ = false;  // a strip failed to decode
     if (!strip.frame_end) return;
-    bsp_display_flush(back_);
-    back_ ^= 1;
+    // Only present a fully-decoded frame: a HW JPEG decode error would otherwise
+    // flush a half-updated buffer (the back buffer also still holds an older
+    // frame's pixels where this one's strips didn't land). Drop it and keep showing
+    // the last good frame instead.
+    if (frame_ok_) {
+        bsp_display_flush(back_);
+        back_ ^= 1;
+    }
 }
 
 void ADBMirroringScreen::on_link_close(agent_link::Link*, adb::Error err) {
@@ -362,11 +369,11 @@ bool ADBMirroringScreen::decode_strip(const agent_link::VideoStrip& s, uint16_t*
     dcfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
     dcfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
     uint16_t* out = dst + (size_t)s.y * PANEL_W;  // s.x == 0
+    uint32_t outbuf = (uint32_t)((size_t)s.w * s.h * 2);
     uint32_t out_size = 0;
     return jpeg_decoder_process_full_range(
                jpeg_, &dcfg, in_buf_, (uint32_t)s.jpeg_len,
-               reinterpret_cast<uint8_t*>(out), (uint32_t)((size_t)s.w * s.h * 2),
-               &out_size) == ESP_OK;
+               reinterpret_cast<uint8_t*>(out), outbuf, &out_size) == ESP_OK;
 }
 
 void ADBMirroringScreen::free_decoder() {
