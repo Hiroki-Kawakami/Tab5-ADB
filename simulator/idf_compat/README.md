@@ -15,10 +15,12 @@ straight into the `simulator` executable (one binary → no separate library).
 idf_compat/
   include/            shim headers (what shared code #includes)
     esp_err.h esp_log.h esp_check.h esp_timer.h esp_heap_caps.h nvs.h nvs_flash.h
+    driver/           jpeg_decode.h ppa.h
+    hal/              ppa_types.h color_types.h dma2d_types.h  (PPA type headers)
     freertos/         host FreeRTOS API: FreeRTOS.h task.h queue.h semphr.h
                       event_groups.h timers.h portmacro.h
   src/                shim implementations
-    esp_err.c esp_timer.c esp_heap_caps.c nvs.c
+    esp_err.c esp_timer.c esp_heap_caps.c nvs.c jpeg_decode.c ppa.c
     freertos_port.c freertos_task.c freertos_queue.c
     freertos_event_groups.c freertos_timers.c
     freertos_internal.h   (shared helpers; not part of the public API)
@@ -33,6 +35,8 @@ nothing is vendored. The same philosophy throughout: reimplement the API
 - ESP-IDF APIs: `esp_err`, `esp_log`, `esp_check`, `esp_timer`, `esp_heap_caps`,
   and a JSON-backed `nvs` / `nvs_flash`.
 - The FreeRTOS API (`freertos/*.h`) on native pthreads — see below.
+- `driver/jpeg_decode` — IDF JPEG decode engine API, backed by libjpeg.
+- `driver/ppa` — IDF PPA (Pixel-Processing Accelerator) API, a CPU impl — see below.
 
 ## Layout rule (how to add a new shim)
 
@@ -53,6 +57,25 @@ host binary, component splits like esp_common / nvs_flash are invisible):
 `nvs_data.json` in the cwd; override with the sim-only `nvs_flash_sim_set_path()`
 before the first open). Shared code calls the C API directly — there is no C++
 wrapper. Fidelity notes are at the top of `src/nvs.c`.
+
+## PPA (Pixel-Processing Accelerator)
+
+`driver/ppa.h` + `hal/ppa_types.h` + `hal/color_types.h` (+ a minimal
+`hal/dma2d_types.h`) mirror the ESP-IDF PPA API; `src/ppa.c` runs the operations
+in plain C on the CPU so app code that offloads scale/rotate/mirror, blend and
+fill to the P4 PPA HW can be developed on the desktop and previewed in the
+simulator. The header struct/enum surface is kept in sync with the device (the
+color-mode ids are the same `COLOR_TYPE_ID`-derived values), so app code is
+source-portable across both targets.
+
+Supported: ARGB8888 / RGB888 / RGB565 (the RGB display formats) for SRM in/out,
+blend bg/fg/out and fill out, plus A8 / A4 blend foreground. **Not** implemented
+(return `ESP_ERR_NOT_SUPPORTED` / log): YUV420 / YUV444 color modes and blend
+color-keying. SRM scaling is bilinear (anti-aliased, like the HW) and rotation
+is counter-clockwise (`PPA_SRM_ROTATION_ANGLE_*`). All ops run synchronously
+regardless of `PPA_TRANS_MODE_*`, firing `on_trans_done` inline; burst length /
+pending-transaction count / buffer alignment are accepted and ignored. Full
+fidelity notes are at the top of `src/ppa.c`.
 
 ## FreeRTOS API (host, on pthreads)
 

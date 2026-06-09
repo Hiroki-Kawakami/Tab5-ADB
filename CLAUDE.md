@@ -860,6 +860,14 @@ mode / per-screen verify scripts as the UI grows.
     **full-range**, which is what the device's `jpeg_fullrange_decode` reproduces
     (see that component). pkg `libjpeg` links to the `simulator` exe in
     `simulator/CMakeLists.txt`.
+  - `driver/ppa` — the IDF PPA (Pixel-Processing Accelerator) API
+    (`ppa_register_client`/`ppa_do_scale_rotate_mirror`/`ppa_do_blend`/
+    `ppa_do_fill` + `hal/ppa_types.h`, `hal/color_types.h`), a **CPU software
+    impl** (`src/ppa.c`) so app code that offloads scale/rotate/mirror/blend/fill
+    to the P4 PPA HW previews in the sim. Supports the RGB display modes
+    (ARGB8888/RGB888/RGB565, + A8/A4 blend fg); YUV420/444 and blend color-keying
+    return `ESP_ERR_NOT_SUPPORTED`. Bilinear (anti-aliased) scale, CCW rotation,
+    ops run synchronously (any `PPA_TRANS_MODE_*`). Header surface mirrors IDF verbatim.
   - `freertos` — pthread-backed FreeRTOS API: tasks, delays, queues, semaphores
     (binary/counting/mutex/recursive), event groups, task notifications, software
     timers, critical sections (`include/freertos/*.h` + `src/freertos_*.c`).

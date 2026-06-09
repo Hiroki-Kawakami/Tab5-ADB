@@ -14,6 +14,7 @@ idf_component_register(
         "src/esp_heap_caps.c"
         "src/nvs.c"
         "src/jpeg_decode.c"   # IDF JPEG decode engine API, backed by libjpeg
+        "src/ppa.c"           # IDF PPA (scale/rotate/mirror/blend/fill), CPU impl
         # host FreeRTOS API on pthreads
         "src/freertos_port.c"
         "src/freertos_task.c"
