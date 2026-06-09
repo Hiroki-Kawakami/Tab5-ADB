@@ -53,9 +53,12 @@ public final class Server {
     // Mirror stream defaults (§5.1).
     private static final int SPLIT_COUNT = 4;
     private static final int JPEG_QUALITY = 60;
-    // 0 = no artificial pacing: stream as fast as the capture + pipeline produce
-    // frames (the encoder/capture rate is the cap). Set >0 to throttle.
-    private static final int TARGET_FPS = 0;
+    // Upper FPS bound: the Tab5 panel tops out at 60fps, so cap the stream there so
+    // a high-refresh source (e.g. a 120Hz phone) can't push frames the panel can't
+    // show. The pacing only applies to frames actually sent (a static screen yields
+    // no new capture frame, so nothing is paced/sent). 0 = no cap (encoder/capture
+    // rate is the only limit).
+    private static final int TARGET_FPS = 60;
 
     private final boolean testPattern;
     private final int testW;
