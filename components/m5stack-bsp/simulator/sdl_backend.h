@@ -40,6 +40,13 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
                              bsp_display_t **out_display,
                              bsp_touch_t **out_touch);
 
+/* Present the most recently flushed framebuffer to the SDL window. Call from the
+ * MAIN thread once per loop iteration: display flushes (which may come from a
+ * background thread, e.g. the mirror decode task) only mark the frame dirty, so
+ * the actual SDL/Cocoa render must happen here on the main thread. No-op when
+ * headless or when nothing has been flushed since the last present. */
+void sdl_backend_present(void);
+
 /* Inject a synthetic touch for the sim harness (headless mode only — there is
  * no mouse). Coordinates are panel pixels. _down presses/holds (call again with
  * new coords to drag); _up releases. touch_read reports the injected pointer

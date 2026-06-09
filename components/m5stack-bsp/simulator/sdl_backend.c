@@ -42,6 +42,9 @@ static void    *s_fb_ptrs[2];
  * completed frame so a snapshot reads the right one. */
 static bool s_headless;
 static int  s_last_flushed;
+/* Set by display_flush (any thread); the actual SDL render is deferred to
+ * sdl_backend_present() on the main thread. */
+static bool s_dirty;
 
 /* Synthetic touch for the sim harness. In headless mode there is no mouse, so
  * touch_read reports this injected pointer instead. State is touched only from
@@ -103,13 +106,14 @@ static void **display_get_framebuffers(bsp_display_t *self) {
     return s_fb_ptrs;
 }
 
+/* Record the latest completed frame and mark it for presentation. The actual SDL
+ * render is deferred to sdl_backend_present() on the MAIN thread, because SDL /
+ * Cocoa rendering is main-thread-only on macOS — a background producer (e.g. the
+ * mirror decode task) must be able to flush without touching SDL. */
 static esp_err_t display_flush(bsp_display_t *self, int fb_index) {
     (void)self;
     s_last_flushed = fb_index & 1;   /* recorded even headless, for snapshots */
-    if (!s_texture) return s_headless ? ESP_OK : ESP_ERR_INVALID_STATE;
-    SDL_UpdateTexture(s_texture, NULL, s_fb[fb_index & 1], s_panel_w * (int)s_bpp);
-    SDL_RenderCopy(s_renderer, s_texture, NULL, NULL);
-    SDL_RenderPresent(s_renderer);
+    s_dirty = true;
     return ESP_OK;
 }
 
@@ -230,6 +234,14 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
     *out_display = &s_display;
     *out_touch = &s_touch;
     return ESP_OK;
+}
+
+void sdl_backend_present(void) {
+    if (s_headless || !s_texture || !s_dirty) return;
+    s_dirty = false;
+    SDL_UpdateTexture(s_texture, NULL, s_fb[s_last_flushed & 1], s_panel_w * (int)s_bpp);
+    SDL_RenderCopy(s_renderer, s_texture, NULL, NULL);
+    SDL_RenderPresent(s_renderer);
 }
 
 void sdl_backend_inject_down(int x, int y) {

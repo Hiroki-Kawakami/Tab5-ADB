@@ -254,6 +254,10 @@ ADBMirroringScreen::~ADBMirroringScreen() {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
         decode_task_ = nullptr;
     }
+    // Idempotent with onExit (which normally runs first on pop): drop the toggle
+    // timer + overlay mode if they somehow survived.
+    if (poll_timer_) { lv_timer_delete(static_cast<lv_timer_t*>(poll_timer_)); poll_timer_ = nullptr; }
+    display_manager.exit_overlay();
     if (decode_done_) { vSemaphoreDelete(static_cast<SemaphoreHandle_t>(decode_done_)); decode_done_ = nullptr; }
     if (ready_q_) { vQueueDelete(static_cast<QueueHandle_t>(ready_q_)); ready_q_ = nullptr; }
     if (free_q_) { vQueueDelete(static_cast<QueueHandle_t>(free_q_)); free_q_ = nullptr; }
@@ -262,26 +266,20 @@ ADBMirroringScreen::~ADBMirroringScreen() {
 }
 
 void ADBMirroringScreen::build() {
-    // The LVGL root stays a static black, clickable surface — no widgets are
-    // composited over the stream, and nothing invalidates it after build, so LVGL
-    // leaves the framebuffers alone while the mirror owns them. A tap pops back.
+    // The LVGL root on the MAIN display stays a static black surface — it renders
+    // once at load then never invalidates, so the main display leaves the
+    // framebuffers alone while the mirror owns them (the video and, in overlay
+    // mode, the control bar are composited by the DisplayManager instead). It is
+    // not clickable: navigation is the bar's Back button (set up in onEnter).
     lv_obj_set_size(root_, PANEL_W, PANEL_H);
     lv_obj_set_style_bg_color(root_, lv_color_black(), 0);
     lv_obj_set_style_pad_all(root_, 0, 0);
-    lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_fn(root_, LV_EVENT_CLICKED,
-                        [](lv_event_t*) { screen_manager.pop(); });
 
-    // Grab the two bsp framebuffers (we decode strips straight into them) and
-    // present black until the first frame. The flush pushes the cleared buffers to
-    // the panel (and, on device, to PSRAM) so the letterbox stays black — strips
-    // never touch those pixels again.
+    // Grab the two bsp framebuffers (we decode strips straight into them). They are
+    // cleared to black in onEnter via enter_overlay(clear_framebuffers) — once the
+    // main display is isolated from them — so the pre-stream / letterbox stays black.
     fb_[0] = static_cast<uint16_t*>(display_manager.framebuffer(0));
     fb_[1] = static_cast<uint16_t*>(display_manager.framebuffer(1));
-    for (int i = 0; i < 2; ++i) {
-        if (fb_[i]) std::memset(fb_[i], 0, (size_t)PANEL_W * PANEL_H * 2);
-        display_manager.flush(i);
-    }
     back_ = 0;
 
     // Receive/decode split: the reader thread fills frame slots (free_q_) and the
@@ -314,6 +312,50 @@ void ADBMirroringScreen::build() {
     }
 }
 
+void ADBMirroringScreen::onEnter() {
+    // Switch the DisplayManager into overlay mode: the mirror owns the
+    // framebuffers (JPEG decode), and a small LVGL display renders the opaque
+    // control bar that DM composites at flush time. The bar is a full-width strip
+    // at the bottom of the panel (no rotation, scale 1).
+    lv_area_t rect = {0, PANEL_H - kBarH, PANEL_W - 1, PANEL_H - 1};
+    lv_obj_t* bar = display_manager.enter_overlay({rect, 0, 1.0f, /*clear=*/true});
+
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x1E1E1E), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(bar, 16, 0);
+    lv_obj_t* back = lv_button_create(bar);
+    lv_obj_set_height(back, kBarH - 32);
+    lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t* lbl = lv_label_create(back);
+    lv_label_set_text(lbl, LV_SYMBOL_LEFT "  Back");
+    lv_obj_center(lbl);
+    // Defer the pop: it runs onExit -> exit_overlay, which deletes this overlay
+    // display (and this button) — don't tear it down from inside its own event.
+    lv_obj_add_event_fn(back, LV_EVENT_CLICKED,
+                        [](lv_event_t*) { lv_async_call([] { screen_manager.pop(); }); });
+
+    display_manager.set_overlay_visible(true);
+
+    // Poll the raw panel touch on the LVGL thread to toggle the bar when the user
+    // taps the video area (outside the bar). touch_point + the indev read both run
+    // on the LVGL thread, so the cached state is consistent.
+    poll_timer_ = lv_timer_create(
+        [](lv_timer_t* t) {
+            static_cast<ADBMirroringScreen*>(lv_timer_get_user_data(t))->poll_touch();
+        },
+        30, this);
+}
+
+void ADBMirroringScreen::poll_touch() {
+    bsp_touch_point_t p;
+    bool pressed = display_manager.touch_point(&p);
+    if (pressed && !touch_prev_) {
+        bool in_bar = (p.y >= PANEL_H - kBarH);  // full-width bottom strip
+        if (!in_bar) display_manager.set_overlay_visible(!display_manager.overlay_visible());
+    }
+    touch_prev_ = pressed;
+}
+
 void ADBMirroringScreen::onExit() {
     // Stop both threads before the popped screen's framebuffers are reclaimed by
     // the previous screen's re-render: producer first (no more strips), then join
@@ -324,6 +366,11 @@ void ADBMirroringScreen::onExit() {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
         decode_task_ = nullptr;
     }
+    // Both threads are stopped, so no DM.flush can race the teardown: drop the
+    // overlay (restores the indev to the main display + frees the overlay display)
+    // and the toggle timer. The previous screen's re-render reclaims the panel.
+    if (poll_timer_) { lv_timer_delete(static_cast<lv_timer_t*>(poll_timer_)); poll_timer_ = nullptr; }
+    display_manager.exit_overlay();
 }
 
 void ADBMirroringScreen::on_link_hello(agent_link::Link*,
@@ -417,34 +464,74 @@ void ADBMirroringScreen::decode_trampoline(void* arg) {
 
 void ADBMirroringScreen::decode_loop() {
     // Consumer: drain finished frames, HW-decode each strip straight into the back
-    // framebuffer, present it, and recycle the slot. The decode task owns fb_/back_
-    // exclusively, so the double buffer needs no lock: decode into the back buffer,
-    // flush it, swap — the displayed buffer is never mid-write (tear-free), and LVGL
-    // is not involved.
+    // framebuffer, and present it via DisplayManager.flush() — which composites the
+    // overlay bar (if visible) before presenting. The decode task owns fb_/back_
+    // exclusively (DM.flush takes the LVGL lock only for the compose), so the double
+    // buffer needs no lock of its own.
+    //
+    // The last decoded frame is RETAINED (held) instead of recycled immediately: it
+    // is re-decoded to erase the bar when the overlay is hidden while the video is
+    // static (no new frame arrives to repaint the band the bar covered) — the
+    // Tab5-Screen-Streamer reveal trick.
+    int  held = -1;          // last decoded slot, kept out of free_q_ for re-decode
+    bool last_visible = false;  // overlay state of the last presented frame
+
+    auto decode_all = [&](int slot, uint16_t* dst) -> bool {
+        FrameSlot& f = slots_[slot];
+        if (!dst) return false;
+        for (int i = 0; i < f.strip_count; ++i) {
+            const StripDesc& d = f.strips[i];
+            if (!decode_one(f.buf + d.off, d.len, d.y, d.h, dst)) return false;
+        }
+        return true;
+    };
+
     while (!decode_stop_) {
         int slot;
-        if (xQueueReceive(static_cast<QueueHandle_t>(ready_q_), &slot,
-                          pdMS_TO_TICKS(100)) != pdTRUE) {
-            continue;  // idle (static screen → no new frames) — re-check stop
+        bool got = xQueueReceive(static_cast<QueueHandle_t>(ready_q_), &slot,
+                                 pdMS_TO_TICKS(100)) == pdTRUE;
+        bool visible = display_manager.overlay_visible();
+
+        if (!got) {
+            // No new frame within the timeout (static screen, or stream stalled).
+            if (last_visible && !visible && held >= 0) {
+                // Bar just hidden over a static frame: re-decode the last frame so
+                // the band it covered shows the video again (flush won't compose).
+                if (decode_all(held, fb_[back_])) {
+                    display_manager.flush(back_);
+                    back_ ^= 1;
+                }
+                last_visible = false;
+            } else if (visible) {
+                // Bar up with no fresh video: recomposite it onto the displayed
+                // buffer in place (no swap) so it stays responsive (e.g. on show).
+                display_manager.flush(back_ ^ 1);
+                last_visible = true;
+            }
+            continue;  // re-check stop
         }
+
         FrameSlot& f = slots_[slot];
-        uint16_t* dst = fb_[back_];
-        bool ok = dst != nullptr;
-        for (int i = 0; ok && i < f.strip_count; ++i) {
-            const StripDesc& d = f.strips[i];
-            if (!decode_one(f.buf + d.off, d.len, d.y, d.h, dst)) ok = false;
-        }
         // Present only a fully-decoded frame: a HW JPEG decode error would otherwise
         // flush a half-updated buffer (the back buffer also still holds an older
         // frame's pixels). Drop it and keep showing the last good frame instead.
+        bool ok = decode_all(slot, fb_[back_]);
         if (ok) {
-            display_manager.flush(back_);
+            display_manager.flush(back_);  // composites the bar if visible
             back_ ^= 1;
+            last_visible = visible;
             ++stats_frames_;
         }
         stats_strips_ += f.strip_count;
         stats_bytes_ += f.bytes;
-        xQueueSend(static_cast<QueueHandle_t>(free_q_), &slot, 0);  // recycle the slot
+        // On success retain this frame for the reveal-on-hide path (recycling the
+        // previous one); on a decode error drop it and keep the last good held.
+        if (ok) {
+            if (held >= 0) xQueueSend(static_cast<QueueHandle_t>(free_q_), &held, 0);
+            held = slot;
+        } else {
+            xQueueSend(static_cast<QueueHandle_t>(free_q_), &slot, 0);
+        }
 
         // Log throughput roughly once per second (decode task).
         int64_t now = esp_timer_get_time();

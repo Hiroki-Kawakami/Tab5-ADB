@@ -48,7 +48,8 @@ public:
     ~ADBMirroringScreen() override;
 
     void build() override;
-    void onExit() override;  // stop the launcher (closes the link) before destroy
+    void onEnter() override;  // enter DM overlay mode + build the control bar
+    void onExit() override;   // stop the launcher (closes the link) before destroy
 
     // agent_link::LinkListener — on_video_strip fires on the adb reader thread.
     void on_link_hello(agent_link::Link* link, const agent_link::AgentInfo& info) override;
@@ -59,10 +60,13 @@ public:
 private:
     // The smallest strip is 16px tall, so a panel holds at most this many strips.
     static constexpr int kMaxStrips = PANEL_H / 16;
-    // Frame slots in flight: consumer holds one (decoding), producer holds one
-    // (filling), ready_q_ holds at most one — plus one of headroom so a steady
-    // stream never drops spuriously.
-    static constexpr int kSlots = 4;
+    // Frame slots in flight: the consumer holds the decoding slot AND retains the
+    // last decoded frame (to re-decode and erase the bar when the overlay is
+    // hidden over static video), the producer holds the filling one, and ready_q_
+    // holds at most one — plus headroom so a steady stream never drops spuriously.
+    static constexpr int kSlots = 5;
+    // Opaque control bar: a full-width strip across the bottom of the panel.
+    static constexpr int kBarH = 96;
 
     // One received frame: its strips' JPEG bytes concatenated in `buf` (PSRAM,
     // grown lazily) plus a descriptor per strip. The reader thread fills it; the
@@ -88,9 +92,15 @@ private:
     bool decode_one(uint8_t* jpeg, uint32_t len, uint16_t y, uint16_t h,
                     uint16_t* dst);
     void free_decoder();
+    // LVGL-thread lv_timer callback: poll the raw touch and toggle the overlay
+    // bar when the video area (outside the bar) is tapped.
+    void poll_touch();
 
     uint16_t* fb_[2] = {nullptr, nullptr};  // the two bsp framebuffers (not owned)
     int back_ = 0;                          // index the decode task draws into
+
+    void* poll_timer_ = nullptr;  // lv_timer_t* (LVGL thread): bar show/hide toggle
+    bool  touch_prev_ = false;    // previous press state, for tap-edge detection
 
     FrameSlot slots_[kSlots];
     void* free_q_ = nullptr;   // QueueHandle_t<int>: slot indices the producer may fill

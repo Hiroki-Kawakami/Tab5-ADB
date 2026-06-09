@@ -27,18 +27,25 @@ void DisplayManager::init() {
                                        : LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(main_disp_, fb0, fb1, PANEL_W * PANEL_H * bpp,
                            LV_DISPLAY_RENDER_MODE_DIRECT);
-    lv_display_set_flush_cb(main_disp_, [](lv_display_t *disp, const lv_area_t *area,
-                                           uint8_t *px_map) {
-        // Map the rendered buffer back to its BSP frame-buffer index.
-        int fb_index = (px_map == bsp_display_get_frame_buffer(1)) ? 1 : 0;
-        bsp_display_flush(fb_index);
-        lv_display_flush_ready(disp);
-    });
+    lv_display_set_flush_cb(main_disp_, &DisplayManager::main_flush_cb);
 
     indev_ = lv_indev_create();
     lv_indev_set_type(indev_, LV_INDEV_TYPE_POINTER);
     lv_indev_set_user_data(indev_, this);
     lv_indev_set_read_cb(indev_, &DisplayManager::indev_read_cb);
+}
+
+void DisplayManager::main_flush_cb(lv_display_t *disp, const lv_area_t * /*area*/,
+                                   uint8_t *px_map) {
+    // In overlay mode the main display renders into a scratch buffer and the mirror
+    // owns the panel framebuffers, so don't present anything here.
+    if (display_manager.mode_ == Mode::Overlay) {
+        lv_display_flush_ready(disp);
+        return;
+    }
+    int fb_index = (px_map == bsp_display_get_frame_buffer(1)) ? 1 : 0;
+    bsp_display_flush(fb_index);
+    lv_display_flush_ready(disp);
 }
 
 void DisplayManager::indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
@@ -48,30 +55,44 @@ void DisplayManager::indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     self->touch_pressed_ = pressed;
     if (pressed) self->touch_ = point;  // raw panel coords, cached for touch_point()
 
-    if (!pressed) {
-        data->state = LV_INDEV_STATE_RELEASED;
+    if (self->mode_ == Mode::Overlay) {
+        // The indev is routed to the small overlay display, so the reported point
+        // must stay within its (content) resolution — LVGL retains the last point
+        // across reads and warns if a stale panel-space Y exceeds the display
+        // height. Feed a press only when the bar is visible and the touch lands
+        // inside the footprint; otherwise report RELEASED but still clamp the point
+        // into content range (preserving the press location so a Back-button click
+        // — press inside, release on lift — still registers). Taps elsewhere are
+        // the screen's to handle via touch_point.
+        if (pressed) {
+            int lx, ly;
+            self->panel_to_content(point.x, point.y, &lx, &ly);  // clamped to content
+            data->point.x = lx;
+            data->point.y = ly;
+            bool inside = self->overlay_visible_ &&
+                          point.x >= self->overlay_rect_.x1 && point.x <= self->overlay_rect_.x2 &&
+                          point.y >= self->overlay_rect_.y1 && point.y <= self->overlay_rect_.y2;
+            data->state = inside ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+        } else {
+            // Clamp the retained point into range (covers a stale panel point left
+            // from the normal->overlay transition); keep it otherwise so a button
+            // release lands where the press was.
+            if (data->point.x > self->content_w_ - 1) data->point.x = self->content_w_ - 1;
+            if (data->point.y > self->content_h_ - 1) data->point.y = self->content_h_ - 1;
+            if (data->point.x < 0) data->point.x = 0;
+            if (data->point.y < 0) data->point.y = 0;
+            data->state = LV_INDEV_STATE_RELEASED;
+        }
         return;
     }
-    if (self->mode_ == Mode::Overlay) {
-        // The indev is routed to the overlay display in overlay mode. Only feed it
-        // when the bar is visible and the touch lands inside the footprint — taps
-        // elsewhere (and while hidden) are the screen's to handle via touch_point.
-        bool inside = self->overlay_visible_ &&
-                      point.x >= self->overlay_rect_.x1 && point.x <= self->overlay_rect_.x2 &&
-                      point.y >= self->overlay_rect_.y1 && point.y <= self->overlay_rect_.y2;
-        if (!inside) {
-            data->state = LV_INDEV_STATE_RELEASED;
-            return;
-        }
-        int lx, ly;
-        self->panel_to_content(point.x, point.y, &lx, &ly);
-        data->state = LV_INDEV_STATE_PRESSED;
-        data->point.x = lx;
-        data->point.y = ly;
-    } else {
+    // Normal mode: report panel coordinates on press, leave the point untouched on
+    // release (LVGL keeps the press point so clicks register on the main display).
+    if (pressed) {
         data->state = LV_INDEV_STATE_PRESSED;
         data->point.x = point.x;
         data->point.y = point.y;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
     }
 }
 
@@ -85,12 +106,14 @@ void *DisplayManager::framebuffer(int index) const {
 
 void DisplayManager::flush(int index) {
     if (mode_ == Mode::Overlay && overlay_visible_) {
-        // The compose reads the overlay buffer the LVGL renderer writes, so take
-        // the LVGL lock (this runs on the screen's decode/worker thread, not the
-        // LVGL thread). PPA is blocking, so the lock is held only briefly.
-        lv_lock();
+        // Composite the overlay bar into the framebuffer. This runs on the screen's
+        // decode/worker thread and reads the overlay buffer the LVGL renderer
+        // writes — deliberately WITHOUT taking the LVGL lock: the bar is static
+        // (re-rendered only on a Back-button press), so a concurrent read is at
+        // worst a one-frame cosmetic tear, never a crash. Taking lv_lock here would
+        // deadlock teardown — onExit() joins this thread from inside lv_timer_handler
+        // (which holds lv_lock), so this thread must never block on lv_lock.
         compose_overlay(index);
-        lv_unlock();
     }
     bsp_display_flush(index);
 }
@@ -135,8 +158,23 @@ lv_obj_t *DisplayManager::enter_overlay(const OverlayConfig &cfg) {
     // theme) keeps targeting it; the overlay screen is reached explicitly.
     lv_display_set_default(main_disp_);
 
+    // Isolate the main display from the panel framebuffers: it renders into a
+    // full-screen scratch buffer (and main_flush_cb stops presenting) so the
+    // mirror owns the panel framebuffers exclusively — otherwise the main
+    // display's one-shot render of its (static) screen leaves stale pixels in a
+    // buffer the mirror then composites the bar over when no video is arriving.
+    size_t fb_bytes = (size_t)PANEL_W * PANEL_H * bsp_pixel_format_bytes(format());
+    if (!main_scratch_)
+        main_scratch_ = static_cast<uint8_t *>(
+            heap_caps_aligned_alloc(64, fb_bytes, MALLOC_CAP_SPIRAM));
+    if (main_scratch_)
+        lv_display_set_buffers(main_disp_, main_scratch_, nullptr, fb_bytes,
+                               LV_DISPLAY_RENDER_MODE_DIRECT);
+
     // Route touch to the overlay display (read_cb maps panel -> content coords).
+    // Reset first so an in-progress press isn't carried onto the smaller display.
     lv_indev_set_display(indev_, overlay_disp_);
+    lv_indev_reset(indev_, nullptr);
     mode_ = Mode::Overlay;
 
     if (cfg.clear_framebuffers) {
@@ -156,6 +194,14 @@ void DisplayManager::exit_overlay() {
     mode_ = Mode::Normal;
     overlay_visible_ = false;
     lv_indev_set_display(indev_, main_disp_);
+    lv_indev_reset(indev_, nullptr);
+    // Restore the main display onto the panel framebuffers; the next screen's
+    // re-render (ScreenManager pop -> lv_screen_load) repaints the panel.
+    void  *fb0 = bsp_display_get_frame_buffer(0);
+    void  *fb1 = bsp_display_get_frame_buffer(1);
+    size_t fb_bytes = (size_t)PANEL_W * PANEL_H * bsp_pixel_format_bytes(format());
+    lv_display_set_buffers(main_disp_, fb0, fb1, fb_bytes,
+                           LV_DISPLAY_RENDER_MODE_DIRECT);
     if (overlay_disp_) { lv_display_delete(overlay_disp_); overlay_disp_ = nullptr; }
     if (overlay_buf_) { heap_caps_free(overlay_buf_); overlay_buf_ = nullptr; }
 }

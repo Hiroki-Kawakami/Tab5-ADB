@@ -65,6 +65,10 @@ private:
     enum class Mode { Normal, Overlay };
 
     static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data);
+    // Main display flush: presents the panel framebuffer in normal mode; in
+    // overlay mode it only acks (the main display renders into a scratch buffer
+    // and the mirror owns the panel framebuffers).
+    static void main_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map);
     // PPA-composite the overlay buffer into framebuffer `index` at the footprint
     // rect (rotate/scale/format-convert). Caller holds the LVGL lock.
     void compose_overlay(int index);
@@ -87,6 +91,9 @@ private:
     float         overlay_scale_ = 1.0f;
     bool          overlay_visible_ = false;
     void         *ppa_srm_ = nullptr;       // ppa_client_handle_t (lazy)
+    uint8_t      *main_scratch_ = nullptr;  // full-screen buffer the main display
+                                            // renders into while in overlay mode
+                                            // (keeps it off the panel framebuffers)
 };
 
 extern DisplayManager display_manager;
