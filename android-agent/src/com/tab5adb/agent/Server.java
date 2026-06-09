@@ -52,7 +52,7 @@ public final class Server {
 
     // Mirror stream defaults (§5.1).
     private static final int SPLIT_COUNT = 4;
-    private static final int JPEG_QUALITY = 60;
+    private static final int JPEG_QUALITY = 80;
     // Upper FPS bound: the Tab5 panel tops out at 60fps, so cap the stream there so
     // a high-refresh source (e.g. a 120Hz phone) can't push frames the panel can't
     // show. The pacing only applies to frames actually sent (a static screen yields
