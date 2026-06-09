@@ -278,9 +278,10 @@ void ADBMirroringScreen::build() {
     // Grab the two bsp framebuffers (we decode strips straight into them). They are
     // cleared to black in onEnter via enter_overlay(clear_framebuffers) — once the
     // main display is isolated from them — so the pre-stream / letterbox stays black.
-    fb_[0] = static_cast<uint16_t*>(display_manager.framebuffer(0));
-    fb_[1] = static_cast<uint16_t*>(display_manager.framebuffer(1));
+    for (int i = 0; i < kFbCount; ++i)
+        fb_[i] = static_cast<uint16_t*>(display_manager.framebuffer(i));
     back_ = 0;
+    front_ = -1;
 
     // Receive/decode split: the reader thread fills frame slots (free_q_) and the
     // decode task drains finished frames (ready_q_), so the blocking HW-JPEG decode
@@ -499,13 +500,14 @@ void ADBMirroringScreen::decode_loop() {
                 // the band it covered shows the video again (flush won't compose).
                 if (decode_all(held, fb_[back_])) {
                     display_manager.flush(back_);
-                    back_ ^= 1;
+                    front_ = back_;
+                    back_ = (back_ + 1) % kFbCount;
                 }
                 last_visible = false;
-            } else if (visible) {
+            } else if (visible && front_ >= 0) {
                 // Bar up with no fresh video: recomposite it onto the displayed
                 // buffer in place (no swap) so it stays responsive (e.g. on show).
-                display_manager.flush(back_ ^ 1);
+                display_manager.flush(front_);
                 last_visible = true;
             }
             continue;  // re-check stop
@@ -518,7 +520,8 @@ void ADBMirroringScreen::decode_loop() {
         bool ok = decode_all(slot, fb_[back_]);
         if (ok) {
             display_manager.flush(back_);  // composites the bar if visible
-            back_ ^= 1;
+            front_ = back_;
+            back_ = (back_ + 1) % kFbCount;
             last_visible = visible;
             ++stats_frames_;
         }

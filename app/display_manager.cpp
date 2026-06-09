@@ -178,10 +178,14 @@ lv_obj_t *DisplayManager::enter_overlay(const OverlayConfig &cfg) {
     mode_ = Mode::Overlay;
 
     if (cfg.clear_framebuffers) {
+        // Clear every configured framebuffer (the mirror triple-buffers, so there
+        // can be three) so the pre-stream / letterbox stays black whichever buffer
+        // is presented first. Indices past the configured count return NULL.
         size_t fb_bytes = (size_t)PANEL_W * PANEL_H * bsp_pixel_format_bytes(format());
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < 3; ++i) {
             void *fb = bsp_display_get_frame_buffer(i);
-            if (fb) std::memset(fb, 0, fb_bytes);
+            if (!fb) continue;
+            std::memset(fb, 0, fb_bytes);
             bsp_display_flush(i);
         }
     }

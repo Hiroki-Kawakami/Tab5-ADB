@@ -17,10 +17,11 @@
 // into its framebuffer row band — its width equals the framebuffer pitch, so
 // "packed" is already "in place" with no scratch buffer, blit, or stride (the P4
 // 2D-DMA can't place a narrower picture into a wider buffer). The finished frame
-// is presented with bsp_display_flush(). The two bsp framebuffers are used as a
-// double buffer (decode into the back one, flush it, swap), so the displayed
-// buffer is never being written — tear-free with no per-frame LVGL compositing at
-// all. While the mirror screen is active its LVGL root is static (a black,
+// is presented with bsp_display_flush(). The three bsp framebuffers are used as a
+// triple buffer (decode into the back one, flush it, advance to the next), so the
+// displayed buffer is never being written and the decode task never waits on the
+// panel scan-out/vsync sync before reusing a buffer — tear-free with no per-frame
+// LVGL compositing at all. While the mirror screen is active its LVGL root is static (a black,
 // clickable surface) so lv_timer_handler does not touch the framebuffers; on pop,
 // the previous screen's full re-render takes them back.
 //
@@ -96,8 +97,15 @@ private:
     // bar when the video area (outside the bar) is tapped.
     void poll_touch();
 
-    uint16_t* fb_[2] = {nullptr, nullptr};  // the two bsp framebuffers (not owned)
-    int back_ = 0;                          // index the decode task draws into
+    // The bsp framebuffers (not owned), used as a TRIPLE buffer: the decode task
+    // draws into fb_[back_], flushes it (it becomes the front/displayed buffer),
+    // then advances back_ to the next buffer in the rotation. With three buffers
+    // the buffer drawn into was last displayed two frames ago, so the decode task
+    // never waits on the panel's scan-out/vsync sync before reusing one.
+    static constexpr int kFbCount = 3;
+    uint16_t* fb_[kFbCount] = {nullptr, nullptr, nullptr};
+    int back_ = 0;     // index the decode task draws into next
+    int front_ = -1;   // index currently displayed (last flushed; -1 = none yet)
 
     void* poll_timer_ = nullptr;  // lv_timer_t* (LVGL thread): bar show/hide toggle
     bool  touch_prev_ = false;    // previous press state, for tap-edge detection

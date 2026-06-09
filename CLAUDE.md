@@ -157,7 +157,7 @@ approach in `android-agent/docs/testing.md`. **receive→decode→render done** 
 `ADBMirroringScreen` in `app/` (see the UI section) launches the agent from the
 **embedded jar**, sends `MIRROR_START`, and renders the JPEG strip stream
 **directly into the bsp framebuffer** (strided decode + `bsp_display_flush`
-double-buffer, no LVGL compositing), **verified headless in the simulator (libusb)
+triple-buffer, no LVGL compositing), **verified headless in the simulator (libusb)
 against a real Android device**: the live home screen mirrors with correct full-range colors
 (`./run.sh simverify simulator/verify/mirror.txt`). The agent dex is embedded as a
 C array — `app/agent/agent_jar.{h,c}`, `xxd -i` of
@@ -736,10 +736,15 @@ are baked in agent-side, see the agent section), so a strip's width equals the
 framebuffer pitch and a tightly-packed decode into `fb + strip.y*pitch` lands in
 place — zero-copy at decode, no scratch, no blit, the framebuffer written exactly
 once (the P4 JPEG 2D-DMA can't stride a narrower picture into a wider buffer, so
-full-width frames are what make decode-direct possible). The two bsp framebuffers
-(`bsp_display_get_frame_buffer(0/1)`) are a **double buffer**: decode into the back
-one, `bsp_display_flush()` it, swap — so the displayed buffer is never mid-write
-(tear-free) and nothing is marshalled to LVGL. The LVGL root stays a **static
+full-width frames are what make decode-direct possible). The three bsp framebuffers
+(`bsp_display_get_frame_buffer(0/1/2)`, `bsp_init` requests `fb_num=3`) are a
+**triple buffer**: decode into the back one, `bsp_display_flush()` it (it becomes
+the displayed/front buffer), advance `back_` to the next in the 0→1→2→0 rotation —
+so the displayed buffer is never mid-write (tear-free) **and** the buffer drawn
+into was last displayed two frames ago, so the decode task never blocks on the DPI
+panel's scan-out/vsync sync before reusing one (normal full-screen LVGL still uses
+just the first two as a double buffer; the simulator's SDL backend now allocates up
+to 3 too). Nothing is marshalled to LVGL. The LVGL root stays a **static
 black, clickable surface** (a **tap pops** back) that nothing invalidates after
 build, so `lv_timer_handler` leaves the framebuffers to the mirror; on pop the
 previous screen's full re-render reclaims them. The framebuffers are cleared +

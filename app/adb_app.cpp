@@ -64,7 +64,10 @@ std::shared_ptr<adb::Client> adb_client_shared() { return g_client; }
 
 void adb_app() {
     bsp_config_t config = {};
-    config.display.fb_num = 2;
+    // Three framebuffers: normal LVGL uses the first two as a double buffer; the
+    // mirror rotates all three as a triple buffer so its decode task never has to
+    // wait on the panel scan-out/vsync sync before reusing a buffer.
+    config.display.fb_num = 3;
     config.display.pixel_format = BSP_PIXEL_FORMAT_RGB565;
     config.usb.usb5v_en = true;
     ESP_ERROR_CHECK(bsp_init(&config));

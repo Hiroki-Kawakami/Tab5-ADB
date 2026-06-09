@@ -30,8 +30,10 @@ static int                s_scale_div = 1;
 static size_t             s_bpp = 2;          /* bytes per pixel */
 static bsp_pixel_format_t s_format = BSP_PIXEL_FORMAT_RGB565;
 
-static uint8_t *s_fb[2];
-static void    *s_fb_ptrs[2];
+#define SDL_BACKEND_MAX_FB 3
+static uint8_t *s_fb[SDL_BACKEND_MAX_FB];
+static void    *s_fb_ptrs[SDL_BACKEND_MAX_FB];
+static int      s_fb_num;
 
 /* Headless verification support (driven by the sim harness). When the
  * SIMULATOR_HEADLESS env var is set we skip the SDL window/renderer/texture
@@ -112,7 +114,8 @@ static void **display_get_framebuffers(bsp_display_t *self) {
  * mirror decode task) must be able to flush without touching SDL. */
 static esp_err_t display_flush(bsp_display_t *self, int fb_index) {
     (void)self;
-    s_last_flushed = fb_index & 1;   /* recorded even headless, for snapshots */
+    if (fb_index < 0 || fb_index >= s_fb_num) fb_index = 0;
+    s_last_flushed = fb_index;   /* recorded even headless, for snapshots */
     s_dirty = true;
     return ESP_OK;
 }
@@ -203,14 +206,18 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
     }
 
     int fb_num = config->fb_num ? config->fb_num : 1;
-    if (fb_num > 2) fb_num = 2;
+    if (fb_num > SDL_BACKEND_MAX_FB) fb_num = SDL_BACKEND_MAX_FB;
+    s_fb_num = fb_num;
     size_t fb_bytes = (size_t)s_panel_w * s_panel_h * s_bpp;
-    for (int i = 0; i < 2; i++) {
-        s_fb[i] = calloc(1, fb_bytes);
-        if (!s_fb[i]) return ESP_ERR_NO_MEM;
-    }
-    for (int i = 0; i < 2; i++) {
-        s_fb_ptrs[i] = (i < fb_num) ? s_fb[i] : s_fb[0];
+    for (int i = 0; i < SDL_BACKEND_MAX_FB; i++) {
+        if (i < fb_num) {
+            s_fb[i] = calloc(1, fb_bytes);
+            if (!s_fb[i]) return ESP_ERR_NO_MEM;
+            s_fb_ptrs[i] = s_fb[i];
+        } else {
+            s_fb[i] = NULL;
+            s_fb_ptrs[i] = NULL;
+        }
     }
 
     if (s_renderer) {
@@ -239,7 +246,7 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
 void sdl_backend_present(void) {
     if (s_headless || !s_texture || !s_dirty) return;
     s_dirty = false;
-    SDL_UpdateTexture(s_texture, NULL, s_fb[s_last_flushed & 1], s_panel_w * (int)s_bpp);
+    SDL_UpdateTexture(s_texture, NULL, s_fb[s_last_flushed], s_panel_w * (int)s_bpp);
     SDL_RenderCopy(s_renderer, s_texture, NULL, NULL);
     SDL_RenderPresent(s_renderer);
 }
@@ -259,5 +266,5 @@ const void *sdl_backend_snapshot(int *width, int *height, bsp_pixel_format_t *fo
     if (width)  *width  = s_panel_w;
     if (height) *height = s_panel_h;
     if (format) *format = s_format;
-    return s_fb[s_last_flushed & 1];
+    return s_fb[s_last_flushed];
 }
