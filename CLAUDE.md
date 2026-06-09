@@ -114,7 +114,22 @@ surface and lets the compositor do aspect-preserving rotate/scale-fit/letterbox 
 code + a centered destination rect computed by the host-testable pure-arithmetic
 `Projection`; the area outside it is the virtual display's black background = the
 letterbox). Only the fallback honours `scaleMode` (fill vs fit) — the primary
-mirror path is always aspect-fit (the mirror default). (GPU geometry is what got
+mirror path is always aspect-fit (the mirror default). **Physical-orientation lock
+(§5.1 = always show the device's *natural*-orientation framebuffer, ignoring logical
+rotation):** the primary mirror follows display 0's *logical* rotation, so turning the
+phone would otherwise rotate + shrink-letterbox the Tab5. `ScreenCapture` is built for
+the device's current rotation (`Surface.ROTATION_*`) and undoes it: the reader is sized
+to the panel *oriented to the rotation* (portrait `targetW×targetH` at 0/180, landscape
+`targetH×targetW` at 90/270) so the rotated logical display fills it (GPU scale, no
+orientation-mismatch letterbox), then `acquire()` counter-rotates by the inverse rotation
+to the natural-orientation `targetW×targetH` frame. A landscape app thus shows sideways +
+full-size on the Tab5 (turn the Tab5 to view it), not rotated-upright-and-shrunk. At
+ROTATION_0 (common case) the counter-rotation is a no-op = the old GPU-only fast path;
+only a rotated device pays one panel-sized `Bitmap` rotation/frame. `Server` polls
+`DisplayManagerGlobal.getRealDisplay(0).getRotation()` each frame and rebuilds the capture
+when it changes. Natural-lock is primary-path only; the legacy fallback keeps `Projection`'s
+source-aspect geometry. (Counter-rotation is `counterDeg = (rotation & 3) * 90`, direction
+verified on a real Tab5 + phone.) (GPU geometry is what got
 the mirror from a 15fps-capped ~23fps CPU path to ~33-37fps; the old per-frame
 full-frame allocs were also GC-thrashing.) The
 agent **always emits a full `targetW×targetH` (720×1280) frame**, so every strip

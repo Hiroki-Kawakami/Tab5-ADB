@@ -1,6 +1,7 @@
 package com.tab5adb.agent;
 
 import android.graphics.Bitmap;
+import android.graphics.Matrix;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.hardware.display.VirtualDisplay;
@@ -24,11 +25,9 @@ import java.nio.ByteBuffer;
  * <ul>
  *   <li><b>{@code DisplayManager.createVirtualDisplay}</b> (primary) — the hidden
  *       static mirror helper on {@code android.hardware.display.DisplayManager}.
- *       It mirrors display 0 into the panel-sized {@link ImageReader} surface and
- *       the system compositor does the rotate / scale-fit / black-letterbox into
- *       that surface (aspect-preserving mirroring), so {@code acquire()} already
- *       returns the final upright, scaled, letterboxed panel-sized frame. This is
- *       the path that works on Android 14 / 15, where
+ *       It mirrors display 0 into the reader surface and the system compositor does
+ *       the scale-fit / black-letterbox into that surface (aspect-preserving
+ *       mirroring). This is the path that works on Android 14 / 15, where
  *       {@code SurfaceControl.createDisplay} was removed.
  *   <li><b>{@code SurfaceControl.createDisplay} + {@code setDisplayProjection}</b>
  *       (fallback, pre-12 / pre-14 where the static helper is absent) — we create
@@ -37,12 +36,38 @@ import java.nio.ByteBuffer;
  *       the display's black background = the letterbox).
  * </ul>
  *
- * <p>Either way the GPU does the geometry — no CPU readback at source resolution
- * and no rotate/scale/composite Bitmap copies; {@link FramePipeline} then only
- * strips + JPEG-encodes. (The {@link TestPattern} path still runs the CPU geometry
- * in {@link FramePipeline}, since the GPU projection needs a real SurfaceFlinger.)
- * Only the fallback honours {@code scaleMode} (fill vs fit) via {@link Projection};
- * the primary mirror path is always aspect-fit, which is the mirror default.
+ * <p>Either way the GPU does the scaling — no CPU readback at source resolution and
+ * no scale/composite Bitmap copies; {@link FramePipeline} then only strips +
+ * JPEG-encodes. (The {@link TestPattern} path still runs the CPU geometry in {@link
+ * FramePipeline}, since the GPU projection needs a real SurfaceFlinger.)
+ *
+ * <h2>Physical-orientation lock (protocol.md §5.1)</h2>
+ *
+ * <p>The Tab5 is fixed to the device's <em>physical</em> (natural) orientation —
+ * logical screen rotation is not considered. But the mirror reflects display 0's
+ * <em>current logical rotation</em>: turn the phone and the mirror would rotate and
+ * shrink-letterbox with it. So this capture is built for the device's current
+ * {@code rotation} (a {@code Surface.ROTATION_*} code; the caller recreates the
+ * capture when it changes) and undoes it:
+ *
+ * <ol>
+ *   <li>The reader is sized to the panel <em>oriented to match the rotation</em>
+ *       (portrait {@code targetW×targetH} at ROTATION_0/180, landscape
+ *       {@code targetH×targetW} at ROTATION_90/270), so the rotated logical display
+ *       fills the reader (the compositor still does the scale-fit on the GPU; no
+ *       letterbox from an orientation mismatch).
+ *   <li>{@link #acquire} counter-rotates that frame by the inverse of the device
+ *       rotation, yielding the natural-orientation {@code targetW×targetH} panel
+ *       frame — i.e. exactly the device's physical framebuffer. A landscape app then
+ *       appears sideways and full-size on the Tab5 (turn the Tab5 to view it), never
+ *       rotated-upright-and-letterboxed.
+ * </ol>
+ *
+ * <p>At ROTATION_0 (the common case) the reader is panel-sized and the counter-
+ * rotation is a no-op, so it is the same GPU-only fast path as before. Only a rotated
+ * device pays one panel-sized {@link Bitmap} rotation per frame. The natural-lock is
+ * implemented on the primary path only; the legacy fallback keeps {@link Projection}'s
+ * source-aspect geometry (pre-Android-12, not the modern target).
  *
  * <p>All hidden-API calls go through reflection; a total failure (both paths)
  * surfaces as an exception that aborts the connection rather than silently
@@ -50,32 +75,50 @@ import java.nio.ByteBuffer;
  * these APIs.
  */
 final class ScreenCapture {
-    private final int readerW;  // = target panel width (the projected output size)
-    private final int readerH;
-    private final ImageReader reader;
+    private int readerW;  // reader (capture) width  — panel oriented to the rotation
+    private int readerH;  // reader (capture) height
+    private ImageReader reader;
+
+    // Degrees to rotate each captured frame to undo the device rotation and land in
+    // the natural orientation (0 = no-op). Set on the primary path; 0 on the fallback.
+    private int counterDeg;
 
     // Exactly one of these is non-null, depending on which creation path took.
     private VirtualDisplay virtualDisplay;  // primary: DisplayManager path
     private Class<?> sc;                     // fallback: android.view.SurfaceControl
     private IBinder display;                 // fallback: the SurfaceControl display token
 
-    ScreenCapture(int srcW, int srcH, int targetW, int targetH, int scaleMode) throws Exception {
-        this.readerW = targetW;
-        this.readerH = targetH;
-        // The reader is the Tab5 panel size; the compositor scales the source into it.
-        this.reader = ImageReader.newInstance(targetW, targetH, PixelFormat.RGBA_8888, 3);
-        Surface surface = reader.getSurface();
+    /**
+     * @param rotation the device's current {@code Surface.ROTATION_*} code (0/1/2/3).
+     *                 The capture is built for it and must be recreated when it changes.
+     */
+    ScreenCapture(int srcW, int srcH, int targetW, int targetH, int scaleMode, int rotation)
+            throws Exception {
+        boolean transposed = (rotation % 2) != 0;  // 90° / 270°: panel axes swap
+        // Reader matches the panel oriented to the rotation, so the rotated logical
+        // display fills it; counter-rotate by the inverse rotation in acquire().
+        this.readerW = transposed ? targetH : targetW;
+        this.readerH = transposed ? targetW : targetH;
+        this.counterDeg = (rotation & 3) * 90;  // undo the device rotation (direction verified on device)
 
         try {
-            this.virtualDisplay = createVirtualDisplay(targetW, targetH, surface);
+            this.reader = ImageReader.newInstance(readerW, readerH, PixelFormat.RGBA_8888, 3);
+            this.virtualDisplay = createVirtualDisplay(readerW, readerH, reader.getSurface());
             if (virtualDisplay == null) {
                 throw new IllegalStateException("createVirtualDisplay returned null");
             }
         } catch (Throwable dmError) {
-            // Older Android (no static DisplayManager.createVirtualDisplay): fall
-            // back to the legacy SurfaceControl projection.
+            // Older Android (no static DisplayManager.createVirtualDisplay): fall back
+            // to the legacy SurfaceControl projection, which drives rotation/scale
+            // itself via Projection (source-aspect, no natural-lock) into a panel-sized
+            // reader — so acquire() must not counter-rotate that path.
+            if (reader != null) reader.close();
+            this.readerW = targetW;
+            this.readerH = targetH;
+            this.counterDeg = 0;
+            this.reader = ImageReader.newInstance(targetW, targetH, PixelFormat.RGBA_8888, 3);
             try {
-                createSurfaceControlDisplay(srcW, srcH, targetW, targetH, scaleMode, surface);
+                createSurfaceControlDisplay(srcW, srcH, targetW, targetH, scaleMode, reader.getSurface());
             } catch (Throwable scError) {
                 reader.close();
                 throw new IllegalStateException(
@@ -88,7 +131,7 @@ final class ScreenCapture {
     /**
      * Primary path: the hidden static {@code DisplayManager.createVirtualDisplay(
      * name, width, height, displayIdToMirror, surface)}. Mirrors display 0 into the
-     * surface; the system handles rotation / scale-fit / letterbox.
+     * surface; the system handles scale-fit / letterbox.
      */
     private static VirtualDisplay createVirtualDisplay(int width, int height, Surface surface) throws Exception {
         Method m = android.hardware.display.DisplayManager.class
@@ -132,14 +175,16 @@ final class ScreenCapture {
     }
 
     /**
-     * Latest captured frame as a panel-sized (targetW×targetH) ARGB_8888 bitmap,
-     * already rotated / scaled / letterboxed by the GPU, or null if none is ready
-     * yet (e.g. a static screen produces no new frames — the caller then sends
-     * nothing and the Tab5 keeps showing the last frame).
+     * Latest captured frame as a panel-sized (targetW×targetH) ARGB_8888 bitmap, in
+     * the device's natural orientation (the logical rotation undone — see the class
+     * doc), already scaled / letterboxed by the GPU, or null if none is ready yet
+     * (e.g. a static screen produces no new frames — the caller then sends nothing
+     * and the Tab5 keeps showing the last frame).
      */
     Bitmap acquire() {
         Image img = reader.acquireLatestImage();
         if (img == null) return null;
+        Bitmap frame;
         try {
             Image.Plane plane = img.getPlanes()[0];
             ByteBuffer buf = plane.getBuffer();
@@ -151,13 +196,23 @@ final class ScreenCapture {
             Bitmap padded = Bitmap.createBitmap(paddedW, readerH, Bitmap.Config.ARGB_8888);
             buf.rewind();
             padded.copyPixelsFromBuffer(buf);
-            if (rowPadding == 0) return padded;
-            Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, readerW, readerH);
-            if (cropped != padded) padded.recycle();
-            return cropped;
+            if (rowPadding == 0) {
+                frame = padded;
+            } else {
+                frame = Bitmap.createBitmap(padded, 0, 0, readerW, readerH);
+                if (frame != padded) padded.recycle();
+            }
         } finally {
             img.close();
         }
+        if (counterDeg == 0) return frame;  // ROTATION_0 (or fallback): already natural
+        // Undo the device rotation → natural-orientation panel frame. A 90°/270°
+        // rotation of a readerH×readerW (transposed) frame lands at targetW×targetH.
+        Matrix m = new Matrix();
+        m.postRotate(counterDeg);
+        Bitmap rotated = Bitmap.createBitmap(frame, 0, 0, readerW, readerH, m, true);
+        if (rotated != frame) frame.recycle();
+        return rotated;
     }
 
     void close() {

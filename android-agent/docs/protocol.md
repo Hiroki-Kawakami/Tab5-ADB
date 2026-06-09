@@ -303,6 +303,23 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 > （`Projection`/`ScreenCapture`）。よって出力は常に **720×1280 フル**で、各ストリップは `x=0, w=720`
 > （§5.2 のとおり）。`--test-pattern` だけは SurfaceFlinger が無いので 1〜4 を CPU（`FramePipeline`）
 > で行う。生成手段の差であり、送出されるフレーム/ストリップの形は同じ。
+>
+> **物理向き固定の実装メモ**: §5.1 の「物理向き基準・論理回転は考慮しない」は、**端末の自然
+> （ナチュラル）向きの physical framebuffer を常に映す**ことを意味する（縦長端末なら常に縦長）。
+> ところが主経路（Android 14/15 の `DisplayManager.createVirtualDisplay` ミラー）はディスプレイ 0 の
+> **現在の論理回転に追従**してしまう（端末を回すと Tab5 まで回って縮小レターボックスする）。これを
+> 打ち消すため、`ScreenCapture` を**その時点の端末回転（`Surface.ROTATION_*`）向けに構築**し、
+> (1) reader を回転に合わせた向き（ROTATION_0/180=縦長 `target_w×target_h`、90/270=横長
+> `target_h×target_w`）にして論理画面をレターボックスなくフィットさせ（スケールは GPU）、
+> (2) `acquire()` で**端末回転の逆だけ回転**して自然向きの `target_w×target_h` フレームに戻す。
+> 端末を横にしたアプリは Tab5 上で横向きのまま全面表示され（見るときは Tab5 本体を回す）、回転して
+> 縮小されることはない。ROTATION_0（通常時）は逆回転 0°＝従来どおり GPU のみの経路で、回転時だけ
+> パネルサイズ 1 枚の `Bitmap` 回転コストが乗る。端末回転は `Server` が毎フレーム
+> `DisplayManagerGlobal.getRealDisplay(0).getRotation()` で見て、変化したら capture を作り直す。
+> 自然向きロックは主経路のみ。レガシーのフォールバック（pre-Android-12）は `Projection` の
+> ソースアスペクト幾何のまま（現行ターゲットではない）。逆回転は `counterDeg = (rotation & 3) * 90`、
+> 回転方向は実機（Tab5＋実機）で確認済み。
+> `--test-pattern` だけは SurfaceFlinger が無いので 1〜4 を CPU（`FramePipeline`）で行う。
 
 ### 5.2 JPEG payload
 

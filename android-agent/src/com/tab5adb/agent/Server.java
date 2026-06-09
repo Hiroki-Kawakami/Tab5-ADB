@@ -198,20 +198,30 @@ public final class Server {
     private void streamVideo(Conn conn, MirrorParams mp) throws Exception {
         FramePipeline pipeline = new FramePipeline(
                 mp.targetW, mp.targetH, mp.scaleMode, SPLIT_COUNT, JPEG_QUALITY);
-        ScreenCapture capture = null;
-        if (!testPattern) {
-            int[] src = sourceSize();
-            // The GPU does rotate/scale-fit/letterbox into a panel-sized frame.
-            capture = new ScreenCapture(src[0], src[1], mp.targetW, mp.targetH, mp.scaleMode);
-        }
         System.out.println("tab5adb-agent: streaming video (split=" + SPLIT_COUNT
                 + " q=" + JPEG_QUALITY + (testPattern ? ", test-pattern)" : ", screen)"));
 
         long frameNs = TARGET_FPS > 0 ? 1_000_000_000L / TARGET_FPS : 0;
         int frame = 0;
+        ScreenCapture capture = null;
+        int captureRotation = -1;  // device rotation the current capture was built for
         try {
             while (!Thread.interrupted()) {
                 long t0 = System.nanoTime();
+                if (!testPattern) {
+                    // The Tab5 is fixed to the device's physical orientation (§5.1), so
+                    // the capture undoes the device's logical rotation. Rebuild it when
+                    // the device rotates (the reader size + counter-rotation depend on it).
+                    int rotation = deviceRotation();
+                    if (capture == null || rotation != captureRotation) {
+                        if (capture != null) capture.close();
+                        int[] src = sourceSize();
+                        capture = new ScreenCapture(src[0], src[1], mp.targetW, mp.targetH,
+                                mp.scaleMode, rotation);
+                        captureRotation = rotation;
+                        System.out.println("tab5adb-agent: capture built for rotation " + rotation);
+                    }
+                }
                 Bitmap src = nextSource(capture, frame);
                 if (src == null) {  // capture not ready yet — wait for the first frame
                     sleep(10);
@@ -385,6 +395,23 @@ public final class Server {
             return new int[]{pt.x, pt.y};
         } catch (Throwable t) {
             throw new RuntimeException("displaySize failed: " + t, t);
+        }
+    }
+
+    /**
+     * Display 0's current logical rotation as a {@code Surface.ROTATION_*} code
+     * (0/1/2/3). {@link ScreenCapture} undoes this so the Tab5 stays fixed to the
+     * device's physical orientation (§5.1). Best-effort: treat a failure as ROTATION_0.
+     */
+    private int deviceRotation() {
+        try {
+            Class<?> dmg = Class.forName("android.hardware.display.DisplayManagerGlobal");
+            Object inst = dmg.getMethod("getInstance").invoke(null);
+            Object display = dmg.getMethod("getRealDisplay", int.class).invoke(inst, 0);
+            return (int) display.getClass().getMethod("getRotation").invoke(display);
+        } catch (Throwable t) {
+            System.err.println("tab5adb-agent: getRotation failed, assuming 0: " + t);
+            return 0;
         }
     }
 }
