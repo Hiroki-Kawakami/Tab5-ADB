@@ -16,7 +16,7 @@
 #include "adb.hpp"  // adb::Client, adb::Shell, adb::Sync, adb::Error, adb::to_string
 #include "adb_app.hpp"
 #include "agent/agent_jar.h"
-#include "bsp.h"
+#include "display_manager.hpp"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "jpeg_fullrange_decode.h"
@@ -276,11 +276,11 @@ void ADBMirroringScreen::build() {
     // present black until the first frame. The flush pushes the cleared buffers to
     // the panel (and, on device, to PSRAM) so the letterbox stays black — strips
     // never touch those pixels again.
-    fb_[0] = static_cast<uint16_t*>(bsp_display_get_frame_buffer(0));
-    fb_[1] = static_cast<uint16_t*>(bsp_display_get_frame_buffer(1));
+    fb_[0] = static_cast<uint16_t*>(display_manager.framebuffer(0));
+    fb_[1] = static_cast<uint16_t*>(display_manager.framebuffer(1));
     for (int i = 0; i < 2; ++i) {
         if (fb_[i]) std::memset(fb_[i], 0, (size_t)PANEL_W * PANEL_H * 2);
-        bsp_display_flush(i);
+        display_manager.flush(i);
     }
     back_ = 0;
 
@@ -438,7 +438,7 @@ void ADBMirroringScreen::decode_loop() {
         // flush a half-updated buffer (the back buffer also still holds an older
         // frame's pixels). Drop it and keep showing the last good frame instead.
         if (ok) {
-            bsp_display_flush(back_);
+            display_manager.flush(back_);
             back_ ^= 1;
             ++stats_frames_;
         }
