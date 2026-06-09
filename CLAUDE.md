@@ -341,8 +341,15 @@ the shared sources once a simulator audio board exists.
 
 `adb_app()` in `app/adb_app.cpp` is the shared entry: it calls `bsp_init()`, sets
 up the LVGL display on the two `bsp_display` frame buffers + an indev on
-`bsp_touch_read`, and pushes the first screen. Panel is 720×1280 portrait RGB565
-(`PANEL_W`/`PANEL_H` in `app/adb_app.hpp`).
+`bsp_touch_read`, and pushes the first screen. Panel is 720×1280 portrait
+(`PANEL_W`/`PANEL_H` in `app/adb_app.hpp`); the pixel format is chosen at
+`bsp_init` (one line in `adb_app()`) and fixed for the boot — RGB888 by default
+(RGB565 also supported). RGB888 framebuffers hold LVGL's native **B,G,R** byte
+order; everything that writes a framebuffer agrees on it (the DisplayManager
+overlay's PPA 565→888 composite, the mirror's JPEG decode via `BGR` rgb_order,
+the sim's `SDL_PIXELFORMAT_BGR24` texture + capture swap). The mirror decode and
+the DisplayManager honour `bsp_display_get_pixel_format()`, so the format is the
+single boot-time switch.
 
 ### NVS — the `nvs_flash` C API, used directly
 

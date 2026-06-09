@@ -96,7 +96,12 @@ bool capture(const char *path) {
     while (cinfo.next_scanline < (JDIMENSION)h) {
         const uint8_t *src = (const uint8_t *)fb + (size_t)cinfo.next_scanline * stride;
         if (fmt == BSP_PIXEL_FORMAT_RGB888) {
-            memcpy(row.data(), src, (size_t)w * 3);
+            // The framebuffer holds B,G,R (LVGL native); JCS_RGB wants R,G,B.
+            for (int x = 0; x < w; x++) {
+                row[x * 3 + 0] = src[x * 3 + 2];
+                row[x * 3 + 1] = src[x * 3 + 1];
+                row[x * 3 + 2] = src[x * 3 + 0];
+            }
         } else {
             const uint16_t *p = (const uint16_t *)src;   /* RGB565, native order */
             for (int x = 0; x < w; x++) {

@@ -279,7 +279,7 @@ void ADBMirroringScreen::build() {
     // cleared to black in onEnter via enter_overlay(clear_framebuffers) — once the
     // main display is isolated from them — so the pre-stream / letterbox stays black.
     for (int i = 0; i < kFbCount; ++i)
-        fb_[i] = static_cast<uint16_t*>(display_manager.framebuffer(i));
+        fb_[i] = static_cast<uint8_t*>(display_manager.framebuffer(i));
     back_ = 0;
     front_ = -1;
 
@@ -477,7 +477,7 @@ void ADBMirroringScreen::decode_loop() {
     int  held = -1;          // last decoded slot, kept out of free_q_ for re-decode
     bool last_visible = false;  // overlay state of the last presented frame
 
-    auto decode_all = [&](int slot, uint16_t* dst) -> bool {
+    auto decode_all = [&](int slot, uint8_t* dst) -> bool {
         FrameSlot& f = slots_[slot];
         if (!dst) return false;
         for (int i = 0; i < f.strip_count; ++i) {
@@ -556,7 +556,7 @@ void ADBMirroringScreen::decode_loop() {
 }
 
 bool ADBMirroringScreen::decode_one(uint8_t* jpeg, uint32_t len, uint16_t y,
-                                    uint16_t h, uint16_t* dst) {
+                                    uint16_t h, uint8_t* dst) {
     if (!jpeg || len == 0 || !dst) return false;
 
     // Lazily create the engine (decode task only).
@@ -570,20 +570,25 @@ bool ADBMirroringScreen::decode_one(uint8_t* jpeg, uint32_t len, uint16_t y,
     // the framebuffer row band starting at row y (x == 0), and the decoded
     // PANEL_W×h picture is exactly PANEL_W*h pixels contiguous — no scratch, no
     // blit, no stride. (device: P4 HW JPEG straight to PSRAM; host: libjpeg.)
+    const bool rgb888 = (display_manager.format() == BSP_PIXEL_FORMAT_RGB888);
+    const size_t bpp = rgb888 ? 3 : 2;
+
     jpeg_decode_cfg_t dcfg = {};
-    dcfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-    // BGR, not RGB: the panel is driven R-in-high-bits RGB565, and on the P4 HW
-    // JPEG decoder that byte order is produced by the BGR scramble — the RGB enum's
-    // RGB565 scramble mis-packs the 16-bit pixel (greens split across the byte
-    // boundary) and the image comes out as rainbow noise. Matches the proven
-    // Tab5-Screen-Streamer decoder.
+    dcfg.output_format = rgb888 ? JPEG_DECODE_OUT_FORMAT_RGB888
+                                : JPEG_DECODE_OUT_FORMAT_RGB565;
+    // BGR, not RGB, for both depths: the framebuffer byte order is LVGL's native
+    // RGB888 (B,G,R) / R-in-high-bits RGB565, and on the P4 HW JPEG decoder that
+    // packing is the one the BGR scramble produces — the RGB enum mis-orders the
+    // bytes and the image comes out as colour-swapped / rainbow noise. Matches the
+    // proven Tab5-Screen-Streamer 565 path; the host shim packs B,G,R the same way.
+    // (The 888 device scramble is still the remaining real-HW verification.)
     dcfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
     dcfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
-    uint16_t* out = dst + (size_t)y * PANEL_W;  // x == 0
-    uint32_t outbuf = (uint32_t)((size_t)PANEL_W * h * 2);
+    uint8_t* out = dst + (size_t)y * PANEL_W * bpp;  // x == 0
+    uint32_t outbuf = (uint32_t)((size_t)PANEL_W * h * bpp);
     uint32_t out_size = 0;
     return jpeg_decoder_process_full_range(jpeg_, &dcfg, jpeg, len,
-               reinterpret_cast<uint8_t*>(out), outbuf, &out_size) == ESP_OK;
+               out, outbuf, &out_size) == ESP_OK;
 }
 
 void ADBMirroringScreen::free_decoder() {

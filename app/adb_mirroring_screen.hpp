@@ -89,9 +89,10 @@ private:
     void decode_loop();
     // Decode one full-width strip straight into framebuffer `dst`, packed at row
     // `y` (decode task). Lazily creates the JPEG engine. Returns false on a decode
-    // error or a non-full-width strip.
+    // error or a non-full-width strip. `dst` is byte-addressed (the panel format —
+    // RGB565 or RGB888 — is resolved from the DisplayManager at decode time).
     bool decode_one(uint8_t* jpeg, uint32_t len, uint16_t y, uint16_t h,
-                    uint16_t* dst);
+                    uint8_t* dst);
     void free_decoder();
     // LVGL-thread lv_timer callback: poll the raw touch and toggle the overlay
     // bar when the video area (outside the bar) is tapped.
@@ -103,7 +104,7 @@ private:
     // the buffer drawn into was last displayed two frames ago, so the decode task
     // never waits on the panel's scan-out/vsync sync before reusing one.
     static constexpr int kFbCount = 3;
-    uint16_t* fb_[kFbCount] = {nullptr, nullptr, nullptr};
+    uint8_t* fb_[kFbCount] = {nullptr, nullptr, nullptr};  // byte-addressed (565 or 888)
     int back_ = 0;     // index the decode task draws into next
     int front_ = -1;   // index currently displayed (last flushed; -1 = none yet)
 

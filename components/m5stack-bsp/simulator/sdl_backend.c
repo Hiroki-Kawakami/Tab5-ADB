@@ -60,7 +60,10 @@ static bsp_display_t s_display;
 static bsp_touch_t   s_touch;
 
 static Uint32 sdl_pixel_format(bsp_pixel_format_t fmt) {
-    return (fmt == BSP_PIXEL_FORMAT_RGB888) ? SDL_PIXELFORMAT_RGB24
+    // RGB888 framebuffers hold LVGL's native byte order (B, G, R), so the texture
+    // is BGR24 (memory B,G,R), not RGB24 — the device panel, the PPA overlay and
+    // the mirror decode all use this same B,G,R layout.
+    return (fmt == BSP_PIXEL_FORMAT_RGB888) ? SDL_PIXELFORMAT_BGR24
                                             : SDL_PIXELFORMAT_RGB565;
 }
 

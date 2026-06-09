@@ -68,7 +68,11 @@ void adb_app() {
     // mirror rotates all three as a triple buffer so its decode task never has to
     // wait on the panel scan-out/vsync sync before reusing a buffer.
     config.display.fb_num = 3;
-    config.display.pixel_format = BSP_PIXEL_FORMAT_RGB565;
+    // Panel pixel format is fixed for the boot (changing it needs a restart). RGB888
+    // avoids the 565 banding on the mirror's gradients; the DisplayManager, the
+    // overlay compositor and the mirror decode all honour bsp_display_get_pixel_format(),
+    // so switching back to BSP_PIXEL_FORMAT_RGB565 here is the only change required.
+    config.display.pixel_format = BSP_PIXEL_FORMAT_RGB888;
     config.usb.usb5v_en = true;
     ESP_ERROR_CHECK(bsp_init(&config));
 
