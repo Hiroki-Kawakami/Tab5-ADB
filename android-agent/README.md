@@ -16,12 +16,15 @@ embedded ADB.
 On each connection the server runs the protocol's **HELLO handshake** (link
 establishment only — proto / version / capability), then waits for the Tab5 to
 send **MIRROR_START** and **streams the screen as JPEG strips** (Phase 2, done):
-it captures via the hidden `SurfaceControl`→`ImageReader` display APIs and streams
-horizontal-strip → JPEG (YUV420 q60). The **rotate → scale (fit/fill) → black
-letterbox** geometry is GPU-offloaded — `ScreenCapture` projects the source
-straight into a fixed 720×1280 `ImageReader` via `setDisplayProjection` (the
-compositor does it, no CPU readback/copies; rect math in `Projection`), so the
-pipeline only splits + encodes. A `--test-pattern` mode streams a deterministic
+it captures via hidden display APIs into a fixed 720×1280 `ImageReader` and streams
+horizontal-strip → JPEG (YUV420 q60). The **rotate → scale → black letterbox**
+geometry is GPU-offloaded — `ScreenCapture` tries the static hidden
+`DisplayManager.createVirtualDisplay` first (mirrors display 0 into the panel-sized
+reader, aspect-fit; the path that works on **Android 14/15** where
+`SurfaceControl.createDisplay` was removed), and falls back on older Android to
+`SurfaceControl.createDisplay` + `setDisplayProjection` (explicit fit/fill rect math
+in `Projection`). Either way the compositor does it — no CPU readback/copies — so
+the pipeline only splits + encodes. A `--test-pattern` mode streams a deterministic
 frame through the CPU geometry (`FramePipeline`) instead (for headless
 verification without the capture APIs). No artificial FPS cap (capture-rate
 driven). Verified against a real Android device by the Tab5-side harnesses `test_hello.cpp`
@@ -42,7 +45,7 @@ src/com/tab5adb/agent/
   FramePipeline.java  # strip + JPEG (stripsOf); CPU rotate/scale geometry for --test-pattern (§5.1)
   Projection.java     # pure GPU-projection math (rotate/scale-fit/center); host-JVM testable
   TestPattern.java    # deterministic source frame for --test-pattern verification
-  ScreenCapture.java  # real capture: SurfaceControl projection -> 720x1280 ImageReader (GPU geometry)
+  ScreenCapture.java  # real capture -> 720x1280 ImageReader: DisplayManager.createVirtualDisplay (A14/15) | SurfaceControl projection fallback
 test/                 # host-JVM unit test (ProjectionTest) + run.sh — no phone
 build.sh              # javac + d8  -> build/tab5adb-agent.jar
 run.sh                # adb push + app_process (dev loop)

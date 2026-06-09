@@ -98,16 +98,25 @@ streams; Android→Tab5 JPEG strip stream — YUV420 q60, agent-side rotate/scal
 (fit/fill)/strip, 16px aligned; audio reserved as a `MIRROR_START` AUDIO bit).
 **Phase 2 (JPEG strip mirror) done & verified on a real Android device.** The Java agent
 (`Server` + `FramePipeline`/`Projection`/`TestPattern`/`ScreenCapture`) captures
-the screen via hidden `SurfaceControl`→`ImageReader` and streams it as JPEG
-strips. **Geometry (rotate → scale-fit → black letterbox) is GPU-offloaded for
-real capture**: `ScreenCapture` projects the source straight into a fixed
-720×1280 `ImageReader` via `setDisplayProjection` (rotation code + a centered
-destination rect computed by the host-testable pure-arithmetic `Projection`; the
-area outside it is the virtual display's black background = the letterbox), so the
-compositor does the work on the GPU and `acquire()` already returns the final
-panel-sized frame — **no CPU readback at source res, no rotate/scale/composite
-Bitmap copies** (this is what got the mirror from a 15fps-capped ~23fps CPU path
-to ~33-37fps; the old per-frame full-frame allocs were also GC-thrashing). The
+the screen via hidden display APIs into a fixed 720×1280 `ImageReader` and streams
+it as JPEG strips. **Geometry (rotate → scale-fit → black letterbox) is
+GPU-offloaded for real capture** via one of two creation paths (scrcpy's order),
+both landing the final upright/scaled/letterboxed panel-sized frame in the reader
+so `acquire()` needs **no CPU readback at source res, no rotate/scale/composite
+Bitmap copies**: (1) **primary** = the hidden *static*
+`android.hardware.display.DisplayManager.createVirtualDisplay(name, w, h,
+displayIdToMirror=0, surface)`, which mirrors display 0 into the panel-sized
+surface and lets the compositor do aspect-preserving rotate/scale-fit/letterbox —
+**this is the path that works on Android 14/15**, where
+`SurfaceControl.createDisplay` was removed (an Android 15 device threw `NoSuchMethodException: SurfaceControl.createDisplay`); (2)
+**fallback** (older Android) = `SurfaceControl.createDisplay` +
+`setDisplayProjection`, where `ScreenCapture` drives the geometry itself (rotation
+code + a centered destination rect computed by the host-testable pure-arithmetic
+`Projection`; the area outside it is the virtual display's black background = the
+letterbox). Only the fallback honours `scaleMode` (fill vs fit) — the primary
+mirror path is always aspect-fit (the mirror default). (GPU geometry is what got
+the mirror from a 15fps-capped ~23fps CPU path to ~33-37fps; the old per-frame
+full-frame allocs were also GC-thrashing.) The
 agent **always emits a full `targetW×targetH` (720×1280) frame**, so every strip
 is full panel width (x=0, w=720) — this is what lets the Tab5 decode each strip
 straight into its framebuffer row band with no stride (the P4 JPEG 2D-DMA can't
