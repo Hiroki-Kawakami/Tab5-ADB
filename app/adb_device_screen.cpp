@@ -46,6 +46,22 @@ void ADBDeviceScreen::build() {
     createToolsContainer();
 }
 
+void ADBDeviceScreen::onAppear() {
+    // Low-rate, agent-free screen preview via `exec:screencap -p`. dst matches the
+    // preview box (360 x 360/9*20 = 360x800) for a 1:1 render. Created/torn down on
+    // appear/disappear (not enter/exit) so the capture+decode loop and its PSRAM
+    // buffers don't keep running behind a pushed sub-screen (Mirroring/Shell/...).
+    preview_ = ScreencapPreview::create(preview_image_, 360, 800);
+    preview_->start();
+}
+
+void ADBDeviceScreen::onDisappear() {
+    if (preview_) {
+        preview_->stop();
+        preview_.reset();
+    }
+}
+
 void ADBDeviceScreen::createHeader() {
     // ---- Device summary, parsed from the CNXN banner (no live ADB calls) ----
     adb::Client *client = app::adb_client();

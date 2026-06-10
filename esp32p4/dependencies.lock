@@ -157,6 +157,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 0.8.5
+  espressif/zlib:
+    component_hash: 64ea2fd6754c5a05951f1ddb312ac835cd782e68cb5bd9dfcd1c3a107c8fbfbc
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.3.2
   idf:
     source:
       type: idf
@@ -177,7 +187,8 @@ direct_dependencies:
 - espressif/esp_lcd_touch_st7123
 - espressif/esp_lvgl_port
 - espressif/esp_wifi_remote
+- espressif/zlib
 - idf
-manifest_hash: 2fddba121c072965ecd0438e9e647a4e7c8e86db0c2110ef94f97af1994a4046
+manifest_hash: fe87a8e271851df5a9c6e272750d692b15744473f8ea4f2700f6ce811e397aad
 target: esp32p4
 version: 2.0.0

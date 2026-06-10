@@ -54,6 +54,7 @@
             pkgs.libusb1   # embedded_adb host transport (simulator)
             pkgs.mbedtls   # embedded_adb RSA auth (simulator); device gets it from ESP-IDF
             pkgs.libjpeg   # agent_link host test: decode the JPEG strips (device uses P4 HW JPEG)
+            pkgs.zlib      # screencap PNG preview inflate (simulator); device gets espressif/zlib via idf_component.yml
             # android-agent/ toolchain
             pkgs.jdk        # javac for the Java agent
             pkgs.android-tools  # standalone adb (push/shell/forward) for the dev loop

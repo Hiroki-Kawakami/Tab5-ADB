@@ -1,0 +1,14 @@
+# ADBDeviceScreen screencap preview (agent-free, exec:screencap -p, ~2s cadence).
+# Needs a real phone plugged into the PC (the sim adb transport is libusb).
+# Connect -> device screen; the preview captures every ~2 s, so wait past a
+# couple of intervals and grab frames.
+settle
+tap 360 640
+wait 6000
+settle
+# Device screen is up; first preview lands within ~2 s of the screencap returning.
+wait 3000
+capture simulator/verify/out/preview_1.jpg
+wait 2500
+capture simulator/verify/out/preview_2.jpg
+quit

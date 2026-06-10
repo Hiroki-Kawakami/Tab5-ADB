@@ -23,6 +23,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(MBEDTLS REQUIRED IMPORTED_TARGET mbedtls mbedcrypto mbedx509)  # embedded_adb RSA auth
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)  # embedded_adb USB transport
 pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)  # idf_compat JPEG decode shim (device: P4 HW JPEG)
+pkg_check_modules(ZLIB REQUIRED IMPORTED_TARGET zlib)  # screencap PNG preview inflate (device: espressif/zlib)
 
 # LVGL (lv_conf.h is picked up from this directory via LV_CONF_INCLUDE_SIMPLE)
 FetchContent_Declare(
@@ -39,7 +40,7 @@ add_executable(simulator)
 target_compile_definitions(simulator PRIVATE
     SDL_DISABLE_ARM_NEON_H
     SDL_MAIN_HANDLED)
-target_link_libraries(simulator SDL2::SDL2 lvgl cjson Threads::Threads PkgConfig::MBEDTLS PkgConfig::LIBUSB PkgConfig::JPEG ${CMAKE_DL_LIBS})
+target_link_libraries(simulator SDL2::SDL2 lvgl cjson Threads::Threads PkgConfig::MBEDTLS PkgConfig::LIBUSB PkgConfig::JPEG PkgConfig::ZLIB ${CMAKE_DL_LIBS})
 
 # The executable's own entry: the SDL/LVGL + FreeRTOS main loop. This is the
 # simulator's "main" (analogous to esp32p4/main on device) — it owns the host
