@@ -17,6 +17,7 @@
 #include "esp_timer.h"
 #include "jpeg_fullrange_decode.h"
 #include "lvgl.hpp"
+#include "resources/resources.h"  // R.font.lucide_40, LUCIDE_*
 #include "screen_manager.hpp"
 
 // ---------------------------------------------------------------------------
@@ -107,34 +108,18 @@ void ADBMirroringScreen::onEnter() {
 
 void ADBMirroringScreen::start_mirror_ui() {
     // Drop the waiting label, switch the DisplayManager into overlay mode (the
-    // mirror owns the framebuffers; a small LVGL display renders the opaque control
-    // bar DM composites at flush time), register as the link's video listener, and
-    // MIRROR_START. The bar is a full-width strip at the bottom of the panel.
+    // mirror owns the framebuffers; a small LVGL display renders the control strip
+    // DM composites at flush time), register as the link's video listener, and
+    // MIRROR_START. Build the strip BEFORE start_mirror so any on_orientation /
+    // on_video_strip callback finds an overlay to drive.
     if (waiting_label_) { lv_obj_delete(static_cast<lv_obj_t*>(waiting_label_)); waiting_label_ = nullptr; }
 
-    lv_area_t rect = {0, PANEL_H - kBarH, PANEL_W - 1, PANEL_H - 1};
-    lv_obj_t* bar = display_manager.enter_overlay({rect, 0, 1.0f, /*clear=*/true});
-    overlay_active_ = true;
-
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x1E1E1E), 0);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(bar, 16, 0);
-    lv_obj_t* back = lv_button_create(bar);
-    lv_obj_set_height(back, kBarH - 32);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_t* lbl = lv_label_create(back);
-    lv_label_set_text(lbl, LV_SYMBOL_LEFT "  Back");
-    lv_obj_center(lbl);
-    // Defer the pop: it runs onExit -> exit_overlay, which deletes this overlay
-    // display (and this button) — don't tear it down from inside its own event.
-    lv_obj_add_event_fn(back, LV_EVENT_CLICKED,
-                        [](lv_event_t*) { lv_async_call([] { screen_manager.pop(); }); });
-
+    apply_overlay(cur_rot_, /*first=*/true);  // cur_rot_ defaults to 0 (portrait)
     display_manager.set_overlay_visible(true);
 
-    // Poll the raw panel touch on the LVGL thread to toggle the bar when the user
-    // taps the video area (outside the bar). touch_point + the indev read both run
-    // on the LVGL thread, so the cached state is consistent.
+    // Poll the raw panel touch on the LVGL thread: a swipe out of the bottom-left
+    // corner reveals a hidden strip. touch_point + the indev read both run on the
+    // LVGL thread, so the cached state is consistent.
     poll_timer_ = lv_timer_create(
         [](lv_timer_t* t) {
             static_cast<ADBMirroringScreen*>(lv_timer_get_user_data(t))->poll_touch();
@@ -142,7 +127,8 @@ void ADBMirroringScreen::start_mirror_ui() {
         30, this);
 
     // Register on the established link, then start mirroring. The video channel
-    // (on_mirror_started / on_video_strip) fires on the adb reader thread.
+    // (on_mirror_started / on_video_strip / on_orientation) fires on the adb reader
+    // thread.
     auto l = app::agent_client().link();
     if (!l) {
         std::printf("mirror: link gone after connect\n");
@@ -153,14 +139,168 @@ void ADBMirroringScreen::start_mirror_ui() {
     l->start_mirror();  // 720x1280 fit, video (default MirrorConfig)
 }
 
+void ADBMirroringScreen::apply_overlay(uint8_t rot, bool first) {
+    // enter_overlay is re-entrant: `first` only chooses whether to clear the
+    // framebuffers (black letterbox on the initial entry) and whether to restore
+    // visibility (a rotation-change rebuild keeps the strip shown if it was).
+    // Footprint = the cross x len strip flush against the viewer's bottom-left
+    // corner; enter_overlay derives the (rotation-swapped) content size from it.
+    bool was_visible = !first && display_manager.overlay_visible();
+    bool right, bottom;
+    anchor_corner(rot, &right, &bottom);
+    int x1 = right ? PANEL_W - kStripCross : 0;
+    int y1 = bottom ? PANEL_H - kStripLen : 0;
+    lv_area_t rect = {x1, y1, x1 + kStripCross - 1, y1 + kStripLen - 1};
+
+    DisplayManager::OverlayConfig cfg{rect, view_rot(rot) * 90, 1.0f, /*clear=*/first};
+    lv_obj_t* scr = display_manager.enter_overlay(cfg);
+    overlay_active_ = true;
+    cur_rot_ = rot;
+    if (scr) build_overlay_buttons(scr, rot_landscape(rot));
+    if (was_visible) display_manager.set_overlay_visible(true);
+}
+
+void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
+    // The control items read from the corner outward (SEP = a group separator
+    // line). This single order IS the landscape (left->right) layout; portrait
+    // (top->bottom) is the same list reversed:
+    //   landscape: Hide | Back Home Recents | Vol- Vol+ Power | OpMode DispMode End
+    //   portrait : End DispMode OpMode | Power Vol+ Vol- | Recents Home Back | Hide
+    // Icons are placeholders (lucide_40) pending final selection.
+    enum { HIDE, BACK, HOME, RECENTS, VOLDN, VOLUP, POWER, OPMODE, DISPMODE, END, SEP = -1 };
+    static const int kOrder[] = {
+        HIDE, SEP, BACK, HOME, RECENTS, SEP, VOLDN, VOLUP, POWER, SEP, OPMODE, DISPMODE, END,
+    };
+    constexpr int kN = sizeof(kOrder) / sizeof(kOrder[0]);
+
+    auto icon_of = [](int id) -> const char* {
+        switch (id) {
+            case HIDE:     return LUCIDE_CHEVRON_DOWN;         // hide the strip
+            case BACK:     return LUCIDE_ARROW_LEFT;           // Android Back
+            case HOME:     return LUCIDE_CIRCLE;               // Android Home
+            case RECENTS:  return LUCIDE_SQUARE;               // Android Recents
+            case VOLDN:    return LUCIDE_VOLUME_1;             // volume down
+            case VOLUP:    return LUCIDE_VOLUME_2;             // volume up
+            case POWER:    return LUCIDE_POWER;                // power
+            case OPMODE:   return LUCIDE_POINTER;              // touch-control toggle
+            case DISPMODE: return LUCIDE_MAXIMIZE;             // fit/fill toggle
+            default:       return LUCIDE_X;                    // END = end mirroring
+        }
+    };
+
+    // The overlay content rect is composited opaquely (PPA SRM), so make the strip
+    // background fill it (the panel area outside the strip stays black = the memset
+    // overlay buffer).
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
+
+    lv_obj_t* cont = lv_obj_create(scr);
+    lv_obj_remove_style_all(cont);
+    lv_obj_set_size(cont, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x1E1E1E), 0);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(cont, 1, 0);
+    lv_obj_set_style_border_side(cont, (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_RIGHT), 0);
+    lv_obj_set_style_border_color(cont, lv_color_hex(0x4A4A4A), 0);
+    lv_obj_set_style_border_opa(cont, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(cont, kPad, 0);
+    lv_obj_set_flex_flow(cont, land ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(cont, kGap, 0);
+    lv_obj_set_style_pad_column(cont, kGap, 0);
+    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+
+    for (int i = 0; i < kN; ++i) {
+        int id = kOrder[land ? i : (kN - 1 - i)];  // portrait = reversed order
+        if (id == SEP) {
+            // A thin line spanning the strip across its short axis.
+            lv_obj_t* s = lv_obj_create(cont);
+            lv_obj_remove_style_all(s);
+            lv_obj_set_size(s, land ? kSep : LV_PCT(100), land ? LV_PCT(100) : kSep);
+            lv_obj_set_style_bg_color(s, lv_color_hex(0x4A4A4A), 0);
+            lv_obj_set_style_bg_opa(s, LV_OPA_COVER, 0);
+            continue;
+        }
+        lv_obj_t* b = lv_button_create(cont);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_size(b, kBtn, kBtn);
+        lv_obj_set_style_radius(b, 12, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x4A4A4A), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_t* lbl = lv_label_create(b);
+        lv_label_set_text(lbl, icon_of(id));
+        lv_obj_set_style_text_font(lbl, R.font.lucide_40, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        lv_obj_center(lbl);
+        switch (id) {
+            case HIDE:
+                lv_obj_add_event_fn(b, LV_EVENT_CLICKED, [](lv_event_t*) {
+                    display_manager.set_overlay_visible(false);
+                });
+                break;
+            case END:
+                // Defer the pop: it runs onExit -> exit_overlay, which deletes this
+                // overlay (and this button) — don't tear it down from its own event.
+                lv_obj_add_event_fn(b, LV_EVENT_CLICKED,
+                                    [](lv_event_t*) { lv_async_call([] { screen_manager.pop(); }); });
+                lv_obj_set_style_text_color(lbl, lv_color_hex(0xFF8888), 0);
+                break;
+            default:
+                // Only Hide and End are wired for now (the rest land once the UI is final).
+                break;
+        }
+    }
+}
+
+bool ADBMirroringScreen::in_corner(int px, int py, uint8_t rot) {
+    bool right, bottom;
+    anchor_corner(rot, &right, &bottom);
+    return (right ? px > PANEL_W - kCornerSwipe : px < kCornerSwipe) &&
+           (bottom ? py > PANEL_H - kCornerSwipe : py < kCornerSwipe);
+}
+
 void ADBMirroringScreen::poll_touch() {
     bsp_touch_point_t p;
     bool pressed = display_manager.touch_point(&p);
+    bool visible = display_manager.overlay_visible();
+
     if (pressed && !touch_prev_) {
-        bool in_bar = (p.y >= PANEL_H - kBarH);  // full-width bottom strip
-        if (!in_bar) display_manager.set_overlay_visible(!display_manager.overlay_visible());
+        // Press edge: arm a reveal swipe if it starts in the corner while hidden.
+        if (!visible && in_corner(p.x, p.y, cur_rot_)) {
+            swipe_active_ = true;
+            swipe_x0_ = p.x;
+            swipe_y0_ = p.y;
+        }
+    } else if (pressed && swipe_active_ && !visible) {
+        int dx = p.x - swipe_x0_, dy = p.y - swipe_y0_;
+        if (dx * dx + dy * dy >= kSwipeThresh * kSwipeThresh) {
+            display_manager.set_overlay_visible(true);  // revealed
+            swipe_active_ = false;
+        }
+    } else if (!pressed) {
+        swipe_active_ = false;
     }
     touch_prev_ = pressed;
+}
+
+void ADBMirroringScreen::on_orientation(agent_link::Link*,
+                                        const agent_link::OrientationInfo& info) {
+    // Reader thread: marshal the layout switch to the LVGL thread (overlay rebuild
+    // touches LVGL + the DM overlay). Skip if we navigated away or nothing changed.
+    // Rebuild on any rotation-code change (90<->270 flips the anchor corner + PPA
+    // angle even though both are "landscape").
+    uint8_t rot = info.rotation & 3;
+    std::weak_ptr<ADBMirroringScreen> self =
+        std::static_pointer_cast<ADBMirroringScreen>(shared_from_this());
+    lv_async_call([self, rot] {
+        auto s = self.lock();
+        if (!s || s->exited() || !s->overlay_active_) return;
+        if (rot == s->cur_rot_) return;
+        s->apply_overlay(rot, /*first=*/false);  // rebuild: keeps visibility
+    });
 }
 
 void ADBMirroringScreen::onExit() {
@@ -271,14 +411,14 @@ void ADBMirroringScreen::decode_trampoline(void* arg) {
 void ADBMirroringScreen::decode_loop() {
     // Consumer: drain finished frames, HW-decode each strip straight into the back
     // framebuffer, and present it via DisplayManager.flush() — which composites the
-    // overlay bar (if visible) before presenting. The decode task owns fb_/back_
+    // overlay strip (if visible) before presenting. The decode task owns fb_/back_
     // exclusively (DM.flush takes the LVGL lock only for the compose), so the double
     // buffer needs no lock of its own.
     //
     // The last decoded frame is RETAINED (held) instead of recycled immediately: it
-    // is re-decoded to erase the bar when the overlay is hidden while the video is
-    // static (no new frame arrives to repaint the band the bar covered) — the
-    // Tab5-Screen-Streamer reveal trick.
+    // is re-decoded to erase the strip when the overlay is hidden while the video
+    // is static (no new frame arrives to repaint the region the strip covered) —
+    // the Tab5-Screen-Streamer reveal trick.
     int  held = -1;          // last decoded slot, kept out of free_q_ for re-decode
     bool last_visible = false;  // overlay state of the last presented frame
 
@@ -301,7 +441,7 @@ void ADBMirroringScreen::decode_loop() {
         if (!got) {
             // No new frame within the timeout (static screen, or stream stalled).
             if (last_visible && !visible && held >= 0) {
-                // Bar just hidden over a static frame: re-decode the last frame so
+                // Strip just hidden over a static frame: re-decode the last frame so
                 // the band it covered shows the video again (flush won't compose).
                 if (decode_all(held, fb_[back_])) {
                     display_manager.flush(back_);
@@ -310,7 +450,7 @@ void ADBMirroringScreen::decode_loop() {
                 }
                 last_visible = false;
             } else if (visible && front_ >= 0) {
-                // Bar up with no fresh video: recomposite it onto the displayed
+                // Strip up with no fresh video: recomposite it onto the displayed
                 // buffer in place (no swap) so it stays responsive (e.g. on show).
                 display_manager.flush(front_);
                 last_visible = true;
@@ -324,7 +464,7 @@ void ADBMirroringScreen::decode_loop() {
         // frame's pixels). Drop it and keep showing the last good frame instead.
         bool ok = decode_all(slot, fb_[back_]);
         if (ok) {
-            display_manager.flush(back_);  // composites the bar if visible
+            display_manager.flush(back_);  // composites the strip if visible
             front_ = back_;
             back_ = (back_ + 1) % kFbCount;
             last_visible = visible;

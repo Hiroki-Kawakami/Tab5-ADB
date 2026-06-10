@@ -1,5 +1,7 @@
 #pragma once
 #include "bsp_types.h"  // bsp_pixel_format_t, bsp_touch_point_t
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"  // SemaphoreHandle_t (overlay compositor lock)
 #include "lvgl.hpp"
 
 // Central owner of the panel framebuffers, the LVGL display, the touch indev, and
@@ -49,9 +51,16 @@ public:
         float scale = 1.0f;             // content -> footprint scale
         bool  clear_framebuffers = false;  // black both framebuffers (+flush) on enter
     };
-    // Enter overlay mode: create the overlay LVGL display sized to the (unrotated,
-    // unscaled) content, route the indev to it, and return its active screen for
-    // the caller to build the bar onto. The overlay starts hidden.
+    // Enter (or, if already in overlay mode, rebuild) the overlay: create the
+    // overlay LVGL display sized to the (unrotated, unscaled) content, route the
+    // indev to it, and return its active screen for the caller to build the strip
+    // onto. Re-entrant — call it again with a new footprint / rotation to flip the
+    // layout (e.g. mirror portrait <-> landscape) while still in overlay mode; it
+    // tears the old overlay display + buffer down and builds the new one. The
+    // overlay starts hidden each time (the caller re-asserts set_overlay_visible).
+    // Call from the LVGL thread. The buffer swap is serialized against the
+    // compositor (overlay_mtx_), so a concurrent compose on the decode thread can't
+    // read a freed buffer.
     lv_obj_t *enter_overlay(const OverlayConfig &cfg);
     // Leave overlay mode: restore the indev to the main display and destroy the
     // overlay display/buffer. The caller must have stopped writing/flushing the
@@ -90,6 +99,12 @@ private:
     int           overlay_rotation_ = 0;
     float         overlay_scale_ = 1.0f;
     bool          overlay_visible_ = false;
+    // Serializes the overlay geometry + buffer (compose_overlay reads them on the
+    // decode thread; enter/reconfigure/exit_overlay write them on the LVGL thread).
+    // A FreeRTOS mutex (priority inheritance), created in init(). A leaf lock —
+    // compose never takes lv_lock, so it can't deadlock the teardown join (see
+    // flush()).
+    SemaphoreHandle_t overlay_mtx_ = nullptr;
     void         *ppa_srm_ = nullptr;       // ppa_client_handle_t (lazy)
     uint8_t      *main_scratch_ = nullptr;  // full-screen buffer the main display
                                             // renders into while in overlay mode

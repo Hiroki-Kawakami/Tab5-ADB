@@ -124,11 +124,14 @@ void Link::on_frame(const FrameHeader& h, const uint8_t* payload) {
         case kTypeControlResponse:
             handle_control_response(payload, h.length);
             break;
+        case kTypeEvent:
+            handle_event(payload, h.length);
+            break;
         case kTypeJpeg:
             handle_jpeg(h, payload);
             break;
-        // AUDIO / EVENT arrive in later slices; unknown TYPEs are ignored for
-        // forward compatibility (§3.1).
+        // AUDIO arrives in a later slice; unknown TYPEs are ignored for forward
+        // compatibility (§3.1).
         default:
             break;
     }
@@ -202,6 +205,29 @@ void Link::handle_control_response(const uint8_t* p, size_t len) {
     std::shared_ptr<VideoListener> v;
     { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
     if (v) v->on_mirror_started(this, info);
+}
+
+// EVENT (§4.3): an async agent->Tab5 notification. payload = event(u8) + data.
+// Unknown events are ignored (forward compat, §8). Dispatched to the video
+// listener (orientation drives the feature's overlay layout).
+void Link::handle_event(const uint8_t* p, size_t len) {
+    if (len < 1) {
+        fail(adb::Error::Protocol);
+        return;
+    }
+    const uint8_t event = p[0];
+    if (event != kEventOrientation) return;  // unknown event: ignore (forward compat)
+    if (len < 1 + kOrientationDataLen) {
+        fail(adb::Error::Protocol);
+        return;
+    }
+    OrientationInfo info;
+    info.rotation = p[1];
+    info.landscape = rotation_is_landscape(info.rotation);
+    // p[2..4] reserved.
+    std::shared_ptr<VideoListener> v;
+    { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
+    if (v) v->on_orientation(this, info);
 }
 
 // JPEG (§5.2): one strip = subheader (x,y,w,h) + JPEG bytes. The frame layer has

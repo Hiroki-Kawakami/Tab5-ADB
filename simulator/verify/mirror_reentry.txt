@@ -9,8 +9,9 @@ settle
 tap 552 162
 wait 10000
 capture simulator/verify/out/reentry_1.jpg
-# Back (overlay bar, bottom-left) -> stop_mirror, keep the agent connected.
-tap 88 1232
+# End (mirroring終了 = top icon of the bottom-left control strip) -> pops the
+# screen: stop_mirror, keep the agent connected.
+tap 44 558
 wait 3000
 settle
 # Open Mirroring again (2nd time -> should resume instantly, no re-launch).

@@ -42,7 +42,9 @@ public final class Server {
     private static final int MAGIC = 0xA5;
     private static final int TYPE_CONTROL_REQUEST = 0x01;
     private static final int TYPE_CONTROL_RESPONSE = 0x02;
+    private static final int TYPE_EVENT = 0x03;
     private static final int TYPE_JPEG = 0x10;
+    private static final int EVENT_ORIENTATION = 0x03;
     private static final int FLAG_FRAME_START = 0x01;
     private static final int FLAG_FRAME_END = 0x02;
     private static final int CMD_HELLO = 0x01;
@@ -288,6 +290,10 @@ public final class Server {
                                 mp.scaleMode, rotation);
                         captureRotation = rotation;
                         System.out.println("tab5adb-agent: capture built for rotation " + rotation);
+                        // Tell the Tab5 the device's orientation so it lays the
+                        // overlay UI out for portrait vs landscape (§4.4). Sent on
+                        // the first frame of every stream and on each rotation change.
+                        sendOrientation(conn, rotation);
                     }
                 }
                 Bitmap src = nextSource(capture, frame);
@@ -327,6 +333,14 @@ public final class Server {
     private Bitmap nextSource(ScreenCapture capture, int frame) {
         if (testPattern) return TestPattern.make(testW, testH, frame);
         return capture.acquire();
+    }
+
+    /** Notify the Tab5 of the source device's logical rotation (ORIENTATION, §4.4). */
+    private void sendOrientation(Conn conn, int rotation) throws IOException {
+        byte[] payload = new byte[1 + 4];  // event + rotation + 3 reserved
+        payload[0] = (byte) EVENT_ORIENTATION;
+        payload[1] = (byte) rotation;      // Surface.ROTATION_* (0..3)
+        conn.writeFrame(TYPE_EVENT, 0, payload);
     }
 
     /** Send one screen frame as a run of JPEG strips (FRAME_START..FRAME_END, §5.2). */

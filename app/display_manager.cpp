@@ -33,6 +33,8 @@ void DisplayManager::init() {
     lv_indev_set_type(indev_, LV_INDEV_TYPE_POINTER);
     lv_indev_set_user_data(indev_, this);
     lv_indev_set_read_cb(indev_, &DisplayManager::indev_read_cb);
+
+    overlay_mtx_ = xSemaphoreCreateMutex();
 }
 
 void DisplayManager::main_flush_cb(lv_display_t *disp, const lv_area_t * /*area*/,
@@ -127,23 +129,40 @@ bool DisplayManager::touch_point(bsp_touch_point_t *out) const {
 // MARK: Overlay mode
 
 lv_obj_t *DisplayManager::enter_overlay(const OverlayConfig &cfg) {
-    overlay_rect_ = cfg.rect;
-    overlay_rotation_ = cfg.rotation;
-    overlay_scale_ = cfg.scale > 0 ? cfg.scale : 1.0f;
-    overlay_visible_ = false;
+    // Re-entrant: called both to first enter overlay mode and to rebuild the
+    // overlay for a new footprint / rotation (e.g. the mirror flipping portrait
+    // <-> landscape). Drop any existing overlay display first (LVGL thread → no
+    // concurrent render); its widgets go with it, and the caller rebuilds onto the
+    // returned screen.
+    if (overlay_disp_) { lv_display_delete(overlay_disp_); overlay_disp_ = nullptr; }
 
-    int rect_w = lv_area_get_width(&overlay_rect_);
-    int rect_h = lv_area_get_height(&overlay_rect_);
+    float scale = cfg.scale > 0 ? cfg.scale : 1.0f;
+    int rect_w = lv_area_get_width(&cfg.rect);
+    int rect_h = lv_area_get_height(&cfg.rect);
     // Content is the unrotated, unscaled footprint. A 90/270 rotation swaps the
     // footprint's width/height relative to the content.
-    bool swap = (overlay_rotation_ == 90 || overlay_rotation_ == 270);
-    content_w_ = (int)lroundf((swap ? rect_h : rect_w) / overlay_scale_);
-    content_h_ = (int)lroundf((swap ? rect_w : rect_h) / overlay_scale_);
+    bool swap = (cfg.rotation == 90 || cfg.rotation == 270);
+    int new_cw = (int)lroundf((swap ? rect_h : rect_w) / scale);
+    int new_ch = (int)lroundf((swap ? rect_w : rect_h) / scale);
+    size_t buf_bytes = (size_t)new_cw * new_ch * 2;  // RGB565
 
-    size_t buf_bytes = (size_t)content_w_ * content_h_ * 2;  // RGB565
-    overlay_buf_ = static_cast<uint8_t *>(
-        heap_caps_aligned_alloc(64, buf_bytes, MALLOC_CAP_SPIRAM));
-    if (overlay_buf_) std::memset(overlay_buf_, 0, buf_bytes);
+    // Swap geometry + buffer under the compositor lock so that, on a re-entry while
+    // still streaming, a decode-thread compose_overlay never reads a half-freed
+    // buffer / stale dims.
+    {
+        xSemaphoreTake(overlay_mtx_, portMAX_DELAY);
+        if (overlay_buf_) { heap_caps_free(overlay_buf_); overlay_buf_ = nullptr; }
+        overlay_rect_ = cfg.rect;
+        overlay_rotation_ = cfg.rotation;
+        overlay_scale_ = scale;
+        content_w_ = new_cw;
+        content_h_ = new_ch;
+        overlay_buf_ = static_cast<uint8_t *>(
+            heap_caps_aligned_alloc(64, buf_bytes, MALLOC_CAP_SPIRAM));
+        if (overlay_buf_) std::memset(overlay_buf_, 0, buf_bytes);
+        xSemaphoreGive(overlay_mtx_);
+    }
+    overlay_visible_ = false;  // the caller re-asserts its visibility policy
 
     overlay_disp_ = lv_display_create(content_w_, content_h_);
     lv_display_set_color_format(overlay_disp_, LV_COLOR_FORMAT_RGB565);
@@ -162,7 +181,8 @@ lv_obj_t *DisplayManager::enter_overlay(const OverlayConfig &cfg) {
     // full-screen scratch buffer (and main_flush_cb stops presenting) so the
     // mirror owns the panel framebuffers exclusively — otherwise the main
     // display's one-shot render of its (static) screen leaves stale pixels in a
-    // buffer the mirror then composites the bar over when no video is arriving.
+    // buffer the mirror then composites the strip over when no video is arriving.
+    // (Idempotent on re-entry: main_scratch_ is allocated once.)
     size_t fb_bytes = (size_t)PANEL_W * PANEL_H * bsp_pixel_format_bytes(format());
     if (!main_scratch_)
         main_scratch_ = static_cast<uint8_t *>(
@@ -181,7 +201,6 @@ lv_obj_t *DisplayManager::enter_overlay(const OverlayConfig &cfg) {
         // Clear every configured framebuffer (the mirror triple-buffers, so there
         // can be three) so the pre-stream / letterbox stays black whichever buffer
         // is presented first. Indices past the configured count return NULL.
-        size_t fb_bytes = (size_t)PANEL_W * PANEL_H * bsp_pixel_format_bytes(format());
         for (int i = 0; i < 3; ++i) {
             void *fb = bsp_display_get_frame_buffer(i);
             if (!fb) continue;
@@ -213,16 +232,30 @@ void DisplayManager::exit_overlay() {
 void DisplayManager::set_overlay_visible(bool visible) { overlay_visible_ = visible; }
 
 void DisplayManager::compose_overlay(int index) {
-    if (!overlay_buf_) return;
+    // Hold overlay_mtx_ for the whole read+composite: reconfigure_overlay (LVGL
+    // thread) frees and reallocates overlay_buf_ + geometry, so without this a
+    // concurrent rotate-switch could free the buffer mid-PPA. A leaf lock (we
+    // never take lv_lock here), so it can't deadlock the teardown join.
+    xSemaphoreTake(overlay_mtx_, portMAX_DELAY);
+    if (!overlay_buf_) {
+        xSemaphoreGive(overlay_mtx_);
+        return;
+    }
     if (!ppa_srm_) {
         ppa_client_config_t cc = {};
         cc.oper_type = PPA_OPERATION_SRM;
         ppa_client_handle_t client = nullptr;
-        if (ppa_register_client(&cc, &client) != ESP_OK) return;
+        if (ppa_register_client(&cc, &client) != ESP_OK) {
+            xSemaphoreGive(overlay_mtx_);
+            return;
+        }
         ppa_srm_ = client;
     }
     void *fb = bsp_display_get_frame_buffer(index);
-    if (!fb) return;
+    if (!fb) {
+        xSemaphoreGive(overlay_mtx_);
+        return;
+    }
     bool rgb888 = (format() == BSP_PIXEL_FORMAT_RGB888);
 
     ppa_srm_oper_config_t op = {};
@@ -249,6 +282,7 @@ void DisplayManager::compose_overlay(int index) {
     op.scale_y = overlay_scale_;
     op.mode = PPA_TRANS_MODE_BLOCKING;
     ppa_do_scale_rotate_mirror(static_cast<ppa_client_handle_t>(ppa_srm_), &op);
+    xSemaphoreGive(overlay_mtx_);
 }
 
 void DisplayManager::panel_to_content(int px, int py, int *lx, int *ly) const {

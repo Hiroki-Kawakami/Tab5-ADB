@@ -44,8 +44,8 @@
 // slot is touched by exactly one thread at a time and the producer drops whole
 // frames when the consumer falls behind (latest-frame-wins). NO LVGL widgets are
 // composited over the stream (a back button / status label would force LVGL to
-// re-blend every frame — the draw cost we avoid): navigation back is the bar's
-// Back button, launch progress goes to the log.
+// re-blend every frame — the draw cost we avoid): navigation back is the control
+// strip's End button, launch progress goes to the log.
 class ADBMirroringScreen : public Screen, public agent_link::VideoListener {
 public:
     ADBMirroringScreen();
@@ -55,23 +55,71 @@ public:
     void onEnter() override;  // ensure the agent is connected, then start the mirror
     void onExit() override;   // stop the mirror (link kept) + tear the decode down
 
-    // agent_link::VideoListener — both fire on the adb reader thread.
+    // agent_link::VideoListener — all fire on the adb reader thread.
     void on_mirror_started(agent_link::Link* link, const agent_link::MirrorInfo& info) override;
     void on_video_strip(agent_link::Link* link, const agent_link::VideoStrip& strip) override;
+    void on_orientation(agent_link::Link* link, const agent_link::OrientationInfo& info) override;
 
 private:
     // Once the agent is connected (or already live): swap the waiting label for the
-    // overlay control bar, register as the link's video listener, and MIRROR_START.
+    // overlay control strip, register as the link's video listener, and MIRROR_START.
     void start_mirror_ui();
+
+    // The control overlay is an icon strip flush against one panel corner: a
+    // vertical strip in portrait, a horizontal strip when the source device turns
+    // landscape (the user physically rotates the Tab5; the overlay is PPA-rotated
+    // to stay upright). It is keyed off the device's actual rotation
+    // (Surface.ROTATION_* 0..3, from the agent's ORIENTATION event) so it always
+    // lands at the **viewer's** bottom-left: ROTATION_90 vs _270 put that corner at
+    // opposite physical panel corners and need opposite PPA angles. Hidden/shown
+    // without a timeout: the in-strip Hide button hides it; a swipe out of that
+    // corner (kCornerSwipe hot zone) reveals it again.
+    static bool rot_landscape(uint8_t rot) { return (rot & 1) != 0; }
+    // A landscape app is viewed by turning the Tab5 the opposite way from the naive
+    // guess (verified on real HW), so the overlay's PPA angle + anchor corner use
+    // this corrected rotation: it swaps ROTATION_90 <-> _270 and leaves portrait
+    // (0/180) alone, keeping the overlay aligned with the video (both flip
+    // together). Flip back to `rot` if a later device shows the other handedness.
+    static uint8_t view_rot(uint8_t rot) { return (4 - rot) & 3; }
+    // The panel corner the strip anchors to (= the viewer's bottom-left) for device
+    // rotation `rot`: view_rot 0->bottom-left, 1->bottom-right, 2->top-right,
+    // 3->top-left. Used by both apply_overlay (footprint) and in_corner (hot zone).
+    static void anchor_corner(uint8_t rot, bool* right, bool* bottom) {
+        uint8_t g = view_rot(rot);
+        *right = (g == 1 || g == 2);
+        *bottom = (g == 0 || g == 1);
+    }
+    // Build (first=true: clear framebuffers / fresh entry) or rebuild (first=false,
+    // a rotation change keeps visibility) the overlay for device rotation `rot`,
+    // then populate its buttons.
+    void apply_overlay(uint8_t rot, bool first);
+    // Lay the control buttons + group separators onto the overlay screen `scr` in
+    // the spec'd order — vertical (portrait) or horizontal (landscape). The content
+    // is always built "upright"; the footprint's PPA rotation orients it.
+    void build_overlay_buttons(lv_obj_t* scr, bool landscape);
+    // True when (px,py) is inside the swipe hot zone (the anchor corner for `rot`).
+    static bool in_corner(int px, int py, uint8_t rot);
+
+    // --- overlay control strip geometry (all adjustable). The strip hugs the
+    // panel corner (no margin); one button size for both orientations. ---
+    static constexpr int kCornerSwipe = 80;  // corner reveal hot zone [px]
+    static constexpr int kSwipeThresh = 28;  // min drag from the corner to reveal
+    static constexpr int kBtn = 56;          // button (square) side
+    static constexpr int kPad = 12;          // strip inner padding
+    static constexpr int kGap = 8;           // gap between adjacent items
+    static constexpr int kSep = 2;           // group separator line thickness
+    // The strip holds 10 buttons + 3 separators (13 items, 12 gaps). Long axis =
+    // `len`, thickness across = `cross`; the panel footprint is always cross x len
+    // (the landscape strip is PPA-rotated, so its long axis still runs up panel y).
+    static constexpr int kStripCross = kBtn + 2 * kPad;
+    static constexpr int kStripLen = 10 * kBtn + 3 * kSep + 12 * kGap + 2 * kPad;
     // The smallest strip is 16px tall, so a panel holds at most this many strips.
     static constexpr int kMaxStrips = PANEL_H / 16;
     // Frame slots in flight: the consumer holds the decoding slot AND retains the
-    // last decoded frame (to re-decode and erase the bar when the overlay is
+    // last decoded frame (to re-decode and erase the strip when the overlay is
     // hidden over static video), the producer holds the filling one, and ready_q_
     // holds at most one — plus headroom so a steady stream never drops spuriously.
     static constexpr int kSlots = 5;
-    // Opaque control bar: a full-width strip across the bottom of the panel.
-    static constexpr int kBarH = 96;
 
     // One received frame: its strips' JPEG bytes concatenated in `buf` (PSRAM,
     // grown lazily) plus a descriptor per strip. The reader thread fills it; the
@@ -98,8 +146,8 @@ private:
     bool decode_one(uint8_t* jpeg, uint32_t len, uint16_t y, uint16_t h,
                     uint8_t* dst);
     void free_decoder();
-    // LVGL-thread lv_timer callback: poll the raw touch and toggle the overlay
-    // bar when the video area (outside the bar) is tapped.
+    // LVGL-thread lv_timer callback: poll the raw touch and reveal a hidden
+    // control strip when the user swipes out of the bottom-left corner.
     void poll_touch();
 
     // The bsp framebuffers (not owned), used as a TRIPLE buffer: the decode task
@@ -112,8 +160,11 @@ private:
     int back_ = 0;     // index the decode task draws into next
     int front_ = -1;   // index currently displayed (last flushed; -1 = none yet)
 
-    void* poll_timer_ = nullptr;  // lv_timer_t* (LVGL thread): bar show/hide toggle
-    bool  touch_prev_ = false;    // previous press state, for tap-edge detection
+    void* poll_timer_ = nullptr;  // lv_timer_t* (LVGL thread): corner-swipe reveal
+    bool  touch_prev_ = false;    // previous press state, for press-edge detection
+    bool  swipe_active_ = false;  // a reveal swipe is in progress from the corner
+    int   swipe_x0_ = 0, swipe_y0_ = 0;  // where the corner swipe started
+    uint8_t cur_rot_ = 0;  // LVGL thread: device rotation the overlay was built for
 
     FrameSlot slots_[kSlots];
     void* free_q_ = nullptr;   // QueueHandle_t<int>: slot indices the producer may fill

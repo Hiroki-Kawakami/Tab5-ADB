@@ -1,0 +1,24 @@
+# Mirror control-overlay shape + interaction (needs a real phone, like mirror.txt).
+# connect -> open Mirroring -> the portrait control strip shows bottom-left;
+# tap Hide to dismiss it; swipe out of the bottom-left corner to reveal it again.
+settle
+tap 360 640        # Connect
+wait 6000
+settle
+tap 552 162        # Mirroring tool (top-right)
+# Agent launch + first frames take a few seconds.
+wait 9000
+capture simulator/verify/out/overlay_shown.jpg      # vertical strip, bottom-left
+# Hide button = bottom-most icon of the strip (corner-nearest).
+tap 44 1236
+wait 1000
+capture simulator/verify/out/overlay_hidden.jpg     # strip gone, clean video
+# Reveal: swipe up out of the bottom-left corner hot zone.
+down 35 1250
+move 35 1210
+move 35 1170
+move 35 1140
+up
+wait 1000
+capture simulator/verify/out/overlay_revealed.jpg   # strip back
+quit

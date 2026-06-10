@@ -41,6 +41,24 @@ enum Cmd : uint8_t {
     kCmdMirrorSetParam = 0x12,  // T->A: live param change (reserved)
 };
 
+// EVENT types (§4.4 event registry). Agent->Tab5 async notifications (TYPE=EVENT).
+enum Event : uint8_t {
+    kEventError = 0x01,
+    kEventStreamStopped = 0x02,
+    kEventOrientation = 0x03,  // source device logical rotation changed (§4.4)
+};
+
+// ORIENTATION event data (after the event byte, §4.4): rotation + reserved.
+//  +0 u8  rotation   Surface.ROTATION_* (0/1/2/3 = 0/90/180/270)
+//  +1 u8  reserved
+//  +2 u16 reserved
+constexpr size_t kOrientationDataLen = 4;
+
+// A rotation code is "landscape" when it is 90 or 270 (odd). The Tab5 keeps
+// showing the device's natural-orientation framebuffer either way (§5.1); this
+// only drives the overlay layout (portrait strip vs landscape strip).
+inline bool rotation_is_landscape(uint8_t rotation) { return (rotation & 1) != 0; }
+
 // Capability bits (§4.6) — also the MIRROR_START `streams` bit assignment.
 enum Cap : uint16_t {
     kCapVideo = 0x0001,

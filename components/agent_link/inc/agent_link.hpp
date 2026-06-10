@@ -82,6 +82,15 @@ struct MirrorInfo {
     uint8_t video_codec = 0;     // 0x01 = JPEG(YUV420)
 };
 
+// The source device's logical orientation (§4.4 ORIENTATION event). The Tab5
+// keeps mirroring the device's natural-orientation framebuffer either way (§5.1);
+// this only tells the feature how to lay out its overlay UI (portrait vs
+// landscape), since the user physically turns the Tab5 to view a landscape app.
+struct OrientationInfo {
+    uint8_t rotation = 0;    // Surface.ROTATION_* (0/1/2/3 = 0/90/180/270)
+    bool landscape = false;  // rotation is 90 or 270 (the panel is being viewed sideways)
+};
+
 // One JPEG strip (§5.2): the rectangle on the Tab5 panel (x,y,w,h, all 16px
 // multiples) plus the JPEG bytes that decode into it. `frame_start`/`frame_end`
 // mirror the frame-layer FLAGS — present the framebuffer after the frame_end
@@ -129,6 +138,11 @@ public:
     // The agent accepted MIRROR_START (its response, §4.4 result): the video
     // stream is about to flow. Optional. Fires once per start_mirror().
     virtual void on_mirror_started(Link* /*link*/, const MirrorInfo& /*info*/) {}
+
+    // The source device's orientation (the ORIENTATION event, §4.4): sent once
+    // when the stream starts and again whenever the device rotates. Optional —
+    // lay out the overlay UI for portrait vs landscape. Fires on the reader thread.
+    virtual void on_orientation(Link* /*link*/, const OrientationInfo& /*info*/) {}
 
     // One JPEG strip of the video stream (§5). Decode `strip.jpeg` into the
     // (x,y,w,h) region; present the framebuffer once strip.frame_end is decoded
@@ -194,6 +208,7 @@ private:
     void on_frame(const FrameHeader& h, const uint8_t* payload);
     void handle_control_request(const uint8_t* payload, size_t len);
     void handle_control_response(const uint8_t* payload, size_t len);
+    void handle_event(const uint8_t* payload, size_t len);
     void handle_jpeg(const FrameHeader& h, const uint8_t* payload);
     void send_hello_response(uint8_t req_id, uint8_t status);
     void fail(adb::Error err);          // protocol error: close + notify

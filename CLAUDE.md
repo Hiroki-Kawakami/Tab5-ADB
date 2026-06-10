@@ -585,10 +585,15 @@ wire's TYPE multiplexing) so independent consumers attach to just their slice: t
 link *owner* (`app::AgentClient`) passes a **`LinkLifecycleListener`** to `open()`
 for `on_link_hello`/`on_link_close` (the connection state machine), and a *feature*
 registers a **`VideoListener`** with `Link::set_video_listener(weak)` for
-`on_mirror_started`/`on_video_strip` — held weakly, set/cleared from any thread
-(guarded by `video_mtx_`), so the feature comes and goes while the owner keeps the
-link alive. Both fire on the **reader thread** (LVGL marshalling is the app's job).
-Future AUDIO / EVENT channels add the same kind of `set_*` setter.
+`on_mirror_started`/`on_video_strip`/**`on_orientation`** — held weakly, set/cleared
+from any thread (guarded by `video_mtx_`), so the feature comes and goes while the
+owner keeps the link alive. All fire on the **reader thread** (LVGL marshalling is
+the app's job). The agent's **ORIENTATION `EVENT`** (TYPE=0x03, §4.4 — source
+device logical rotation, sent at stream start + on each rotation change) parses to
+`on_orientation(OrientationInfo{rotation, landscape})`; it rides the video channel
+because the consumer (the mirror screen) uses it to lay its overlay out portrait vs
+landscape — the video itself is unchanged (natural-orientation lock). Future AUDIO
+channels add the same kind of `set_*` setter.
 `Link::start_mirror(MirrorConfig)` sends the Tab5-initiated `MIRROR_START`
 (non-blocking; call after `on_link_hello` once the video listener is registered);
 `Link::stop_mirror()` sends **`MIRROR_STOP`** (§4.4) — the agent stops the JPEG
@@ -824,8 +829,30 @@ the LVGL root is **black** and hosts a transient **"Connecting…"** label (rend
 by the normal LVGL runtime while `AgentClient` brings the agent up); once
 `start_mirror_ui()` enters DM overlay mode the label is gone and nothing invalidates
 the root, so `lv_timer_handler` leaves the framebuffers to the mirror, while a small
-LVGL overlay display renders the opaque control bar DM composites at flush time
-(navigation = the bar's **Back** button; a tap on the video area toggles the bar).
+LVGL overlay display renders the opaque control strip DM composites at flush time.
+The **control overlay** is an icon-only strip anchored to the **viewer's bottom-left
+corner**: a **vertical** strip in portrait that becomes a **horizontal** strip
+(along the now 1280px bottom edge) when the source device turns landscape. It hugs
+the panel corner (no margin), uses one button size for both orientations, and draws
+thin separator lines between the button groups — driven by the agent's **ORIENTATION
+event** (`VideoListener::on_orientation`),
+which rebuilds the overlay in place by re-calling the **re-entrant** `enter_overlay()`
+with the new footprint/rotation (a leaf FreeRTOS `overlay_mtx_` serializes the
+buffer/geometry swap against the decode thread's compositor). The layout is keyed off
+the device's **actual rotation** (`Surface.ROTATION_*` 0..3), not just portrait/
+landscape: the overlay's PPA angle is `view_rot(rot)*90` and the footprint anchors to
+the panel corner that becomes the viewer's bottom-left after the Tab5 is physically
+turned (0→panel bottom-left, 90→top-left, 180→top-right, 270→bottom-right), so
+ROTATION_90 vs _270 land on **opposite** corners. `in_corner` (the swipe hot zone)
+tracks the same corner. `view_rot(rot) = (4-rot)&3` encodes the real-HW turn
+handedness (verified reversed from the naive `rot` on a real device) and is applied to
+**both** the angle and the corner so they stay in sync; flip it back to `rot` if a
+later device shows the other handedness. Buttons
+(placeholder lucide_40 icons) in the spec'd order — corner-outward: Hide,
+Back/Home/Recents, Vol-/Vol+/Power, OpMode/DispMode/End. **Only Hide (hides the strip)
+and End (pops to the device screen) are wired**; the rest are stubs pending the final
+UI. No timeout auto-hide: the in-strip **Hide** button hides it, and a **swipe out of
+the anchor corner** (`kCornerSwipe` hot zone, `poll_touch`) reveals it again.
 On pop the previous screen's full re-render reclaims the framebuffers.
 `onExit()`/dtor stop the producer (`stop_mirror()` + `set_video_listener({})` — the
 agent link is kept connected) **before** joining the decode task, so it can't flush
