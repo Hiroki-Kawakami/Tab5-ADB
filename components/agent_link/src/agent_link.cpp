@@ -82,6 +82,32 @@ adb::Error Link::stop_mirror() {
     return stream_->write(frame, sizeof(frame));
 }
 
+adb::Error Link::inject_key(uint32_t keycode, uint8_t action, uint32_t repeat,
+                            uint32_t meta) {
+    if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+
+    // INPUT payload (§4.7): input_type, then the INPUT_KEY args. No req_id / no
+    // response — input is a one-way fire-and-forget channel (TYPE=INPUT).
+    uint8_t payload[1 + kInputKeyArgsLen];
+    payload[0] = kInputKey;
+    payload[1] = action;
+    wr_u32(payload + 2, keycode);
+    wr_u32(payload + 6, repeat);
+    wr_u32(payload + 10, meta);
+
+    uint8_t frame[kFrameHeaderSize + sizeof(payload)];
+    write_header(frame, kTypeInput, /*flags=*/0, tx_seq_.fetch_add(1),
+                 static_cast<uint32_t>(sizeof(payload)));
+    std::memcpy(frame + kFrameHeaderSize, payload, sizeof(payload));
+    return stream_->write(frame, sizeof(frame));
+}
+
+adb::Error Link::tap_key(uint32_t keycode) {
+    adb::Error e = inject_key(keycode, kKeyActionDown);
+    if (e != adb::Error::Ok) return e;
+    return inject_key(keycode, kKeyActionUp);
+}
+
 void Link::close() {
     if (stream_) stream_->close();  // A_CLSE; on_stream_close drives on_link_close
 }

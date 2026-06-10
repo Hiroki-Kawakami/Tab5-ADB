@@ -210,7 +210,7 @@ simulator/                   # SIMULATOR build root (see below)
     include/  src/           #     host shims: esp_* (err/log/check/timer/heap/nvs)
                              #     + freertos/* (pthread-backed FreeRTOS API)
 android-agent/               # ANDROID  tab5adb-agent (scrcpy-style app_process server)
-  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/Projection/TestPattern/ScreenCapture
+  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/Projection/TestPattern/ScreenCapture + Input (key injection)
   test/                      #   host-JVM unit test (ProjectionTest) + run.sh — no phone
   build.sh  run.sh           #   javac+d8 -> dex jar; adb push + app_process dev loop
 ```
@@ -598,13 +598,23 @@ channels add the same kind of `set_*` setter.
 (non-blocking; call after `on_link_hello` once the video listener is registered);
 `Link::stop_mirror()` sends **`MIRROR_STOP`** (§4.4) — the agent stops the JPEG
 stream and returns to READY but the **link stays open**, so a later `start_mirror()`
-resumes (this is what lets a feature stop without dropping the agent). The same
+resumes (this is what lets a feature stop without dropping the agent).
+**Input injection (§4.7):** `Link::inject_key(keycode, action)` + the convenience
+`Link::tap_key(keycode)` (down→up) send a **`TYPE=INPUT`** frame (Tab5→agent,
+**fire-and-forget — no req_id / no response**, off the CONTROL_REQUEST handshake
+path so high-frequency touch never waits). This is the shared input channel: keys
+today (the mirror overlay's power / volume / nav buttons, via Android
+`KeyEvent.KEYCODE_*` constants in `agent_link_protocol.hpp`), touch passthrough /
+keyboard later add `input_type` 0x01/0x02 on the same frame + agent path. The agent
+injects via the hidden `InputManager.injectInputEvent` (scrcpy technique, shell
+uid holds INJECT_EVENTS) in `android-agent/.../Input.java` (a minimal port of
+scrcpy's `Workarounds.getSystemContext` → `getSystemService(INPUT_SERVICE)`). The same
 parser carries the JPEG strip stream: each whole JPEG frame (the frame layer
 reassembles A_WRTE splits) is handed to a **decode+framebuffer seam** =
 `VideoListener::on_video_strip(VideoStrip)` (rect + JPEG bytes + frame_start/end),
 so `Link` stays free of libjpeg / HW-JPEG (host libjpeg in the test, P4 HW JPEG +
-bsp FB in the app). `tx_seq_` is atomic because `start_mirror`/`stop_mirror` (app
-thread) and the HELLO response (reader thread) both write frames. **HELLO + Phase 2
+bsp FB in the app). `tx_seq_` is atomic because `start_mirror`/`stop_mirror`/
+`inject_key` (app thread) and the HELLO response (reader thread) both write frames. **HELLO + Phase 2
 mirror done & verified on a real Android device**:
 `test/test_hello.cpp` covers the HELLO-only path (a `LinkLifecycleListener`);
 `test/test_mirror.cpp` (a `LinkLifecycleListener` + `VideoListener`) drives HELLO →
@@ -849,9 +859,12 @@ handedness (verified reversed from the naive `rot` on a real device) and is appl
 **both** the angle and the corner so they stay in sync; flip it back to `rot` if a
 later device shows the other handedness. Buttons
 (placeholder lucide_40 icons) in the spec'd order — corner-outward: Hide,
-Back/Home/Recents, Vol-/Vol+/Power, OpMode/DispMode/End. **Only Hide (hides the strip)
-and End (pops to the device screen) are wired**; the rest are stubs pending the final
-UI. No timeout auto-hide: the in-strip **Hide** button hides it, and a **swipe out of
+Back/Home/Recents, Vol-/Vol+/Power, OpMode/DispMode/End. **Wired:** Hide (hides the
+strip), End (pops to the device screen), and the six device buttons
+**Back/Home/Recents/Vol-/Vol+/Power** — each injects a key tap on the source via
+`agent_client().link()->tap_key(KEYCODE_*)` (§4.7 INPUT channel, fire-and-forget,
+straight from the LVGL event since `tap_key` is non-blocking and the link is live
+while streaming). **OpMode/DispMode stay stubs** pending their final UI. No timeout auto-hide: the in-strip **Hide** button hides it, and a **swipe out of
 the anchor corner** (`kCornerSwipe` hot zone, `poll_touch`) reveals it again.
 On pop the previous screen's full re-render reclaims the framebuffers.
 `onExit()`/dtor stop the producer (`stop_mirror()` + `set_video_listener({})` — the

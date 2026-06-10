@@ -43,7 +43,9 @@ public final class Server {
     private static final int TYPE_CONTROL_REQUEST = 0x01;
     private static final int TYPE_CONTROL_RESPONSE = 0x02;
     private static final int TYPE_EVENT = 0x03;
+    private static final int TYPE_INPUT = 0x04;
     private static final int TYPE_JPEG = 0x10;
+    private static final int INPUT_KEY = 0x00;  // input_type (§4.7)
     private static final int EVENT_ORIENTATION = 0x03;
     private static final int FLAG_FRAME_START = 0x01;
     private static final int FLAG_FRAME_END = 0x02;
@@ -74,6 +76,11 @@ public final class Server {
     private final int testW;
     private final int testH;
 
+    // Input injector (§4.7), built once on the main thread (initInput) before any
+    // reader thread starts, then read by the reader thread. Null = injection
+    // unavailable (setup failed), so INPUT frames are silently dropped.
+    private Input input;
+
     private Server(boolean testPattern, int testW, int testH) {
         this.testPattern = testPattern;
         this.testW = testW;
@@ -92,10 +99,24 @@ public final class Server {
                 testH = Integer.parseInt(wh[1]);
             }
         }
+        // The framework's InputManager / system Context creation (§4.7 input
+        // injection) needs a Looper on the constructing thread: `new ActivityThread()`
+        // builds an internal Handler. Establish a main Looper once at startup (scrcpy
+        // does the same); we never run its loop — injectInputEvent is ASYNC, so no
+        // message pump is needed. Harmless to the capture path (it polls acquire()).
+        if (android.os.Looper.getMainLooper() == null) {
+            android.os.Looper.prepareMainLooper();
+        }
+
         System.out.println("tab5adb-agent: listening on localabstract:" + SOCKET_NAME
                 + (testPattern ? " [test-pattern " + testW + "x" + testH + "]" : ""));
 
         Server server = new Server(testPattern, testW, testH);
+        // Build the input injector here on the main thread (it constructs an
+        // ActivityThread whose internal Handler needs *this* thread's Looper). The
+        // ActivityThread is a process singleton, so the reader thread then just
+        // reuses the injector for a pure binder injectInputEvent (no Looper needed).
+        server.initInput();
         LocalServerSocket sock = new LocalServerSocket(SOCKET_NAME);
         while (true) {
             LocalSocket client = sock.accept();
@@ -183,8 +204,48 @@ public final class Server {
             if (cmd == CMD_MIRROR_START) handleMirrorStart(conn, p, reqId);
             else if (cmd == CMD_MIRROR_STOP) handleMirrorStop(conn, reqId);
             // unknown cmd: ignore (forward compat, §4.4)
+        } else if (f.type == TYPE_INPUT) {
+            handleInput(f.payload);
         }
         // unknown TYPE / EVENT: ignore (§3.1)
+    }
+
+    // --- input injection (§4.7) — fire-and-forget, no response ---
+
+    /** Parse a TYPE=INPUT frame and inject it on the source device. */
+    private void handleInput(byte[] p) {
+        if (p.length < 1) return;
+        int inputType = p[0] & 0xFF;
+        if (inputType == INPUT_KEY) {
+            if (p.length < 1 + 13) {  // input_type + INPUT_KEY args (§4.7)
+                System.err.println("tab5adb-agent: short INPUT_KEY");
+                return;
+            }
+            int action = p[1] & 0xFF;
+            int keycode = (int) readU32(p, 2);
+            int repeat = (int) readU32(p, 6);
+            int meta = (int) readU32(p, 10);
+            if (input != null) input.injectKey(action, keycode, repeat, meta);
+        }
+        // unknown input_type: ignore (forward compat, §4.7)
+    }
+
+    /**
+     * Build the input injector once, on the MAIN thread (the caller). Must run on a
+     * thread with a Looper because {@code new ActivityThread()} creates an internal
+     * Handler bound to the current thread. Runs before any connection's reader
+     * thread starts, so the plain field is safely published to it.
+     */
+    void initInput() {
+        try {
+            input = Input.create();
+        } catch (Throwable t) {
+            // Unwrap the reflective wrapper so the real cause is visible.
+            Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException
+                    && t.getCause() != null) ? t.getCause() : t;
+            System.err.println("tab5adb-agent: input injection unavailable: " + cause);
+            cause.printStackTrace();
+        }
     }
 
     // --- HELLO response (§4.4) ---

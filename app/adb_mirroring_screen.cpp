@@ -235,12 +235,27 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
         lv_obj_set_style_text_font(lbl, R.font.lucide_40, 0);
         lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
         lv_obj_center(lbl);
+        // The device buttons inject a key tap on the source over the agent link
+        // (agent_link::Link::tap_key, TYPE=INPUT). The link is alive whenever the
+        // mirror is streaming, and tap_key is non-blocking, so it is safe to call
+        // straight from the LVGL event.
+        auto wire_key = [](lv_obj_t* btn, uint32_t keycode) {
+            lv_obj_add_event_fn(btn, LV_EVENT_CLICKED, [keycode](lv_event_t*) {
+                if (auto l = app::agent_client().link()) l->tap_key(keycode);
+            });
+        };
         switch (id) {
             case HIDE:
                 lv_obj_add_event_fn(b, LV_EVENT_CLICKED, [](lv_event_t*) {
                     display_manager.set_overlay_visible(false);
                 });
                 break;
+            case BACK:     wire_key(b, agent_link::kKeyBack); break;
+            case HOME:     wire_key(b, agent_link::kKeyHome); break;
+            case RECENTS:  wire_key(b, agent_link::kKeyAppSwitch); break;
+            case VOLDN:    wire_key(b, agent_link::kKeyVolumeDown); break;
+            case VOLUP:    wire_key(b, agent_link::kKeyVolumeUp); break;
+            case POWER:    wire_key(b, agent_link::kKeyPower); break;
             case END:
                 // Defer the pop: it runs onExit -> exit_overlay, which deletes this
                 // overlay (and this button) — don't tear it down from its own event.
@@ -249,7 +264,7 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
                 lv_obj_set_style_text_color(lbl, lv_color_hex(0xFF8888), 0);
                 break;
             default:
-                // Only Hide and End are wired for now (the rest land once the UI is final).
+                // OpMode / DispMode land once their UI is final.
                 break;
         }
     }

@@ -23,6 +23,7 @@ enum Type : uint8_t {
     kTypeControlRequest = 0x01,
     kTypeControlResponse = 0x02,
     kTypeEvent = 0x03,
+    kTypeInput = 0x04,  // T->A: input injection (key/touch/text), fire-and-forget
     kTypeJpeg = 0x10,
     kTypeAudio = 0x11,
 };
@@ -84,6 +85,41 @@ enum Status : uint8_t {
 
 // video_codec (MIRROR_START response, §4.4).
 constexpr uint8_t kVideoCodecJpeg = 0x01;
+
+// --- INPUT channel (§4.7) — TYPE=INPUT, Tab5->agent, fire-and-forget ---
+//
+// The agent injects these via the hidden InputManager.injectInputEvent (the
+// scrcpy technique); this is the shared input foundation that key (overlay
+// power/volume/nav), touch passthrough and keyboard all ride. The payload's
+// first byte is the input_type; the rest is type-specific.
+enum InputType : uint8_t {
+    kInputKey = 0x00,   // a single key event (down or up)
+    kInputTouch = 0x01,  // touch passthrough (reserved)
+    kInputText = 0x02,   // text/keyboard (reserved)
+};
+
+// INPUT_KEY args after the input_type byte (§4.7):
+//  +1 u8  action   kKeyActionDown / kKeyActionUp
+//  +2 u32 keycode  Android KeyEvent.KEYCODE_* (LE)
+//  +6 u32 repeat   key-repeat count (LE; 0 for a discrete press)
+//  +10 u32 meta    KeyEvent meta state (LE; 0 for no modifiers)
+constexpr size_t kInputKeyArgsLen = 13;  // after the input_type byte
+
+enum KeyAction : uint8_t {
+    kKeyActionDown = 0,  // KeyEvent.ACTION_DOWN
+    kKeyActionUp = 1,    // KeyEvent.ACTION_UP
+};
+
+// Android KeyEvent.KEYCODE_* values for the keys the overlay drives. The agent
+// passes these straight to KeyEvent, so the Tab5 side owns the mapping.
+enum Keycode : uint16_t {
+    kKeyHome = 3,         // KEYCODE_HOME
+    kKeyBack = 4,         // KEYCODE_BACK
+    kKeyVolumeUp = 24,    // KEYCODE_VOLUME_UP
+    kKeyVolumeDown = 25,  // KEYCODE_VOLUME_DOWN
+    kKeyPower = 26,       // KEYCODE_POWER
+    kKeyAppSwitch = 187,  // KEYCODE_APP_SWITCH (Recents)
+};
 
 // HELLO request args / response result lengths (§4.4) — link-only now.
 constexpr size_t kHelloArgsLen = 8;    // after cmd+req_id

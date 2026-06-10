@@ -96,10 +96,11 @@ USB bulk のリンク層 CRC/再送 + ADB のメッセージ整合の上に、Wi
 | `0x01` | `CONTROL_REQUEST`  | 双方向（HELLO は A→T） | §4 |
 | `0x02` | `CONTROL_RESPONSE` | 双方向 | §4 |
 | `0x03` | `EVENT`            | 双方向（非同期通知。ORIENTATION=A→T） | §4 |
+| `0x04` | `INPUT`            | Tab5→Android（一方向・応答なし） | §4.7（入力注入） |
 | `0x10` | `JPEG`             | Android→Tab5 | §5（映像フレームのブロック） |
 | `0x11` | `AUDIO`            | Android→Tab5 | §6（音声。**予約・枠のみ**） |
 
-`0x04..0x0F` は制御系の予約、`0x12..0x1F` は media 系の予約。その他は受信側で破棄（前方互換）。
+`0x05..0x0F` は制御系の予約、`0x12..0x1F` は media 系の予約。その他は受信側で破棄（前方互換）。
 （A=Android/agent, T=Tab5）
 
 ### 3.2 FLAGS（ビット）
@@ -307,6 +308,43 @@ v1 は agent・Tab5 とも `VIDEO` を立てる（`AUDIO` は将来）。両者�
 | `0x04` | `ESTATE` | 現在の状態で不可 |
 | `0x05` | `ERANGE` | 値域外 |
 | `0xFF` | `EFAIL` | その他の失敗 |
+
+### 4.7 入力注入（INPUT）— Tab5→Android・一方向
+
+`TYPE = INPUT`(0x04) のフレームで、Tab5 がソース端末への入力イベント（キー／将来はタッチ・テキスト）を
+送る。mirror の overlay UI（電源・音量・ナビゲーションボタン）と、今後のタッチパススルー／キーボード
+入力の **共通チャネル**。agent は scrcpy と同じ手法で **hidden API `InputManager.injectInputEvent()`**
+に流す（app_process は shell uid なので INJECT_EVENTS を持ち、許可ダイアログなしで注入できる）。
+
+- **一方向・fire-and-forget**: `CONTROL_REQUEST` のような `req_id`／応答は持たない（高頻度のタッチを
+  応答待ちにしないため）。失敗は agent 側ログのみ。状態（§7）も変えない。
+- payload 先頭の `input_type` で種別を分ける。
+
+```
+ +0   u8   input_type   0x00=KEY（0x01=TOUCH / 0x02=TEXT は予約）
+ +1   ...               input_type ごとに定義（下記）
+```
+
+#### INPUT_KEY (input_type = 0x00) — キーイベント
+
+```
+ +1   u8    action     0=DOWN, 1=UP（KeyEvent.ACTION_DOWN/UP）
+ +2   u32   keycode    Android KeyEvent.KEYCODE_* (LE)
+ +6   u32   repeat     キーリピート回数 (LE)。単発押下は 0
+ +10  u32   meta       KeyEvent メタ状態 (LE)。修飾なしは 0
+ (= 入力ペイロード計 14 bytes。将来は末尾に append-only)
+```
+
+- agent は `new KeyEvent(now, now, action, keycode, repeat, meta, VIRTUAL_KEYBOARD, 0, 0,
+  SOURCE_KEYBOARD)` を `INJECT_INPUT_EVENT_MODE_ASYNC` で注入する（ディスプレイ 0）。
+- **1 タップ = Tab5 が DOWN→UP の 2 フレームを送る**（agent は down/up をそのまま注入し、状態を持たない。
+  物理キーボード passthrough も同じ down/up 意味論）。
+- overlay のボタンが使う keycode: Home=3, Back=4, VolumeUp=24, VolumeDown=25, Power=26, AppSwitch=187。
+  Tab5 側が keycode を決め、agent は透過する。
+
+> **タッチ（input_type=0x01）/ テキスト（0x02）は予約**。タッチは `MotionEvent` を
+> `injectInputEvent` に流す（実装時に座標・ポインタ・ボタンのフィールドをここへ追記）。同じ INPUT
+> チャネル・同じ注入経路に乗るので、フレーム層（§3）は変えない。
 
 ---
 

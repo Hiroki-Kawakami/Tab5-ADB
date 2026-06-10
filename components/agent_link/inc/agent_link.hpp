@@ -192,6 +192,18 @@ public:
     // strips still in flight. Returns StreamClosed if the link is down, Ok otherwise.
     adb::Error stop_mirror();
 
+    // Inject one key event on the source device (TYPE=INPUT, §4.7). The agent
+    // forwards `keycode` (an Android KeyEvent.KEYCODE_* value, e.g. kKeyBack) to
+    // the hidden InputManager.injectInputEvent. Fire-and-forget: non-blocking, no
+    // response, no state change on the link. Callable from any thread (e.g. an
+    // overlay button on the LVGL thread). Returns StreamClosed if the link is down.
+    adb::Error inject_key(uint32_t keycode, uint8_t action, uint32_t repeat = 0,
+                          uint32_t meta = 0);
+
+    // Inject a key tap = down then up (§4.7). The convenience used by the overlay's
+    // power / volume / nav buttons. Returns the first non-Ok of the two sends.
+    adb::Error tap_key(uint32_t keycode);
+
     // End the link (A_CLSE the stream). Idempotent. on_link_close follows from
     // the reader thread.
     void close();
