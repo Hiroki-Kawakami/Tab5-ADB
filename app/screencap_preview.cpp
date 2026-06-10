@@ -9,6 +9,9 @@
 #include "adb_app.hpp"
 #include "adb_client.hpp"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char* TAG = "screencap_preview";
 
@@ -143,25 +146,38 @@ std::shared_ptr<ScreencapPreview> ScreencapPreview::create(lv_obj_t* image, int 
 ScreencapPreview::ScreencapPreview(lv_obj_t* image, int dst_w, int dst_h)
     : image_(image), dst_w_(dst_w), dst_h_(dst_h) {
     buf_size_ = (size_t)dst_w_ * dst_h_ * 2;  // RGB565
-    img_buf_ = static_cast<uint8_t*>(heap_caps_calloc(buf_size_, 1, MALLOC_CAP_SPIRAM));
-    decode_buf_ = static_cast<uint8_t*>(heap_caps_calloc(buf_size_, 1, MALLOC_CAP_SPIRAM));
-    if (!img_buf_ || !decode_buf_) ESP_LOGE(TAG, "PSRAM alloc failed (%zu B x2)", buf_size_);
+    img_buf_[0] = static_cast<uint8_t*>(heap_caps_calloc(buf_size_, 1, MALLOC_CAP_SPIRAM));
+    img_buf_[1] = static_cast<uint8_t*>(heap_caps_calloc(buf_size_, 1, MALLOC_CAP_SPIRAM));
+    if (!img_buf_[0] || !img_buf_[1]) ESP_LOGE(TAG, "PSRAM alloc failed (%zu B x2)", buf_size_);
     dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
     dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
     dsc_.header.w = dst_w_;
     dsc_.header.h = dst_h_;
-    dsc_.data = img_buf_;
+    dsc_.data = img_buf_[0];  // front; write_idx_ starts at 1 (the back)
     dsc_.data_size = buf_size_;
 }
 
 ScreencapPreview::~ScreencapPreview() {
-    stop();
-    heap_caps_free(img_buf_);
-    heap_caps_free(decode_buf_);
+    stop();  // joins the decode task before the buffers it writes are freed
+    if (work_sem_) vSemaphoreDelete(static_cast<SemaphoreHandle_t>(work_sem_));
+    if (decode_done_) vSemaphoreDelete(static_cast<SemaphoreHandle_t>(decode_done_));
+    heap_caps_free(img_buf_[0]);
+    heap_caps_free(img_buf_[1]);
 }
 
 void ScreencapPreview::start() {
     stopped_.store(false);
+    decode_stop_.store(false);
+    if (!decode_task_) {
+        work_sem_ = xSemaphoreCreateBinary();
+        decode_done_ = xSemaphoreCreateBinary();
+        TaskHandle_t t = nullptr;
+        // Core 1, priority 3 (below the prio-5 adb reader / LVGL) so the heavy PNG
+        // inflate+downscale never preempts them — this is a rough, low-rate preview.
+        xTaskCreatePinnedToCore(&ScreencapPreview::decode_trampoline, "scap_decode",
+                                8192, this, 3, &t, 1);
+        decode_task_ = t;
+    }
     capture_once();
 }
 
@@ -175,10 +191,17 @@ void ScreencapPreview::stop() {
         stream_->close();
         stream_.reset();
     }
+    if (decode_task_) {
+        decode_stop_.store(true);
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(work_sem_));        // wake to exit
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
+        decode_task_ = nullptr;  // sems freed in the dtor (a late on_stream_close may
+                                 // still give work_sem_ while the weak listener is locked)
+    }
 }
 
 void ScreencapPreview::capture_once() {
-    if (stopped_.load() || !img_buf_ || !decode_buf_) return;
+    if (stopped_.load() || !img_buf_[0] || !img_buf_[1]) return;
     capturing_ = true;
     auto* client = app::adb_client();
     if (!client || client->state() != adb::ConnectionState::Online) {
@@ -209,13 +232,12 @@ void ScreencapPreview::schedule_next() {
         interval_ms_, this);
 }
 
-void ScreencapPreview::present() {
-    if (stopped_.load() || !have_frame_) return;
-    memcpy(img_buf_, decode_buf_, buf_size_);
-    have_frame_ = false;
-    // RGB565 in-memory images are zero-copy: LVGL's cached decode references
-    // dsc_.data directly, so overwriting the buffer + invalidate shows the fresh
-    // pixels (no cache drop needed, unlike compressed/indexed formats).
+void ScreencapPreview::present(int idx, bool ok) {
+    if (stopped_.load() || !ok) return;  // failed decode: keep showing the last frame
+    // Flip dsc_ to the buffer the decode task just filled (no copy); the next decode
+    // then targets the other buffer (the one LVGL is done showing).
+    dsc_.data = img_buf_[idx];
+    write_idx_.store(idx ^ 1);
     lv_image_set_src(image_, &dsc_);
     lv_obj_invalidate(image_);
 }
@@ -225,19 +247,36 @@ void ScreencapPreview::on_stream_data(adb::Stream*, const uint8_t* data, size_t 
 }
 
 void ScreencapPreview::on_stream_close(adb::Stream*, adb::Error) {
-    // Reader thread: decode + downscale here (off the LVGL thread), then marshal
-    // the cheap present()/schedule to LVGL.
-    bool ok = decode_png_downscale_rgb565(
-        png_.data(), png_.size(),
-        reinterpret_cast<uint16_t*>(decode_buf_), dst_w_, dst_h_);
-    png_.clear();
-    have_frame_ = ok;
-    if (!ok) ESP_LOGW(TAG, "decode failed");
+    // Reader thread (high priority): just hand the captured PNG to the decode task
+    // and return — decode/downscale must not run here or it blocks the reader (and
+    // thus LVGL / other adb streams). The pipeline is serial (next capture only
+    // arms 2 s after present), so png_ stays stable while the task reads it.
+    if (work_sem_) xSemaphoreGive(static_cast<SemaphoreHandle_t>(work_sem_));
+}
 
-    lv_async_call([self = shared_from_this()]() {
-        self->capturing_ = false;
-        self->stream_.reset();
-        self->present();
-        self->schedule_next();
-    });
+void ScreencapPreview::decode_trampoline(void* arg) {
+    static_cast<ScreencapPreview*>(arg)->decode_loop();
+}
+
+void ScreencapPreview::decode_loop() {
+    for (;;) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(work_sem_), portMAX_DELAY);
+        if (decode_stop_.load()) break;
+
+        int idx = write_idx_.load();  // the back buffer (front = idx ^ 1, shown by LVGL)
+        bool ok = decode_png_downscale_rgb565(
+            png_.data(), png_.size(),
+            reinterpret_cast<uint16_t*>(img_buf_[idx]), dst_w_, dst_h_);
+        png_.clear();
+        if (!ok) ESP_LOGW(TAG, "decode failed");
+
+        lv_async_call([self = shared_from_this(), idx, ok]() {
+            self->capturing_ = false;
+            self->stream_.reset();
+            self->present(idx, ok);
+            self->schedule_next();
+        });
+    }
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(decode_done_));
+    vTaskDelete(nullptr);
 }

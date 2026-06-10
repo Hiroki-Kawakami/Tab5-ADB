@@ -73,22 +73,35 @@ private:
 
     void capture_once();              // LVGL thread: open the exec:screencap stream
     void schedule_next();             // LVGL thread: arm the interval timer
-    void present();                   // LVGL thread: push decode_buf_ into the image
+    void present(int idx, bool ok);   // LVGL thread: flip dsc_ to the freshly-decoded buffer
+
+    static void decode_trampoline(void* arg);
+    void decode_loop();               // decode task (Core 1, low prio): PNG -> img_buf_[back]
 
     lv_obj_t* image_;
     const int dst_w_, dst_h_;
     int interval_ms_ = 2000;
 
-    lv_image_dsc_t dsc_{};            // points at img_buf_ (shown)
-    uint8_t* img_buf_ = nullptr;      // dst_w*dst_h*2 RGB565, PSRAM — read by LVGL
-    uint8_t* decode_buf_ = nullptr;   // dst_w*dst_h*2 RGB565, PSRAM — written by reader thread
-    size_t buf_size_ = 0;             // bytes in each of img_buf_/decode_buf_
-    bool have_frame_ = false;         // decode_buf_ holds a fresh frame to present
+    lv_image_dsc_t dsc_{};            // points at the shown img_buf_
+    // Double buffer (each dst_w*dst_h*2 RGB565, PSRAM): the decode task writes the
+    // back buffer while LVGL shows the front, then present() flips dsc_ to it — no
+    // per-frame copy. write_idx_ = the back buffer (front = write_idx_ ^ 1).
+    uint8_t* img_buf_[2] = {nullptr, nullptr};
+    size_t buf_size_ = 0;             // bytes in each img_buf_
+    std::atomic<int> write_idx_{1};   // back buffer the decode task targets next
 
     // Compressed PNG accumulated on the reader thread (PSRAM — can be ~MBs).
     std::vector<uint8_t, PsramAllocator<uint8_t>> png_;
     std::shared_ptr<adb::Stream> stream_;
     lv_timer_t* timer_ = nullptr;     // one-shot, LVGL thread
+
+    // Decode/downscale runs on a dedicated low-priority task pinned to Core 1, so
+    // the heavy inflate never preempts LVGL or the high-priority adb reader. The
+    // reader hands off the captured PNG via work_sem_ and returns immediately.
+    void* decode_task_ = nullptr;     // TaskHandle_t
+    void* work_sem_ = nullptr;        // binary: a captured PNG is ready to decode
+    void* decode_done_ = nullptr;     // binary: the decode task has exited (join)
+    std::atomic<bool> decode_stop_{false};
 
     std::atomic<bool> stopped_{false};
     bool capturing_ = false;          // LVGL thread: a capture is in flight
