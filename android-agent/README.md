@@ -23,12 +23,15 @@ the stream and returns the agent to READY **without closing the socket** — a l
 MIRROR_START resumes on the same link (this is what lets the Tab5 keep the agent
 connected while leaving the mirror feature). The **rotate → scale → black letterbox**
 geometry is GPU-offloaded — `ScreenCapture` tries the static hidden
-`DisplayManager.createVirtualDisplay` first (mirrors display 0 into the panel-sized
-reader, aspect-fit; the path that works on **Android 14/15** where
+`DisplayManager.createVirtualDisplay` first (mirrors display 0 into the reader,
+aspect-fit; the path that works on **Android 14/15** where
 `SurfaceControl.createDisplay` was removed), and falls back on older Android to
 `SurfaceControl.createDisplay` + `setDisplayProjection` (explicit fit/fill rect math
 in `Projection`). Either way the compositor does it — no CPU readback/copies — so
-the pipeline only splits + encodes. A `--test-pattern` mode streams a deterministic
+the pipeline only splits + encodes. **fit/fill** (`MIRROR_START scale_mode`) work on
+both paths: the fallback uses a negative dest rect; the always-fit primary path gets
+fill by oversizing the reader to the cover size (`Projection.fillCover`) and cropping
+the centered panel out as the strip read-origin (no extra copy). A `--test-pattern` mode streams a deterministic
 frame through the CPU geometry (`FramePipeline`) instead (for headless
 verification without the capture APIs). No artificial FPS cap (capture-rate
 driven). Verified against a real Android device by the Tab5-side harnesses `test_hello.cpp`

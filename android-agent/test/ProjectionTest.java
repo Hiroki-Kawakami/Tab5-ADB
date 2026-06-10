@@ -44,6 +44,21 @@ public final class ProjectionTest {
         eq("fill orientation", 0, fill.orientation);
         eq("fill disp", "0,-80,720,1360", rect(fill.dispL, fill.dispT, fill.dispR, fill.dispB));
 
+        // fillCover (primary-path fill geometry, §5.3): the oversized natural-orientation
+        // reader the source fills exactly, + the centered panel crop origin. 1080x2160
+        // into 720x1280: s=max(.667,.593)=.667 → cover 720x1440, crop the centered
+        // 720x1280 (cropY=80) — the same center-crop fill() projects, done by sizing the
+        // reader + reading an off-center band instead of a negative dest offset.
+        eq("fillCover portrait", "720,1440,0,80",
+                arr(Projection.fillCover(1080, 2160, 720, 1280)));
+        // Wider-than-panel natural source crops horizontally instead: 1080x1600 →
+        // s=max(.667,.8)=.8 → cover 864x1280, cropX=72.
+        eq("fillCover wide", "864,1280,72,0",
+                arr(Projection.fillCover(1080, 1600, 720, 1280)));
+        // Exact panel aspect: no oversize, no crop (what Adapt's `wm size` yields).
+        eq("fillCover exact", "720,1280,0,0",
+                arr(Projection.fillCover(1080, 1920, 720, 1280)));
+
         // --- touch passthrough inverse mapping (§4.7) ---
 
         // naturalSize un-rotates the current-rotation source size to portrait.

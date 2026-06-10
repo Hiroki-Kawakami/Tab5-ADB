@@ -105,7 +105,12 @@ it as JPEG strips. **Control and video run concurrently** (§4.4): a dedicated
 **control reader thread** reads every inbound frame (HELLO response, MIRROR_START,
 MIRROR_STOP) while the main thread sends JPEG, so `MIRROR_STOP` is never blocked
 behind the video flow; on MIRROR_STOP the session loop stops streaming and goes
-back to waiting for the next MIRROR_START (READY) on the same socket. Frame writes
+back to waiting for the next MIRROR_START (READY) on the same socket. A
+**MIRROR_START arriving *mid-stream* reconfigures in place**: `streamVideo` also
+breaks when `conn.pendingStart != null` (set by `handleMirrorStart`), and the
+session loop restarts it with the new params — so the Tab5 switches scale/display
+mode by sending one fresh MIRROR_START, no stop required (the basis for the
+mirror's DispMode toggle; a stop+start race could hang). Frame writes
 from both threads are serialized in `Conn` (`synchronized writeFrame`). **Geometry (rotate → scale-fit → black letterbox) is
 GPU-offloaded for real capture** via one of two creation paths (scrcpy's order),
 both landing the final upright/scaled/letterboxed panel-sized frame in the reader
@@ -120,8 +125,17 @@ surface and lets the compositor do aspect-preserving rotate/scale-fit/letterbox 
 `setDisplayProjection`, where `ScreenCapture` drives the geometry itself (rotation
 code + a centered destination rect computed by the host-testable pure-arithmetic
 `Projection`; the area outside it is the virtual display's black background = the
-letterbox). Only the fallback honours `scaleMode` (fill vs fit) — the primary
-mirror path is always aspect-fit (the mirror default). **Physical-orientation lock
+letterbox). **`scaleMode` fit vs fill (§5.3) is honoured on both paths.** The
+fallback drives it directly in `Projection.compute` (a negative dest offset =
+center-crop). The primary mirror only ever aspect-*fits* into its reader surface,
+so **fill** is done by *oversizing the reader*: `Projection.fillCover` sizes it to
+the natural-orientation cover rectangle the source fills exactly (no letterbox),
+then the centered `targetW×targetH` panel crop is taken as the strip read-origin
+(`ScreenCapture.cropX/cropY` → `FramePipeline.stripsOf(frame, cropX, cropY)`) — **no
+extra per-frame copy**, since stripping already sub-bitmaps each band. Fit keeps a
+panel-sized reader + a `(0,0)` crop (the zero-copy fast path). Verified on a real Android device
+(Android 14/15 primary path): fit letterboxes, fill full-bleeds + crops.
+**Physical-orientation lock
 (§5.1 = always show the device's *natural*-orientation framebuffer, ignoring logical
 rotation):** the primary mirror follows display 0's *logical* rotation, so turning the
 phone would otherwise rotate + shrink-letterbox the Tab5. `ScreenCapture` is built for
@@ -915,7 +929,22 @@ strip), End (pops to the device screen), and the six device buttons
 straight from the LVGL event since `tap_key` is non-blocking and the link is live
 while streaming), plus **OpMode** = the touch-control toggle (**on by default**;
 icon is the LVGL theme primary blue when on, white when off).
-**DispMode stays a stub** pending its final UI. **Touch passthrough (§4.7):** when
+**DispMode cycles the display mode Fit → Fill → Adapt → Fit** (the icon is fixed —
+the active mode is read off the image): **Fit** = agent `scale=fit` (letterbox),
+**Fill** = `scale=fill` (cover + crop), **Adapt** = `wm size` the source to the
+panel aspect (long:short = `PANEL_H:PANEL_W` = 16:9, keeping the device's short
+side; `compute_adapt_size` parses `wm size`'s *Physical size*) so plain `scale=fit`
+then fills with no letterbox *or* crop. Each tap calls `apply_disp_mode` →
+`restart_mirror` = **one fresh `start_mirror(cfg)`**: the agent **reconfigures the
+live stream in place** (it breaks `streamVideo` when a new `MIRROR_START` sets
+`pendingStart`, then the session loop restarts with the new params) — no
+`stop_mirror` needed (a stop+start race could hang the agent), and the video
+listener / decode pipeline stay up. Entering Adapt runs `wm size <W>x<H>` and
+leaving it (or `onExit` while in Adapt) runs `wm size reset` to restore the device
+resolution; both chain `restart_mirror` over the `app::adb_client()->exec()`
+completion marshalled back to LVGL. (All four states + the in-place reconfigure +
+the `wm size` restore verified on a real Android device via `simulator/verify/mirror_dispmode.txt`.)
+**Touch passthrough (§4.7):** when
 OpMode is on, the screen's `on_touch` injects touches over the mirror to the source
 as per-pointer MotionEvents via `agent_client().link()->inject_touch(action,
 pointer_id, x, y)` (Tab5 **panel coords**; the agent inverts the mirror geometry).

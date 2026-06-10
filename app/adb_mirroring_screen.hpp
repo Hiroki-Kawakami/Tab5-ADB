@@ -75,6 +75,29 @@ private:
     // overlay control strip, register as the link's video listener, and MIRROR_START.
     void start_mirror_ui();
 
+    // Display mode (the overlay DispMode button), how the source maps onto the panel:
+    //   Fit   — aspect-preserve inscribe, letterbox (agent scale=fit).
+    //   Fill  — aspect-preserve cover, crop the overflow (agent scale=fill).
+    //   Adapt — `wm size` the source to the panel aspect (so fit fills with no
+    //           letterbox/crop), then agent scale=fit. Reset on leaving Adapt / exit.
+    // Cycled by DispMode; the active mode is read off the image, so the icon is fixed.
+    // LVGL-thread only.
+    enum DispMode { kDispFit = 0, kDispFill = 1, kDispAdapt = 2 };
+    int disp_mode_ = kDispFit;
+    // The MIRROR_START config for `mode` (Adapt and Fit both send scale=fit).
+    agent_link::MirrorConfig mirror_config_for(int mode) const;
+    // Switch to `mode`: reconfigure the live mirror (the agent restarts the stream on
+    // a fresh MIRROR_START), running the `wm size` side effects for entering/leaving
+    // Adapt. No-op if `mode` is already current.
+    void apply_disp_mode(int mode);
+    // Reconfigure the running mirror to `mode` (send a new MIRROR_START). LVGL thread.
+    void restart_mirror(int mode);
+    // Adapt enter: query `wm size`, set the panel-aspect override, then restart fit.
+    // Adapt exit: `wm size reset`, then restart `mode`. Both chain over adb exec
+    // completions marshalled back to the LVGL thread.
+    void adapt_enter();
+    void adapt_exit(int mode);
+
     // The control overlay is an icon strip flush against one panel corner: a
     // vertical strip in portrait, a horizontal strip when the source device turns
     // landscape (the user physically rotates the Tab5; the overlay is PPA-rotated

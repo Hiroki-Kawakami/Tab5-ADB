@@ -375,8 +375,10 @@ public final class Server {
         int captureRotation = -1;  // device rotation the current capture was built for
         conn.streaming = true;     // touch passthrough (§4.7) may now map panel->source
         try {
-            // Stream until MIRROR_STOP (-> READY) or the reader sees the peer close.
-            while (!conn.stopRequested && !conn.closed) {
+            // Stream until MIRROR_STOP (-> READY), the peer closes, or a new
+            // MIRROR_START arrives (pendingStart != null) — the last is a mode/scale
+            // switch: break so the session loop restarts streamVideo with the new mp.
+            while (!conn.stopRequested && !conn.closed && conn.pendingStart == null) {
                 long t0 = System.nanoTime();
                 if (!testPattern) {
                     // The Tab5 is fixed to the device's physical orientation (§5.1), so
@@ -409,9 +411,12 @@ public final class Server {
                 }
                 List<FramePipeline.Strip> strips;
                 try {
-                    // Real capture is already a panel-sized frame (GPU geometry) → just
-                    // strip it; the test pattern is a raw source → run the CPU pipeline.
-                    strips = testPattern ? pipeline.process(src) : pipeline.stripsOf(src);
+                    // Real capture is a GPU-geometry frame → strip it (fit: panel-sized,
+                    // crop (0,0); fill: oversized cover, crop the centered panel out via
+                    // the capture's crop origin). The test pattern is a raw source → run
+                    // the CPU pipeline.
+                    strips = testPattern ? pipeline.process(src)
+                            : pipeline.stripsOf(src, capture.cropX(), capture.cropY());
                 } finally {
                     src.recycle();
                 }
@@ -433,8 +438,9 @@ public final class Server {
             conn.streaming = false;  // stop mapping touches to a torn-down capture
             if (capture != null) capture.close();
         }
-        System.out.println("tab5adb-agent: stream " + (conn.stopRequested ? "stopped" : "ended")
-                + " after " + frame + " frames");
+        String why = conn.stopRequested ? "stopped"
+                : (conn.pendingStart != null ? "reconfiguring" : "ended");
+        System.out.println("tab5adb-agent: stream " + why + " after " + frame + " frames");
     }
 
     private Bitmap nextSource(ScreenCapture capture, int frame) {
@@ -488,7 +494,11 @@ public final class Server {
         volatile boolean helloOk = false;     // HELLO response received + accepted
         volatile boolean closed = false;      // peer disconnected / fatal error
         volatile boolean stopRequested = false;  // MIRROR_STOP for the live stream
-        MirrorParams pendingStart = null;     // MIRROR_START to start (guarded by lock)
+        // MIRROR_START to (re)start. Assigned/consumed under `lock`, but ALSO read
+        // lock-free in the stream loop so a MIRROR_START arriving mid-stream makes the
+        // current stream break and the session loop restart with the new params
+        // (mode switch without a stop) — hence volatile.
+        volatile MirrorParams pendingStart = null;
 
         // Live mirror geometry, for the touch-passthrough inverse mapping (§4.7).
         // Written by the stream thread (handleMirrorStart + streamVideo), read by

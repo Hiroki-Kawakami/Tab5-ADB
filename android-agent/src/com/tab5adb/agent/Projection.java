@@ -52,6 +52,28 @@ final class Projection {
                               offX, offY, offX + dw, offY + dh);
     }
 
+    /**
+     * Fill-mode cover geometry for the PRIMARY (DisplayManager mirror) capture path.
+     * The mirror always aspect-fits the source into the reader surface, so to get
+     * <em>fill</em> (cover + center-crop) we size the reader to the natural-orientation
+     * rectangle the source fills exactly (same aspect → no letterbox) while still
+     * covering the {@code targetW×targetH} panel, then crop the centered panel out of
+     * the captured frame (the crop is just the strip read-origin in {@link
+     * FramePipeline}, no extra copy). Returns {@code {coverW, coverH, cropX, cropY}}
+     * in natural orientation (the orientation {@link ScreenCapture#acquire} yields).
+     *
+     * <p>{@code natW×natH} are the source's natural (portrait) dims. Android-free pure
+     * arithmetic, so host-testable in {@code ProjectionTest} like {@link #compute}.
+     */
+    static int[] fillCover(int natW, int natH, int targetW, int targetH) {
+        double s = Math.max((double) targetW / natW, (double) targetH / natH);
+        int coverW = Math.max(targetW, (int) Math.round(natW * s));
+        int coverH = Math.max(targetH, (int) Math.round(natH * s));
+        int cropX = (coverW - targetW) / 2;
+        int cropY = (coverH - targetH) / 2;
+        return new int[]{coverW, coverH, cropX, cropY};
+    }
+
     // --- inverse mapping for touch passthrough (protocol.md §4.7) -------------
     //
     // The Tab5 sends touches in PANEL coordinates; the agent owns the mirror

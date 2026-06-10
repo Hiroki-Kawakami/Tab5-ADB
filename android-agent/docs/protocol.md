@@ -241,6 +241,10 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
 - `streams` に立っているが agent が提供できない（HELLO の `capabilities` に無い）ビットがあれば、agent は
   `status = ENOTSUP` を返す。提供可能なビットだけを開始してもよい（運用は実装で確定）。
 - `status = OK` の応答を返した後、agent は §5 の JPEG ストリームを流し始める。
+- **`STREAMING` 中に再度 `MIRROR_START` を受けたら、現在のストリームを止めて新パラメータで貼り直す
+  （in-place reconfigure）**。`MIRROR_STOP` は不要 — Tab5 はスケール／表示モードの切替を新しい
+  `MIRROR_START` を 1 通送るだけで行う（stop+start の連打は agent 側で競合しうるので避ける）。
+  例: mirror の **DispMode**（fit↔fill↔解像度調整）切替。
 - 将来フィールド（音声パラメータ等）を足すときは **末尾に追記**（append-only）。
 
 #### MIRROR_STOP (cmd = 0x11) — mirror 停止

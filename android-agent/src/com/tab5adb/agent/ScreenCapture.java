@@ -69,6 +69,16 @@ import java.nio.ByteBuffer;
  * implemented on the primary path only; the legacy fallback keeps {@link Projection}'s
  * source-aspect geometry (pre-Android-12, not the modern target).
  *
+ * <h2>Fill mode (protocol.md §5.3)</h2>
+ *
+ * <p>The primary mirror always aspect-<em>fits</em>, so for {@code scaleMode == fill}
+ * the reader is instead sized to the natural-orientation COVER rectangle (the source
+ * fills it exactly, no letterbox; see {@link Projection#fillCover}) and {@link #acquire}
+ * yields that oversized frame. The centered {@code targetW×targetH} panel crop is then
+ * taken by {@link FramePipeline} as the strip read-origin ({@link #cropX}/{@link #cropY})
+ * — no extra per-frame copy, since stripping already sub-bitmaps each band. Fit (the
+ * default) and the legacy fallback keep a panel-sized reader with a {@code (0,0)} crop.
+ *
  * <p>All hidden-API calls go through reflection; a total failure (both paths)
  * surfaces as an exception that aborts the connection rather than silently
  * degrading. Use {@code --test-pattern} to exercise the pipeline without touching
@@ -83,6 +93,12 @@ final class ScreenCapture {
     // the natural orientation (0 = no-op). Set on the primary path; 0 on the fallback.
     private int counterDeg;
 
+    // Fill-mode centered crop of the panel out of the (oversized, cover-sized) frame
+    // acquire() yields, in natural orientation. (0,0) for fit and the fallback path,
+    // where acquire() is already exactly panel-sized.
+    private int cropX;
+    private int cropY;
+
     // Exactly one of these is non-null, depending on which creation path took.
     private VirtualDisplay virtualDisplay;  // primary: DisplayManager path
     private Class<?> sc;                     // fallback: android.view.SurfaceControl
@@ -94,11 +110,27 @@ final class ScreenCapture {
      */
     ScreenCapture(int srcW, int srcH, int targetW, int targetH, int scaleMode, int rotation)
             throws Exception {
+        // Natural-orientation content the reader holds: the panel for fit, the cover
+        // rectangle for fill (the source fills it exactly, then we crop the panel out).
+        int contentW, contentH;
+        if (scaleMode == 1) {  // fill: oversize the reader to cover the panel
+            int[] nat = Projection.naturalSize(srcW, srcH, rotation);
+            int[] cov = Projection.fillCover(nat[0], nat[1], targetW, targetH);
+            contentW = cov[0];
+            contentH = cov[1];
+            this.cropX = cov[2];
+            this.cropY = cov[3];
+        } else {  // fit: the reader is exactly the panel; no crop
+            contentW = targetW;
+            contentH = targetH;
+            this.cropX = 0;
+            this.cropY = 0;
+        }
         boolean transposed = (rotation % 2) != 0;  // 90° / 270°: panel axes swap
-        // Reader matches the panel oriented to the rotation, so the rotated logical
+        // Reader matches the content oriented to the rotation, so the rotated logical
         // display fills it; counter-rotate by the inverse rotation in acquire().
-        this.readerW = transposed ? targetH : targetW;
-        this.readerH = transposed ? targetW : targetH;
+        this.readerW = transposed ? contentH : contentW;
+        this.readerH = transposed ? contentW : contentH;
         this.counterDeg = (rotation & 3) * 90;  // undo the device rotation (direction verified on device)
 
         try {
@@ -116,6 +148,8 @@ final class ScreenCapture {
             this.readerW = targetW;
             this.readerH = targetH;
             this.counterDeg = 0;
+            this.cropX = 0;  // the fallback drives fit/fill via Projection into a panel-sized reader
+            this.cropY = 0;
             this.reader = ImageReader.newInstance(targetW, targetH, PixelFormat.RGBA_8888, 3);
             try {
                 createSurfaceControlDisplay(srcW, srcH, targetW, targetH, scaleMode, reader.getSurface());
@@ -214,6 +248,12 @@ final class ScreenCapture {
         if (rotated != frame) frame.recycle();
         return rotated;
     }
+
+    /** Natural-orientation X origin of the centered panel crop in {@link #acquire}'s frame (0 unless fill). */
+    int cropX() { return cropX; }
+
+    /** Natural-orientation Y origin of the centered panel crop in {@link #acquire}'s frame (0 unless fill). */
+    int cropY() { return cropY; }
 
     void close() {
         if (virtualDisplay != null) {

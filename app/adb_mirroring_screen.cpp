@@ -5,10 +5,12 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include "adb.hpp"  // adb::Error, adb::to_string
 #include "adb_app.hpp"
@@ -136,7 +138,106 @@ void ADBMirroringScreen::start_mirror_ui() {
     }
     l->set_video_listener(std::static_pointer_cast<agent_link::VideoListener>(
         std::static_pointer_cast<ADBMirroringScreen>(shared_from_this())));
-    l->start_mirror();  // 720x1280 fit, video (default MirrorConfig)
+    l->start_mirror(mirror_config_for(disp_mode_));  // 720x1280, current display mode
+}
+
+// ---------------------------------------------------------------------------
+// Display mode (DispMode button): Fit / Fill / Adapt
+// ---------------------------------------------------------------------------
+
+agent_link::MirrorConfig ADBMirroringScreen::mirror_config_for(int mode) const {
+    agent_link::MirrorConfig cfg;  // 720x1280 panel, video (defaults)
+    // Fill asks the agent to cover+crop; Fit and Adapt both send scale=fit (Adapt
+    // pre-resizes the source via `wm size` so fit already fills the panel).
+    cfg.scale_mode = (mode == kDispFill) ? agent_link::kScaleFill : agent_link::kScaleFit;
+    return cfg;
+}
+
+void ADBMirroringScreen::apply_disp_mode(int mode) {
+    int old = disp_mode_;
+    if (mode == old) return;
+    disp_mode_ = mode;
+    if (mode == kDispAdapt) {
+        adapt_enter();          // `wm size` to the panel aspect, then restart fit
+    } else if (old == kDispAdapt) {
+        adapt_exit(mode);       // `wm size reset`, then restart `mode`
+    } else {
+        restart_mirror(mode);   // fit <-> fill: just reconfigure the live stream
+    }
+}
+
+void ADBMirroringScreen::restart_mirror(int mode) {
+    // The agent restarts the stream in place on a fresh MIRROR_START (our video
+    // listener stays registered, the decode pipeline keeps running). Non-blocking.
+    if (auto l = app::agent_client().link()) l->start_mirror(mirror_config_for(mode));
+}
+
+namespace {
+// Parse `wm size` output and compute the override resolution that matches the Tab5
+// panel aspect (long:short = PANEL_H:PANEL_W). Keeps the device's short side and
+// stretches the long side to short * PANEL_H / PANEL_W, preserving portrait vs
+// landscape. Returns false if the "Physical size:" line can't be parsed.
+bool compute_adapt_size(const std::string& wm_out, int* ow, int* oh) {
+    auto pos = wm_out.find("Physical size:");
+    if (pos == std::string::npos) return false;
+    int w = 0, h = 0;
+    if (std::sscanf(wm_out.c_str() + pos, "Physical size: %dx%d", &w, &h) != 2) return false;
+    if (w <= 0 || h <= 0) return false;
+    int short_side = std::min(w, h);
+    int long_side = static_cast<int>(static_cast<long>(short_side) * PANEL_H / PANEL_W);
+    if (w <= h) { *ow = w; *oh = long_side; }   // portrait: keep width, extend height
+    else        { *ow = long_side; *oh = h; }   // landscape natural
+    return true;
+}
+}  // namespace
+
+void ADBMirroringScreen::adapt_enter() {
+    auto* c = app::adb_client();
+    if (!c) { restart_mirror(kDispAdapt); return; }  // no adb: best-effort plain fit
+    std::weak_ptr<ADBMirroringScreen> self =
+        std::static_pointer_cast<ADBMirroringScreen>(shared_from_this());
+    // 1) Query the device's physical size (reader thread completion).
+    c->exec("wm size", [self](adb::Error e, const std::string& out) {
+        int ow = 0, oh = 0;
+        bool ok = (e == adb::Error::Ok) && compute_adapt_size(out, &ow, &oh);
+        // Marshal to LVGL: decide + issue the override (and the eventual restart).
+        lv_async_call([self, ok, ow, oh] {
+            auto s = self.lock();
+            if (!s || s->exited() || s->disp_mode_ != kDispAdapt) return;  // cancelled
+            if (!ok) { s->restart_mirror(kDispAdapt); return; }  // couldn't size: plain fit
+            char cmd[48];
+            std::snprintf(cmd, sizeof(cmd), "wm size %dx%d", ow, oh);
+            std::weak_ptr<ADBMirroringScreen> self2 = self;
+            auto* c2 = app::adb_client();
+            if (!c2) { s->restart_mirror(kDispAdapt); return; }
+            // 2) Apply the override, then restart the mirror (source is now panel-aspect).
+            c2->exec(cmd, [self2](adb::Error, const std::string&) {
+                lv_async_call([self2] {
+                    auto s2 = self2.lock();
+                    if (!s2 || s2->exited() || s2->disp_mode_ != kDispAdapt) return;
+                    s2->restart_mirror(kDispAdapt);
+                });
+            });
+        });
+    });
+}
+
+void ADBMirroringScreen::adapt_exit(int mode) {
+    std::weak_ptr<ADBMirroringScreen> self =
+        std::static_pointer_cast<ADBMirroringScreen>(shared_from_this());
+    auto restart = [self, mode] {
+        lv_async_call([self, mode] {
+            auto s = self.lock();
+            if (!s || s->exited() || s->disp_mode_ != mode) return;
+            s->restart_mirror(mode);
+        });
+    };
+    // Restore the device's resolution first (so the agent rebuilds capture at the
+    // real size), then reconfigure to the new mode.
+    if (auto* c = app::adb_client())
+        c->exec("wm size reset", [restart](adb::Error, const std::string&) { restart(); });
+    else
+        restart_mirror(mode);
 }
 
 void ADBMirroringScreen::apply_overlay(uint8_t rot, bool first) {
@@ -282,8 +383,16 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
                 });
                 break;
             }
+            case DISPMODE:
+                // Cycle Fit -> Fill -> Adapt -> Fit. The active mode is evident from
+                // the mirrored image (letterbox / cropped / exact-fit), so the icon
+                // stays put. Capturing `this` is safe — the overlay (and this button)
+                // is torn down in onExit before the screen frees.
+                lv_obj_add_event_fn(b, LV_EVENT_CLICKED, [this](lv_event_t*) {
+                    apply_disp_mode((disp_mode_ + 1) % 3);
+                });
+                break;
             default:
-                // DispMode lands once its UI is final.
                 break;
         }
     }
@@ -432,6 +541,12 @@ void ADBMirroringScreen::onExit() {
     if (auto l = app::agent_client().link()) {
         l->stop_mirror();
         l->set_video_listener({});  // detach the producer (no more on_video_strip)
+    }
+    // If we leave while in Adapt, restore the device's resolution (we overrode it via
+    // `wm size`). Fire-and-forget — the source returns to its real size.
+    if (disp_mode_ == kDispAdapt) {
+        if (auto* c = app::adb_client())
+            c->exec("wm size reset", [](adb::Error, const std::string&) {});
     }
     // Stop observing touch: clear our listener so no more on_touch fires (an
     // in-flight one keeps us alive via its weak lock). UP any still-down

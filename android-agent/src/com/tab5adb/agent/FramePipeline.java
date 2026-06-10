@@ -42,14 +42,17 @@ final class FramePipeline {
     }
 
     /**
-     * Strip-only entry for the GPU capture path: {@code frame} is already the final
-     * targetW×targetH panel frame (rotate / scale-fit / letterbox done by the
-     * compositor in {@link ScreenCapture}/{@link Projection}), so just split it into
-     * strips + JPEG-encode. Every strip is full panel width (x=0, w=targetW), like
-     * {@link #process}. Does not recycle {@code frame} (the caller owns it).
+     * Strip-only entry for the GPU capture path: {@code frame} is the captured frame
+     * (rotate / scale done by the compositor in {@link ScreenCapture}/{@link
+     * Projection}), and {@code (cropX,cropY)} is the natural-orientation origin of the
+     * targetW×targetH panel region inside it — (0,0) for fit (the frame is already
+     * exactly panel-sized), the centered crop for fill (the frame is oversized to
+     * cover the panel; see {@link ScreenCapture#cropX}). Splits that panel region into
+     * full-width strips (x=0, w=targetW) + JPEG-encodes — no extra copy, the crop is
+     * just each band's read-origin. Does not recycle {@code frame} (the caller owns it).
      */
-    List<Strip> stripsOf(Bitmap frame) {
-        return stripify(frame, 0, 0);
+    List<Strip> stripsOf(Bitmap frame, int cropX, int cropY) {
+        return stripify(frame, cropX, cropY, targetW, targetH);
     }
 
     /**
@@ -94,7 +97,7 @@ final class FramePipeline {
         }
         if (rotated != src && rotated != frame) rotated.recycle();
 
-        List<Strip> strips = stripify(frame, 0, 0);  // full-width strips (offX=offY=0)
+        List<Strip> strips = stripify(frame, 0, 0, targetW, targetH);  // whole frame
         if (frame != src) frame.recycle();
         return strips;
     }
@@ -107,21 +110,26 @@ final class FramePipeline {
         return Bitmap.createBitmap(src, 0, 0, src.getWidth(), src.getHeight(), m, true);
     }
 
-    /** §5.1 step 3+4: split into `split` horizontal bands (each 16-aligned) + encode. */
-    private List<Strip> stripify(Bitmap image, int offX, int offY) {
-        int imgW = image.getWidth(), imgH = image.getHeight();
-        int base = Math.max(16, floor16(imgH / split));
+    /**
+     * §5.1 step 3+4: split the {@code regionW×regionH} panel region at read-origin
+     * {@code (srcX,srcY)} in {@code image} into {@code split} horizontal bands (each
+     * 16-aligned) + JPEG-encode. The emitted strips are in PANEL coords (x=0, y from
+     * the region top), independent of the read-origin — so a fill crop reads an
+     * off-center band of an oversized frame yet still places it at panel x=0,y.
+     */
+    private List<Strip> stripify(Bitmap image, int srcX, int srcY, int regionW, int regionH) {
+        int base = Math.max(16, floor16(regionH / split));
         List<Strip> out = new ArrayList<>(split);
         int y = 0;
-        for (int i = 0; i < split && y < imgH; i++) {
-            // Last band absorbs the remainder so the strips sum to exactly imgH;
-            // imgH and base are 16-multiples, so the remainder is too.
-            int h = (i == split - 1) ? (imgH - y) : Math.min(base, imgH - y);
-            Bitmap band = Bitmap.createBitmap(image, 0, y, imgW, h);
+        for (int i = 0; i < split && y < regionH; i++) {
+            // Last band absorbs the remainder so the strips sum to exactly regionH;
+            // regionH and base are 16-multiples, so the remainder is too.
+            int h = (i == split - 1) ? (regionH - y) : Math.min(base, regionH - y);
+            Bitmap band = Bitmap.createBitmap(image, srcX, srcY + y, regionW, h);
             Strip st = new Strip();
-            st.x = offX;
-            st.y = offY + y;
-            st.w = imgW;
+            st.x = 0;
+            st.y = y;
+            st.w = regionW;
             st.h = h;
             st.jpeg = encode(band);
             band.recycle();

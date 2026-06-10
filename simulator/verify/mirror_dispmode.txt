@@ -1,0 +1,28 @@
+# Mirror display-mode switching: Fit -> Fill -> Adapt, captured against the live
+# phone. The overlay control strip is a vertical strip at the bottom-left in
+# portrait; top->down it packs End, DispMode, OpMode, ... so DispMode sits at
+# ~(40, 698). Each DispMode tap cycles Fit -> Fill -> Adapt -> Fit and reconfigures
+# the live mirror in place (Adapt also runs `wm size` on the source).
+settle
+tap 360 640
+wait 6000
+settle
+# Open the Mirroring tool (top-right tool button).
+tap 552 162
+# Agent bring-up (pkill + push + app_process + link + MIRROR_START) + first frames.
+wait 9000
+capture simulator/verify/out/dispmode_fit.jpg
+# Fit -> Fill: should crop the overflow (full-bleed, no letterbox).
+tap 40 698
+wait 3000
+capture simulator/verify/out/dispmode_fill.jpg
+# Fill -> Adapt: `wm size` the source to the panel aspect, then fit (no crop, no
+# letterbox). The resize + restart needs a beat longer.
+tap 40 698
+wait 6000
+capture simulator/verify/out/dispmode_adapt.jpg
+# Adapt -> Fit: restores `wm size` and reconfigures back to letterboxed fit.
+tap 40 698
+wait 4000
+capture simulator/verify/out/dispmode_fit_again.jpg
+quit
