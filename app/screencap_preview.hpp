@@ -51,10 +51,12 @@ bool operator!=(const PsramAllocator<A>&, const PsramAllocator<B>&) noexcept { r
 class ScreencapPreview : public adb::StreamListener,
                          public std::enable_shared_from_this<ScreencapPreview> {
 public:
-    // `image` is an existing lv_image the preview renders into; dst_w/dst_h is the
-    // downscale target (the preview's pixel size). All LVGL touches happen on the
-    // LVGL thread.
-    static std::shared_ptr<ScreencapPreview> create(lv_obj_t* image, int dst_w, int dst_h);
+    // `image` is an existing lv_image the preview renders into; max_w/max_h is the
+    // bounding box the preview aspect-fits into. Each frame is decoded at the
+    // fitted size derived from the source dimensions (so a rotated device shrinks
+    // to a landscape frame) and the lv_image is resized to hug it — no letterbox.
+    // All LVGL touches happen on the LVGL thread.
+    static std::shared_ptr<ScreencapPreview> create(lv_obj_t* image, int max_w, int max_h);
     ~ScreencapPreview() override;
 
     // Begin the capture loop (chains a fresh capture every interval_ms_). Call on
@@ -69,7 +71,7 @@ public:
     void on_stream_close(adb::Stream* st, adb::Error err) override;
 
 private:
-    ScreencapPreview(lv_obj_t* image, int dst_w, int dst_h);
+    ScreencapPreview(lv_obj_t* image, int max_w, int max_h);
 
     void capture_once();              // LVGL thread: open the exec:screencap stream
     void schedule_next();             // LVGL thread: arm the interval timer
@@ -80,16 +82,23 @@ private:
     bool decode_jpeg(const uint8_t* data, size_t len, int idx);  // decode task
 
     lv_obj_t* image_;
-    const int dst_w_, dst_h_;
+    const int max_w_, max_h_;
     int interval_ms_ = 2000;
 
     lv_image_dsc_t dsc_{};            // points at the shown img_buf_
-    // Double buffer (each dst_w*dst_h*2 RGB565, PSRAM): the decode task writes the
-    // back buffer while LVGL shows the front, then present() flips dsc_ to it — no
-    // per-frame copy. write_idx_ = the back buffer (front = write_idx_ ^ 1).
+    // Double buffer (each max_w*max_h*2 RGB565, PSRAM — allocated once for the
+    // bounding box; each frame uses a tightly-packed frame_w_*frame_h_ prefix):
+    // the decode task writes the back buffer while LVGL shows the front, then
+    // present() flips dsc_ to it — no per-frame copy. write_idx_ = the back
+    // buffer (front = write_idx_ ^ 1).
     uint8_t* img_buf_[2] = {nullptr, nullptr};
     size_t buf_size_ = 0;             // bytes in each img_buf_
     std::atomic<int> write_idx_{1};   // back buffer the decode task targets next
+    // Aspect-fitted size of the frame in each img_buf_ — written by the decode
+    // task, read by present() on the LVGL thread. The pipeline is serial (the
+    // next capture only arms after present), so no extra synchronization.
+    int frame_w_[2] = {0, 0};
+    int frame_h_[2] = {0, 0};
 
     // Compressed PNG accumulated on the reader thread (PSRAM — can be ~MBs).
     std::vector<uint8_t, PsramAllocator<uint8_t>> png_;

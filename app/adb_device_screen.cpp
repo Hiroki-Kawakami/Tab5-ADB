@@ -47,11 +47,14 @@ void ADBDeviceScreen::build() {
 }
 
 void ADBDeviceScreen::onAppear() {
-    // Low-rate, agent-free screen preview via `exec:screencap -p`. dst matches the
-    // preview box (360 x 360/9*20 = 360x800) for a 1:1 render. Created/torn down on
-    // appear/disappear (not enter/exit) so the capture+decode loop and its PSRAM
-    // buffers don't keep running behind a pushed sub-screen (Mirroring/Shell/...).
-    preview_ = ScreencapPreview::create(preview_image_, 360, 800);
+    // Low-rate, agent-free screen preview via `exec:screencap -p`. 360x860 is the
+    // bounding box each frame aspect-fits into (860 keeps sources up to ~9:21.5
+    // at the full 360 width; the lv_image resizes to hug each frame, so the
+    // device's real aspect — and rotation — shows with no stretch or letterbox).
+    // Created/torn down on appear/disappear (not enter/exit) so the capture+decode
+    // loop and its PSRAM buffers don't keep running behind a pushed sub-screen
+    // (Mirroring/Shell/...).
+    preview_ = ScreencapPreview::create(preview_image_, 360, 860);
     preview_->start();
 }
 
@@ -102,7 +105,12 @@ void ADBDeviceScreen::createPreviewContainer() {
     lv_obj_remove_style_all(preview_container_);
     lv_obj_set_size(preview_container_, width, LV_SIZE_CONTENT);
     preview_image_ = lv_image_create(preview_container_);
-    lv_obj_set_size(preview_image_, LV_PCT(100), width / 9 * 20);
+    // 9:20 placeholder until the first capture lands; ScreencapPreview then
+    // resizes the image to each frame's aspect-fitted size. Top-centered so a
+    // narrower-than-360 frame (very tall source hitting the height cap, or a
+    // landscape-rotated device) stays centered in the 360-wide column.
+    lv_obj_set_size(preview_image_, width, width / 9 * 20);
+    lv_obj_set_align(preview_image_, LV_ALIGN_TOP_MID);
     lv_obj_set_style_bg_color(preview_image_, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(preview_image_, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(preview_image_, 12, 0);

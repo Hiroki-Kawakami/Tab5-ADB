@@ -57,14 +57,24 @@ bool unfilter(uint8_t ft, const uint8_t* in, const uint8_t* prev, uint8_t* out,
     return true;
 }
 
-// Decode a PNG and downscale it on the fly into a dst_w*dst_h RGB565 buffer
-// (`out`, dst_w*dst_h uint16). The full-resolution image is never materialized:
-// PNG row filters only reference the *previous* reconstructed row, so we inflate
-// row by row keeping just two scanlines and emit the kept (nearest-neighbour)
-// rows straight into `out`. Constraints (all met by Android `screencap -p`):
-// 8-bit, colour type RGB(2)/RGBA(6), non-interlaced. Returns false otherwise.
+// Aspect-fit src_w x src_h into the max_w x max_h bounding box.
+void aspect_fit(int src_w, int src_h, int max_w, int max_h, int* fit_w, int* fit_h) {
+    double s = std::min((double)max_w / src_w, (double)max_h / src_h);
+    *fit_w = std::min(std::max(1, (int)std::lround(src_w * s)), max_w);
+    *fit_h = std::min(std::max(1, (int)std::lround(src_h * s)), max_h);
+}
+
+// Decode a PNG and downscale it on the fly, aspect-fitted into a max_w*max_h
+// bounding box, as a tightly-packed fit_w*fit_h RGB565 frame at the start of
+// `out` (which must hold max_w*max_h uint16). The full-resolution image is never
+// materialized: PNG row filters only reference the *previous* reconstructed row,
+// so we inflate row by row keeping just two scanlines and emit the kept
+// (nearest-neighbour) rows straight into `out`. Constraints (all met by Android
+// `screencap -p`): 8-bit, colour type RGB(2)/RGBA(6), non-interlaced. Returns
+// false otherwise.
 bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
-                                 uint16_t* out, int dst_w, int dst_h,
+                                 uint16_t* out, int max_w, int max_h,
+                                 int* fit_w, int* fit_h,
                                  int* src_w = nullptr, int* src_h = nullptr) {
     static const uint8_t SIG[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
     if (len < 8 + 25 || memcmp(png, SIG, 8) != 0) return false;
@@ -100,6 +110,11 @@ bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
     if (!seen_ihdr || idat.empty()) return false;
     if (src_w) *src_w = W;
     if (src_h) *src_h = H;
+
+    int dst_w, dst_h;
+    aspect_fit(W, H, max_w, max_h, &dst_w, &dst_h);
+    *fit_w = dst_w;
+    *fit_h = dst_h;
 
     const int stride = W * bpp;
     z_stream zs{};
@@ -147,22 +162,21 @@ bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
 
 }  // namespace
 
-std::shared_ptr<ScreencapPreview> ScreencapPreview::create(lv_obj_t* image, int dst_w, int dst_h) {
-    return std::shared_ptr<ScreencapPreview>(new ScreencapPreview(image, dst_w, dst_h));
+std::shared_ptr<ScreencapPreview> ScreencapPreview::create(lv_obj_t* image, int max_w, int max_h) {
+    return std::shared_ptr<ScreencapPreview>(new ScreencapPreview(image, max_w, max_h));
 }
 
-ScreencapPreview::ScreencapPreview(lv_obj_t* image, int dst_w, int dst_h)
-    : image_(image), dst_w_(dst_w), dst_h_(dst_h) {
-    buf_size_ = (size_t)dst_w_ * dst_h_ * 2;  // RGB565
+ScreencapPreview::ScreencapPreview(lv_obj_t* image, int max_w, int max_h)
+    : image_(image), max_w_(max_w), max_h_(max_h) {
+    buf_size_ = (size_t)max_w_ * max_h_ * 2;  // RGB565, sized for the bounding box
     img_buf_[0] = static_cast<uint8_t*>(heap_caps_calloc(buf_size_, 1, MALLOC_CAP_SPIRAM));
     img_buf_[1] = static_cast<uint8_t*>(heap_caps_calloc(buf_size_, 1, MALLOC_CAP_SPIRAM));
     if (!img_buf_[0] || !img_buf_[1]) ESP_LOGE(TAG, "PSRAM alloc failed (%zu B x2)", buf_size_);
     dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
     dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
-    dsc_.header.w = dst_w_;
-    dsc_.header.h = dst_h_;
+    // w/h/stride/data are per-frame: present() points them at the freshly-decoded
+    // aspect-fitted frame before the dsc_ is ever shown.
     dsc_.data = img_buf_[0];  // front; write_idx_ starts at 1 (the back)
-    dsc_.data_size = buf_size_;
 }
 
 ScreencapPreview::~ScreencapPreview() {
@@ -252,9 +266,18 @@ void ScreencapPreview::schedule_next() {
 void ScreencapPreview::present(int idx, bool ok) {
     if (stopped_.load() || !ok) return;  // failed decode: keep showing the last frame
     // Flip dsc_ to the buffer the decode task just filled (no copy); the next decode
-    // then targets the other buffer (the one LVGL is done showing).
+    // then targets the other buffer (the one LVGL is done showing). The frame is a
+    // tightly-packed aspect-fitted frame_w_*frame_h_ image, and the lv_image is
+    // resized to hug it (the box stays letterbox-free across devices / rotation).
+    const int fw = frame_w_[idx], fh = frame_h_[idx];
+    dsc_.header.w = fw;
+    dsc_.header.h = fh;
+    dsc_.header.stride = fw * 2;
     dsc_.data = img_buf_[idx];
+    dsc_.data_size = (size_t)fw * fh * 2;
     write_idx_.store(idx ^ 1);
+    if (fw != frame_w_[idx ^ 1] || fh != frame_h_[idx ^ 1])  // vs the frame shown so far
+        lv_obj_set_size(image_, fw, fh);
     lv_image_set_src(image_, &dsc_);
     lv_obj_invalidate(image_);
 
@@ -263,7 +286,7 @@ void ScreencapPreview::present(int idx, bool ok) {
     // downscale; total = capture open -> shown.
     int64_t now = esp_timer_get_time();
     ESP_LOGI(TAG, "preview %s %dx%d->%dx%d %ukB | xfer %lldms wait %lldms decode %lldms total %lldms",
-             last_fmt_, src_w_, src_h_, dst_w_, dst_h_, (unsigned)(png_bytes_ / 1024),
+             last_fmt_, src_w_, src_h_, fw, fh, (unsigned)(png_bytes_ / 1024),
              (long long)((t_recv_us_ - t_capture_us_) / 1000),
              (long long)((t_dec_start_us_ - t_recv_us_) / 1000),
              (long long)((t_dec_end_us_ - t_dec_start_us_) / 1000),
@@ -316,31 +339,32 @@ bool ScreencapPreview::decode_jpeg(const uint8_t* data, size_t len, int idx) {
         jpeg_pipe_max_ = maxdim;
     }
 
-    // Aspect-fit; quantize scale down to PPA's 1/16 step so the rendered extent is
-    // exact and fits the preview box, with black letterbox margins.
-    float s = std::min((float)dst_w_ / pi.width, (float)dst_h_ / pi.height);
+    // Aspect-fit into the bounding box, quantizing the scale down to PPA's 1/16
+    // step; the quantized extent *is* the output frame (no letterbox — the
+    // lv_image is resized to the frame in present()).
+    float s = std::min((float)max_w_ / pi.width, (float)max_h_ / pi.height);
     float q = std::floor(s * 16.0f) / 16.0f;
     if (q < 1.0f / 16) q = 1.0f / 16;
     uint32_t ew = (uint32_t)(pi.width * q), eh = (uint32_t)(pi.height * q);
-
-    memset(img_buf_[idx], 0, buf_size_);  // letterbox
+    if (ew < 1) ew = 1;
+    if (eh < 1) eh = 1;
 
     jpeg_ppa_transform_t t = {};
     t.rotation = PPA_SRM_ROTATION_ANGLE_0;
     t.scale_x = t.scale_y = q;
-    t.out_offset_x = ew < (uint32_t)dst_w_ ? ((uint32_t)dst_w_ - ew) / 2 : 0;
-    t.out_offset_y = eh < (uint32_t)dst_h_ ? ((uint32_t)dst_h_ - eh) / 2 : 0;
 
     jpeg_ppa_output_t out = {};
     out.buffer = img_buf_[idx];
     out.buffer_size = buf_size_;
-    out.pic_w = dst_w_;
-    out.pic_h = dst_h_;
+    out.pic_w = ew;
+    out.pic_h = eh;
     out.color_mode = PPA_SRM_COLOR_MODE_RGB565;
 
     esp_err_t e = jpeg_ppa_pipeline_process(
         static_cast<jpeg_ppa_pipeline_handle_t>(jpeg_pipe_), data, len, &out, &t, nullptr);
     if (e != ESP_OK) { ESP_LOGW(TAG, "jpeg pipeline process: %d", (int)e); return false; }
+    frame_w_[idx] = (int)ew;
+    frame_h_[idx] = (int)eh;
     src_w_ = pi.width;
     src_h_ = pi.height;
     return true;
@@ -369,7 +393,8 @@ void ScreencapPreview::decode_loop() {
             last_fmt_ = "png";
             ok = is_png && decode_png_downscale_rgb565(
                               d, n, reinterpret_cast<uint16_t*>(img_buf_[idx]),
-                              dst_w_, dst_h_, &src_w_, &src_h_);
+                              max_w_, max_h_, &frame_w_[idx], &frame_h_[idx],
+                              &src_w_, &src_h_);
         }
         // We asked for `-j` but got something else (or nothing) → the device lacks
         // it; drop to PNG for the rest of the session.
@@ -381,7 +406,14 @@ void ScreencapPreview::decode_loop() {
         png_.clear();
         if (!ok) ESP_LOGW(TAG, "decode failed");
 
-        lv_async_call([self = shared_from_this(), idx, ok]() {
+        // weak, not shared_from_this(): an adb disconnect can hand us work while
+        // the last owner is already in ~ScreencapPreview (stop() joins this task
+        // from the dtor), where shared_from_this() throws bad_weak_ptr. The lock
+        // runs on the LVGL thread, serialized with the dtor, so an expired weak
+        // just skips the dead object's presentation.
+        lv_async_call([weak = weak_from_this(), idx, ok]() {
+            auto self = weak.lock();
+            if (!self) return;
             self->capturing_ = false;
             self->stream_.reset();
             self->present(idx, ok);
