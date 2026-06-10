@@ -1,0 +1,13 @@
+# E2E touch passthrough on the connected device. OpMode is ON by default (blue
+# icon), so a tap on an app via passthrough should open it with no toggle needed.
+settle
+tap 360 640          # Connect on the home screen
+wait 6000
+settle
+tap 552 162          # Mirroring tool on the device screen
+wait 11000           # agent launch (pkill + push + app_process + link) + first frames
+capture simulator/verify/out/tp_before.jpg
+tap 577 324          # passthrough tap on the Settings icon (outside the strip)
+wait 4500
+capture simulator/verify/out/tp_after.jpg
+quit

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 
 #include "adb.hpp"  // adb::Error, adb::to_string
 #include "adb_app.hpp"
@@ -31,6 +32,7 @@ ADBMirroringScreen::~ADBMirroringScreen() {
     // idempotent backstop. Stop the producer (clear our video listener so no more
     // on_video_strip arrives) before joining the consumer.
     if (auto l = app::agent_client().link()) l->set_video_listener({});
+    release_all_pointers();
     display_manager.set_touch_listener({});
     if (decode_task_) {
         decode_stop_ = true;
@@ -261,8 +263,27 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
                                     [](lv_event_t*) { lv_async_call([] { screen_manager.pop(); }); });
                 lv_obj_set_style_text_color(lbl, lv_color_hex(0xFF8888), 0);
                 break;
+            case OPMODE: {
+                // Touch-control toggle (§4.7): when on, touches over the mirror are
+                // injected to the source device. Active = the LVGL theme's primary
+                // blue (matching a default button); inactive = white. Turning it off
+                // releases any still-down pointers so the source sees no stuck
+                // finger. Capturing `this` is safe — the overlay (and this button)
+                // is torn down in onExit before the screen frees, so the event can
+                // only fire while the screen is alive.
+                lv_color_t on_color = lv_palette_main(LV_PALETTE_BLUE);
+                lv_obj_set_style_text_color(
+                    lbl, passthrough_.load() ? on_color : lv_color_white(), 0);
+                lv_obj_add_event_fn(b, LV_EVENT_CLICKED, [this, lbl, on_color](lv_event_t*) {
+                    bool now = !passthrough_.load();
+                    passthrough_.store(now);
+                    if (!now) release_all_pointers();
+                    lv_obj_set_style_text_color(lbl, now ? on_color : lv_color_white(), 0);
+                });
+                break;
+            }
             default:
-                // OpMode / DispMode land once their UI is final.
+                // DispMode lands once its UI is final.
                 break;
         }
     }
@@ -271,40 +292,119 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
 bool ADBMirroringScreen::in_corner(int px, int py, uint8_t rot) {
     bool right, bottom;
     anchor_corner(rot, &right, &bottom);
-    return (right ? px > PANEL_W - kCornerSwipe : px < kCornerSwipe) &&
-           (bottom ? py > PANEL_H - kCornerSwipe : py < kCornerSwipe);
+    // Distance from the anchored corner along each axis (0 at the corner's edge).
+    int dx = right ? (PANEL_W - 1 - px) : px;
+    int dy = bottom ? (PANEL_H - 1 - py) : py;
+    if (dx < 0 || dy < 0) return false;
+    // The L = a band along the corner's horizontal edge OR its vertical edge.
+    bool horiz = dy < kEdgeThick && dx < kEdgeReach;
+    bool vert = dx < kEdgeThick && dy < kEdgeReach;
+    return horiz || vert;
+}
+
+bool ADBMirroringScreen::in_overlay_footprint(int px, int py, uint8_t rot) {
+    bool right, bottom;
+    anchor_corner(rot, &right, &bottom);
+    int x1 = right ? PANEL_W - kStripCross : 0;
+    int y1 = bottom ? PANEL_H - kStripLen : 0;
+    return px >= x1 && px < x1 + kStripCross && py >= y1 && py < y1 + kStripLen;
+}
+
+void ADBMirroringScreen::release_all_pointers() {
+    std::lock_guard<std::mutex> lk(pass_mtx_);
+    auto l = app::agent_client().link();
+    for (auto& p : pass_) {
+        if (p.used && p.kind == PtKind::Pass && l)
+            l->inject_touch(agent_link::kTouchUp, static_cast<uint8_t>(p.id), p.x, p.y);
+        p.used = false;
+    }
 }
 
 void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
-    // Touch task thread. The reveal gesture is a single-finger swipe, so track
-    // point 0; multi-touch (count > 1) is reserved for the future passthrough.
-    bool pressed = count > 0;
-    int px = pressed ? pts[0].x : 0;
-    int py = pressed ? pts[0].y : 0;
-    bool visible = display_manager.overlay_visible();
+    // Touch task thread. Diff this snapshot against the tracked pointers (keyed by
+    // the controller track id) to emit per-pointer DOWN/MOVE/UP. Each new pointer
+    // is classified once (Pass / Reveal / Ignore) and keeps that role until it
+    // lifts, so MOVE/UP stay consistent with the initial decision.
+    const bool po = passthrough_.load();
+    const bool visible = display_manager.overlay_visible();
+    const uint8_t rot = cur_rot_;
+    auto link = app::agent_client().link();
 
-    if (pressed && !touch_prev_) {
-        // Press edge: arm a reveal swipe if it starts in the corner while hidden.
-        if (!visible && in_corner(px, py, cur_rot_)) {
-            swipe_active_ = true;
-            swipe_x0_ = px;
-            swipe_y0_ = py;
+    std::lock_guard<std::mutex> lk(pass_mtx_);
+
+    auto slot_of = [&](int id) -> int {
+        for (int s = 0; s < kMaxPass; ++s)
+            if (pass_[s].used && pass_[s].id == id) return s;
+        return -1;
+    };
+    auto free_slot = [&]() -> int {
+        for (int s = 0; s < kMaxPass; ++s)
+            if (!pass_[s].used) return s;
+        return -1;
+    };
+
+    bool seen[kMaxPass] = {false};
+
+    for (int i = 0; i < count; ++i) {
+        const int id = pts[i].id;
+        const uint16_t x = static_cast<uint16_t>(pts[i].x);
+        const uint16_t y = static_cast<uint16_t>(pts[i].y);
+        int s = slot_of(id);
+
+        if (s < 0) {
+            // New pointer: classify. The reveal corner is reserved regardless of
+            // mode (so the strip is always recoverable); passthrough only fires in
+            // touch-control mode and outside a visible overlay strip.
+            s = free_slot();
+            if (s < 0) continue;  // more than kMaxPass fingers — ignore the extra
+            ActivePtr& p = pass_[s];
+            p.used = true; p.id = id; p.x = x; p.y = y; p.rx0 = x; p.ry0 = y;
+            if (!visible && in_corner(x, y, rot)) {
+                p.kind = PtKind::Reveal;
+            } else if (po && !(visible && in_overlay_footprint(x, y, rot))) {
+                p.kind = PtKind::Pass;
+                if (link) link->inject_touch(agent_link::kTouchDown,
+                                             static_cast<uint8_t>(id), x, y);
+            } else {
+                p.kind = PtKind::Ignore;  // overlay handles it, or passthrough off
+            }
+        } else {
+            ActivePtr& p = pass_[s];
+            p.x = x; p.y = y;
+            if (p.kind == PtKind::Pass) {
+                if (po) {
+                    if (link) link->inject_touch(agent_link::kTouchMove,
+                                                 static_cast<uint8_t>(id), x, y);
+                } else {
+                    // Touch-control switched off mid-gesture: release this pointer.
+                    if (link) link->inject_touch(agent_link::kTouchUp,
+                                                 static_cast<uint8_t>(id), x, y);
+                    p.used = false;
+                    continue;  // dropped; leave it unseen so it isn't re-UP'd below
+                }
+            } else if (p.kind == PtKind::Reveal && !visible) {
+                int dx = x - p.rx0, dy = y - p.ry0;
+                if (dx * dx + dy * dy >= kSwipeThresh * kSwipeThresh) {
+                    // Reveal, masking this same press from the indev until the
+                    // finger lifts so the gesture isn't delivered as a tap on a
+                    // freshly-shown button. consume FIRST (close the unmasked window).
+                    display_manager.consume_overlay_touch();
+                    display_manager.set_overlay_visible(true);
+                    p.kind = PtKind::Ignore;  // gesture consumed
+                }
+            }
         }
-    } else if (pressed && swipe_active_ && !visible) {
-        int dx = px - swipe_x0_, dy = py - swipe_y0_;
-        if (dx * dx + dy * dy >= kSwipeThresh * kSwipeThresh) {
-            // Reveal, but mask this same press from the indev until the finger
-            // lifts — otherwise the gesture that reveals the strip would also land
-            // as a tap on a freshly-shown overlay button. consume FIRST so the
-            // overlay never becomes visible with an unmasked press in flight.
-            display_manager.consume_overlay_touch();
-            display_manager.set_overlay_visible(true);  // revealed
-            swipe_active_ = false;
-        }
-    } else if (!pressed) {
-        swipe_active_ = false;
+        seen[s] = true;
     }
-    touch_prev_ = pressed;
+
+    // Pointers absent from this snapshot lifted: UP the Pass ones, retire all.
+    for (int s = 0; s < kMaxPass; ++s) {
+        if (!pass_[s].used || seen[s]) continue;
+        if (pass_[s].kind == PtKind::Pass && link)
+            link->inject_touch(agent_link::kTouchUp,
+                               static_cast<uint8_t>(pass_[s].id), pass_[s].x, pass_[s].y);
+        pass_[s].used = false;
+    }
 }
 
 void ADBMirroringScreen::on_orientation(agent_link::Link*,
@@ -334,7 +434,9 @@ void ADBMirroringScreen::onExit() {
         l->set_video_listener({});  // detach the producer (no more on_video_strip)
     }
     // Stop observing touch: clear our listener so no more on_touch fires (an
-    // in-flight one keeps us alive via its weak lock).
+    // in-flight one keeps us alive via its weak lock). UP any still-down
+    // passthrough pointer first (link still alive) so the source sees no stuck finger.
+    release_all_pointers();
     display_manager.set_touch_listener({});
     // Producer detached; join the decode task before the framebuffers are reclaimed
     // by the previous screen's re-render, so it can't flush into a buffer being

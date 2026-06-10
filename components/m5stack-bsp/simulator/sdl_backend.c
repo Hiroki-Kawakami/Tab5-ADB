@@ -157,6 +157,7 @@ static int touch_read(bsp_touch_t *self, bsp_touch_point_t *points, uint8_t max_
     points[0].x = x;
     points[0].y = y;
     points[0].strength = 1;
+    points[0].id = 0;  /* single-point sim: one stable pointer id */
     return 1;
 }
 

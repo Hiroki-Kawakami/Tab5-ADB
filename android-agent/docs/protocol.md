@@ -321,7 +321,7 @@ v1 は agent・Tab5 とも `VIDEO` を立てる（`AUDIO` は将来）。両者�
 - payload 先頭の `input_type` で種別を分ける。
 
 ```
- +0   u8   input_type   0x00=KEY（0x01=TOUCH / 0x02=TEXT は予約）
+ +0   u8   input_type   0x00=KEY / 0x01=TOUCH（0x02=TEXT は予約）
  +1   ...               input_type ごとに定義（下記）
 ```
 
@@ -342,9 +342,36 @@ v1 は agent・Tab5 とも `VIDEO` を立てる（`AUDIO` は将来）。両者�
 - overlay のボタンが使う keycode: Home=3, Back=4, VolumeUp=24, VolumeDown=25, Power=26, AppSwitch=187。
   Tab5 側が keycode を決め、agent は透過する。
 
-> **タッチ（input_type=0x01）/ テキスト（0x02）は予約**。タッチは `MotionEvent` を
-> `injectInputEvent` に流す（実装時に座標・ポインタ・ボタンのフィールドをここへ追記）。同じ INPUT
-> チャネル・同じ注入経路に乗るので、フレーム層（§3）は変えない。
+#### INPUT_TOUCH (input_type = 0x01) — タッチイベント
+
+mirror 表示中の Tab5 パネルへのタッチを、ソース端末へ **ポインタ単位**で送る。1 フレーム =
+1 ポインタの 1 状態変化。agent はアクティブなポインタ集合を保持し、複数指の `MotionEvent`
+（`ACTION_DOWN` / `ACTION_POINTER_DOWN` / `ACTION_MOVE` / `ACTION_POINTER_UP` / `ACTION_UP`）を
+組み立てて `injectInputEvent` に流す（scrcpy の `PointersState` 方式）。
+
+```
+ +1   u8    action      0=DOWN, 1=MOVE, 2=UP（ポインタ単位）。agent が複合 ACTION_* に変換
+ +2   u8    pointer_id  ソース端末タッチコントローラの track ID（Tab5 はそのまま透過）
+ +3   u8    reserved    0
+ +4   u16   x           Tab5 パネル座標 X [px] (LE)。0..target_width-1
+ +6   u16   y           Tab5 パネル座標 Y [px] (LE)。0..target_height-1
+ (= 入力ペイロード計 7 bytes。将来は末尾に append-only)
+```
+
+- **座標は Tab5 パネル座標**（720×1280 デバイス座標）で送り、**ソース端末座標への逆変換は agent が行う**。
+  agent は mirror のジオメトリ（回転・scale-fit・レターボックス。§5.1）を持つ唯一の側なので、
+  パネル座標 → 自然向きソース座標（fit/fill の逆算 + 中央寄せオフセット除去）→ ソース端末の論理
+  ディスプレイ座標（端末回転 `Surface.ROTATION_*` を適用）へ戻して注入する。レターボックス余白に
+  落ちた座標は破棄する。
+- **pointer_id はソースのタッチ track ID**。Tab5 は自前で ID を合成せず、コントローラの track ID を
+  そのまま透過するので、agent 側でポインタの対応付けが安定する。
+- **DOWN→…(MOVE)…→UP の意味論はポインタ単位**。Tab5 は各指の押下/移動/離しを別フレームで送り、
+  agent は最初の DOWN を `ACTION_DOWN`、2 本目以降の DOWN を `ACTION_POINTER_DOWN`、最後でない UP を
+  `ACTION_POINTER_UP`、最後の UP を `ACTION_UP` に変換する（index は agent が現在のポインタ配列から算出）。
+- KEY 同様 **一方向・fire-and-forget**（`req_id`／応答なし、状態を変えない）。
+
+> **テキスト（input_type=0x02）は予約**。同じ INPUT チャネル・同じ注入経路に乗るので、
+> フレーム層（§3）は変えない。
 
 ---
 

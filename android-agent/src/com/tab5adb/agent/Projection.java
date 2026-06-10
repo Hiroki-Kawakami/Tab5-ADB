@@ -51,4 +51,64 @@ final class Projection {
         return new Projection(orientation, 0, 0, srcW, srcH,
                               offX, offY, offX + dw, offY + dh);
     }
+
+    // --- inverse mapping for touch passthrough (protocol.md §4.7) -------------
+    //
+    // The Tab5 sends touches in PANEL coordinates; the agent owns the mirror
+    // geometry, so it inverts panel -> source. These are android-free pure
+    // arithmetic (host-testable in ProjectionTest), like compute() above.
+
+    /**
+     * The source's NATURAL (portrait) dimensions, given its current-rotation size
+     * (what {@code Display.getRealSize} returns) and the rotation. The mirror shows
+     * the natural-orientation framebuffer (§5.1), so the letterbox math uses these.
+     */
+    static int[] naturalSize(int srcW, int srcH, int rotation) {
+        boolean transposed = (rotation % 2) != 0;  // 90/270 swap the axes
+        return transposed ? new int[]{srcH, srcW} : new int[]{srcW, srcH};
+    }
+
+    /**
+     * Map a Tab5 panel coordinate {@code (px,py)} to the source's LOGICAL
+     * (current-rotation) display coordinate for input injection, or {@code null} if
+     * the point falls in the letterbox (no source pixel there).
+     *
+     * <p>Two steps, the inverse of the mirror pipeline (§5.1):
+     * <ol>
+     *   <li>undo the scale ({@code scaleMode} fit/fill) + center offset of the
+     *       {@code natW x natH} natural framebuffer inside the {@code targetW x
+     *       targetH} panel -> a natural-orientation source coord;
+     *   <li>rotate that by the device rotation to the logical coord that
+     *       {@code injectInputEvent} expects — the inverse of
+     *       {@link ScreenCapture#acquire}'s counter-rotation. The 90/270 direction
+     *       is the one thing to confirm on a real device (as with {@code counterDeg}).
+     * </ol>
+     */
+    static int[] panelToLogical(int px, int py, int natW, int natH,
+                                int targetW, int targetH, int scaleMode, int rotation) {
+        double s = (scaleMode == 1)
+                ? Math.max((double) targetW / natW, (double) targetH / natH)
+                : Math.min((double) targetW / natW, (double) targetH / natH);
+        int dw = (int) Math.round(natW * s);
+        int dh = (int) Math.round(natH * s);
+        int offX = (targetW - dw) / 2;
+        int offY = (targetH - dh) / 2;
+        int nx = (int) Math.floor((px - offX) / s);
+        int ny = (int) Math.floor((py - offY) / s);
+        if (nx < 0 || nx >= natW || ny < 0 || ny >= natH) return null;  // letterbox
+        return rotateCW(nx, ny, natW, natH, (4 - (rotation & 3)) & 3);
+    }
+
+    /**
+     * Rotate point {@code (x,y)} in a {@code w x h} box clockwise by {@code k}
+     * quarter-turns; the result is in the rotated box's coordinate space.
+     */
+    private static int[] rotateCW(int x, int y, int w, int h, int k) {
+        switch (k & 3) {
+            case 1:  return new int[]{h - 1 - y, x};            // 90 CW  -> (h,w)
+            case 2:  return new int[]{w - 1 - x, h - 1 - y};    // 180    -> (w,h)
+            case 3:  return new int[]{y, w - 1 - x};            // 270 CW -> (h,w)
+            default: return new int[]{x, y};                    // 0
+        }
+    }
 }

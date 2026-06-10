@@ -43,6 +43,7 @@ static int read(bsp_touch_t *self, bsp_touch_point_t *points, uint8_t max_points
         points[i].x = raw[i].x;
         points[i].y = raw[i].y;
         points[i].strength = raw[i].strength;
+        points[i].id = raw[i].track_id;
     }
     return count;
 }

@@ -210,7 +210,7 @@ simulator/                   # SIMULATOR build root (see below)
     include/  src/           #     host shims: esp_* (err/log/check/timer/heap/nvs)
                              #     + freertos/* (pthread-backed FreeRTOS API)
 android-agent/               # ANDROID  tab5adb-agent (scrcpy-style app_process server)
-  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/Projection/TestPattern/ScreenCapture + Input (key injection)
+  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/Projection/TestPattern/ScreenCapture + Input (key + multi-touch injection)
   test/                      #   host-JVM unit test (ProjectionTest) + run.sh — no phone
   build.sh  run.sh           #   javac+d8 -> dex jar; adb push + app_process dev loop
 ```
@@ -388,9 +388,13 @@ to a `DisplayManager::TouchListener`** (`on_touch(pts, count)`, count==0 = all
 lifted) — the multi-touch, **push not poll** path a feature registers with
 `set_touch_listener(weak_ptr)` (held weakly, Shell/Sync-style; **fires on the touch
 task thread**, so the listener marshals to LVGL itself). This replaces the old
-`touch_point()` poll (removed) + the mirror's `lv_timer`. The mirror's
+`touch_point()` poll (removed) + the mirror's `lv_timer`. Each `bsp_touch_point_t`
+carries the controller's **pointer track id** (`.id`; GT911/ST7123 forward
+`esp_lcd_touch`'s `track_id`, the single-point sim reports 0), so a feature can
+correlate fingers across samples without synthesizing ids — the mirror's touch
+passthrough keys its per-pointer DOWN/MOVE/UP diff off `.id`. The mirror's
 `ADBMirroringScreen` is a `TouchListener`: its `on_touch` runs the corner-swipe
-reveal detection.
+reveal detection and (in touch-control mode) the passthrough diff.
 
 **Swipe-reveal masking (`consume_overlay_touch()`):** when the reveal swipe makes
 the hidden overlay visible, the *same* in-flight press would otherwise land as a tap
@@ -640,12 +644,16 @@ channels add the same kind of `set_*` setter.
 stream and returns to READY but the **link stays open**, so a later `start_mirror()`
 resumes (this is what lets a feature stop without dropping the agent).
 **Input injection (§4.7):** `Link::inject_key(keycode, action)` + the convenience
-`Link::tap_key(keycode)` (down→up) send a **`TYPE=INPUT`** frame (Tab5→agent,
-**fire-and-forget — no req_id / no response**, off the CONTROL_REQUEST handshake
-path so high-frequency touch never waits). This is the shared input channel: keys
-today (the mirror overlay's power / volume / nav buttons, via Android
-`KeyEvent.KEYCODE_*` constants in `agent_link_protocol.hpp`), touch passthrough /
-keyboard later add `input_type` 0x01/0x02 on the same frame + agent path. The agent
+`Link::tap_key(keycode)` (down→up), and `Link::inject_touch(action, pointer_id, x, y)`,
+send a **`TYPE=INPUT`** frame (Tab5→agent, **fire-and-forget — no req_id / no
+response**, off the CONTROL_REQUEST handshake path so high-frequency touch never
+waits). This is the shared input channel: `input_type` 0x00=KEY (the mirror
+overlay's power / volume / nav buttons, via Android `KeyEvent.KEYCODE_*` constants
+in `agent_link_protocol.hpp`) and 0x01=TOUCH (the mirror's touch passthrough —
+per-pointer DOWN/MOVE/UP in **Tab5 panel coords**, `pointer_id` = the source's
+touch track id; the agent inverts the mirror geometry to the source's logical
+display coords and assembles the multi-pointer `MotionEvent` itself, scrcpy
+`PointersState`-style); 0x02=TEXT/keyboard is reserved. The agent
 injects via the hidden `InputManager.injectInputEvent` (scrcpy technique, shell
 uid holds INJECT_EVENTS) in `android-agent/.../Input.java` (a minimal port of
 scrcpy's `Workarounds.getSystemContext` → `getSystemService(INPUT_SERVICE)`). The same
@@ -653,8 +661,9 @@ parser carries the JPEG strip stream: each whole JPEG frame (the frame layer
 reassembles A_WRTE splits) is handed to a **decode+framebuffer seam** =
 `VideoListener::on_video_strip(VideoStrip)` (rect + JPEG bytes + frame_start/end),
 so `Link` stays free of libjpeg / HW-JPEG (host libjpeg in the test, P4 HW JPEG +
-bsp FB in the app). `tx_seq_` is atomic because `start_mirror`/`stop_mirror`/
-`inject_key` (app thread) and the HELLO response (reader thread) both write frames. **HELLO + Phase 2
+bsp FB in the app). `tx_seq_` is atomic because `start_mirror`/`stop_mirror`
+(app thread), `inject_key`/`inject_touch` (LVGL or touch-task thread), and the
+HELLO response (reader thread) all write frames. **HELLO + Phase 2
 mirror done & verified on a real Android device**:
 `test/test_hello.cpp` covers the HELLO-only path (a `LinkLifecycleListener`);
 `test/test_mirror.cpp` (a `LinkLifecycleListener` + `VideoListener`) drives HELLO →
@@ -904,13 +913,30 @@ strip), End (pops to the device screen), and the six device buttons
 **Back/Home/Recents/Vol-/Vol+/Power** — each injects a key tap on the source via
 `agent_client().link()->tap_key(KEYCODE_*)` (§4.7 INPUT channel, fire-and-forget,
 straight from the LVGL event since `tap_key` is non-blocking and the link is live
-while streaming). **OpMode/DispMode stay stubs** pending their final UI. No timeout auto-hide: the in-strip **Hide** button hides it, and a **swipe out of
-the anchor corner** (`kCornerSwipe` hot zone) reveals it again — detected in the
-screen's `on_touch` (`DisplayManager::TouchListener`, registered via
-`set_touch_listener` in `start_mirror_ui`, cleared on exit; fires on the touch
-task thread, see the DisplayManager touch section), **not** a poll timer. The
-reveal calls `consume_overlay_touch()` then `set_overlay_visible(true)` so the
-swipe gesture itself isn't delivered as a tap to the just-revealed buttons.
+while streaming), plus **OpMode** = the touch-control toggle (**on by default**;
+icon is the LVGL theme primary blue when on, white when off).
+**DispMode stays a stub** pending its final UI. **Touch passthrough (§4.7):** when
+OpMode is on, the screen's `on_touch` injects touches over the mirror to the source
+as per-pointer MotionEvents via `agent_client().link()->inject_touch(action,
+pointer_id, x, y)` (Tab5 **panel coords**; the agent inverts the mirror geometry).
+`on_touch` keeps a small id-keyed table (`pass_[]`, guarded by `pass_mtx_`) and
+diffs each touch-task snapshot into per-pointer DOWN/MOVE/UP, keying off the BSP
+`bsp_touch_point_t.id` (the controller track id) so multi-touch needs no
+id synthesis; each new pointer is classified once — **Pass** (injected), **Reveal**
+(a corner-swipe candidate), or **Ignore** (over a visible strip / passthrough off) —
+and keeps that role until it lifts. `onExit`/dtor + turning OpMode off call
+`release_all_pointers()` to UP any still-down Pass pointer (no stuck finger on the
+source). No timeout auto-hide: the in-strip **Hide** button hides it, and a **swipe
+out of the anchor corner** (the **L-shaped** `in_corner` hot zone = two narrow
+`kEdgeThick`-wide bands along the corner's two edges, kept narrow so it steals
+little area from passthrough) reveals it again — detected in the same `on_touch`
+(`DisplayManager::TouchListener`, registered via `set_touch_listener` in
+`start_mirror_ui`, cleared on exit; fires on the touch task thread, see the
+DisplayManager touch section), **not** a poll timer. The reveal calls
+`consume_overlay_touch()` then `set_overlay_visible(true)` so the swipe gesture
+itself isn't delivered as a tap to the just-revealed buttons. While OpMode is on
+and the strip is visible, touches **outside** its footprint (`in_overlay_footprint`)
+still pass through, so the user keeps operating the device without hiding the strip.
 On pop the previous screen's full re-render reclaims the framebuffers.
 `onExit()`/dtor stop the producer (`stop_mirror()` + `set_video_listener({})` — the
 agent link is kept connected) **before** joining the decode task, so it can't flush

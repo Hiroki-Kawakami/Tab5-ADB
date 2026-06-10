@@ -204,6 +204,16 @@ public:
     // power / volume / nav buttons. Returns the first non-Ok of the two sends.
     adb::Error tap_key(uint32_t keycode);
 
+    // Inject one per-pointer touch transition on the source device (TYPE=INPUT,
+    // input_type=TOUCH, §4.7). `action` is kTouchDown/kTouchMove/kTouchUp,
+    // `pointer_id` is the source controller's track id, and (x,y) are Tab5 PANEL
+    // coordinates — the agent inverts the mirror geometry to the source's logical
+    // display coords and assembles the multi-pointer MotionEvent itself. Like
+    // inject_key: fire-and-forget, non-blocking, no response, callable from any
+    // thread (e.g. the DisplayManager touch task). Returns StreamClosed if down.
+    adb::Error inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
+                            uint16_t y);
+
     // End the link (A_CLSE the stream). Idempotent. on_link_close follows from
     // the reader thread.
     void close();
@@ -236,9 +246,10 @@ private:
     HelloConfig cfg_;
 
     std::vector<uint8_t> rx_;  // frame accumulator (reader thread only)
-    // Outgoing frame counter. Touched by the reader thread (HELLO response) and
-    // the app thread (start_mirror), so atomic; each stream_->write() enqueues a
-    // whole frame, so frames never interleave on the wire.
+    // Outgoing frame counter. Touched by the reader thread (HELLO response), the
+    // app thread (start_mirror), and the touch task thread (inject_touch /
+    // inject_key), so atomic; each stream_->write() enqueues a whole frame, so
+    // frames never interleave on the wire.
     std::atomic<uint8_t> tx_seq_{0};
     bool hello_done_ = false;
     std::atomic<bool> close_notified_{false};  // on_link_close fires once

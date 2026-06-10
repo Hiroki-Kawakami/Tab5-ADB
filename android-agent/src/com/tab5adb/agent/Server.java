@@ -46,6 +46,7 @@ public final class Server {
     private static final int TYPE_INPUT = 0x04;
     private static final int TYPE_JPEG = 0x10;
     private static final int INPUT_KEY = 0x00;  // input_type (§4.7)
+    private static final int INPUT_TOUCH = 0x01;  // input_type (§4.7)
     private static final int EVENT_ORIENTATION = 0x03;
     private static final int FLAG_FRAME_START = 0x01;
     private static final int FLAG_FRAME_END = 0x02;
@@ -205,7 +206,7 @@ public final class Server {
             else if (cmd == CMD_MIRROR_STOP) handleMirrorStop(conn, reqId);
             // unknown cmd: ignore (forward compat, §4.4)
         } else if (f.type == TYPE_INPUT) {
-            handleInput(f.payload);
+            handleInput(conn, f.payload);
         }
         // unknown TYPE / EVENT: ignore (§3.1)
     }
@@ -213,7 +214,7 @@ public final class Server {
     // --- input injection (§4.7) — fire-and-forget, no response ---
 
     /** Parse a TYPE=INPUT frame and inject it on the source device. */
-    private void handleInput(byte[] p) {
+    private void handleInput(Conn conn, byte[] p) {
         if (p.length < 1) return;
         int inputType = p[0] & 0xFF;
         if (inputType == INPUT_KEY) {
@@ -226,8 +227,40 @@ public final class Server {
             int repeat = (int) readU32(p, 6);
             int meta = (int) readU32(p, 10);
             if (input != null) input.injectKey(action, keycode, repeat, meta);
+        } else if (inputType == INPUT_TOUCH) {
+            if (p.length < 1 + 7) {  // input_type + INPUT_TOUCH args (§4.7)
+                System.err.println("tab5adb-agent: short INPUT_TOUCH");
+                return;
+            }
+            int action = p[1] & 0xFF;   // 0=DOWN, 1=MOVE, 2=UP
+            int pointerId = p[2] & 0xFF;
+            // p[3] reserved
+            int px = readU16(p, 4);     // Tab5 panel coords
+            int py = readU16(p, 6);
+            handleTouch(conn, action, pointerId, px, py);
         }
         // unknown input_type: ignore (forward compat, §4.7)
+    }
+
+    /**
+     * Map a Tab5 panel-coord touch to the source's logical display and inject it
+     * (§4.7). The Tab5 owns the gesture (per-pointer DOWN/MOVE/UP); the agent owns
+     * the geometry, so it inverts panel -> source via {@link Projection}. UP always
+     * goes through (so a pointer is released even if it lifted in the letterbox or
+     * after the stream stopped); DOWN/MOVE need live geometry and a point inside
+     * the image.
+     */
+    private void handleTouch(Conn conn, int action, int pointerId, int px, int py) {
+        if (input == null) return;
+        if (action == 2) {  // UP: release at the last position regardless of geometry
+            input.injectTouch(2, pointerId, px, py);
+            return;
+        }
+        if (!conn.streaming || conn.curNatW <= 0) return;  // no geometry yet
+        int[] lp = Projection.panelToLogical(px, py, conn.curNatW, conn.curNatH,
+                conn.curTargetW, conn.curTargetH, conn.curScaleMode, conn.curRotation);
+        if (lp == null) return;  // letterbox tap — no source pixel there
+        input.injectTouch(action, pointerId, lp[0], lp[1]);
     }
 
     /**
@@ -288,6 +321,11 @@ public final class Server {
         mp.targetH = readU16(p, 4);
         mp.scaleMode = p[6] & 0xFF;
         mp.streams = p[7] & 0xFF;
+        // Publish the panel geometry for touch passthrough (§4.7); the rotation /
+        // natural source dims follow once streamVideo builds the capture.
+        conn.curTargetW = mp.targetW;
+        conn.curTargetH = mp.targetH;
+        conn.curScaleMode = mp.scaleMode;
         System.out.println("tab5adb-agent: MIRROR_START target=" + mp.targetW + "x" + mp.targetH
                 + " scale=" + mp.scaleMode + " streams=0x" + Integer.toHexString(mp.streams));
 
@@ -335,6 +373,7 @@ public final class Server {
         int frame = 0;
         ScreenCapture capture = null;
         int captureRotation = -1;  // device rotation the current capture was built for
+        conn.streaming = true;     // touch passthrough (§4.7) may now map panel->source
         try {
             // Stream until MIRROR_STOP (-> READY) or the reader sees the peer close.
             while (!conn.stopRequested && !conn.closed) {
@@ -350,6 +389,12 @@ public final class Server {
                         capture = new ScreenCapture(src[0], src[1], mp.targetW, mp.targetH,
                                 mp.scaleMode, rotation);
                         captureRotation = rotation;
+                        // Publish geometry for the touch-passthrough inverse (§4.7):
+                        // the natural (portrait) source dims + current rotation.
+                        int[] nat = Projection.naturalSize(src[0], src[1], rotation);
+                        conn.curRotation = rotation;
+                        conn.curNatW = nat[0];
+                        conn.curNatH = nat[1];
                         System.out.println("tab5adb-agent: capture built for rotation " + rotation);
                         // Tell the Tab5 the device's orientation so it lays the
                         // overlay UI out for portrait vs landscape (§4.4). Sent on
@@ -385,6 +430,7 @@ public final class Server {
                 conn.lock.notifyAll();
             }
         } finally {
+            conn.streaming = false;  // stop mapping touches to a torn-down capture
             if (capture != null) capture.close();
         }
         System.out.println("tab5adb-agent: stream " + (conn.stopRequested ? "stopped" : "ended")
@@ -443,6 +489,15 @@ public final class Server {
         volatile boolean closed = false;      // peer disconnected / fatal error
         volatile boolean stopRequested = false;  // MIRROR_STOP for the live stream
         MirrorParams pendingStart = null;     // MIRROR_START to start (guarded by lock)
+
+        // Live mirror geometry, for the touch-passthrough inverse mapping (§4.7).
+        // Written by the stream thread (handleMirrorStart + streamVideo), read by
+        // the reader thread (handleTouch); volatile is enough (no cross-field
+        // invariant the reader depends on atomically).
+        volatile boolean streaming = false;
+        volatile int curTargetW = 0, curTargetH = 0, curScaleMode = 0;
+        volatile int curRotation = 0;        // Surface.ROTATION_* the capture is built for
+        volatile int curNatW = 0, curNatH = 0;  // natural source dims (0 = not ready)
 
         Conn(OutputStream out, DataInputStream in) {
             this.out = out;

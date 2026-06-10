@@ -108,6 +108,27 @@ adb::Error Link::tap_key(uint32_t keycode) {
     return inject_key(keycode, kKeyActionUp);
 }
 
+adb::Error Link::inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
+                              uint16_t y) {
+    if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+
+    // INPUT payload (§4.7): input_type, then the INPUT_TOUCH args. Fire-and-forget
+    // (TYPE=INPUT) — no req_id / no response. Coordinates are Tab5 panel coords.
+    uint8_t payload[1 + kInputTouchArgsLen];
+    payload[0] = kInputTouch;
+    payload[1] = action;
+    payload[2] = pointer_id;
+    payload[3] = 0;  // reserved
+    wr_u16(payload + 4, x);
+    wr_u16(payload + 6, y);
+
+    uint8_t frame[kFrameHeaderSize + sizeof(payload)];
+    write_header(frame, kTypeInput, /*flags=*/0, tx_seq_.fetch_add(1),
+                 static_cast<uint32_t>(sizeof(payload)));
+    std::memcpy(frame + kFrameHeaderSize, payload, sizeof(payload));
+    return stream_->write(frame, sizeof(frame));
+}
+
 void Link::close() {
     if (stream_) stream_->close();  // A_CLSE; on_stream_close drives on_link_close
 }

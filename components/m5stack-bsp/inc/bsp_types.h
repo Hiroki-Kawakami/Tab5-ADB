@@ -43,6 +43,9 @@ static inline size_t bsp_pixel_format_bytes(bsp_pixel_format_t format) {
 typedef struct {
     int x, y;
     int strength;   /*!< touch pressure; 0 when the controller doesn't report it */
+    int id;         /*!< pointer track id from the touch controller (stable across a
+                         gesture, for multi-touch). 0 when the controller/backend
+                         doesn't report it (e.g. the single-point simulator). */
 } bsp_touch_point_t;
 
 #ifdef __cplusplus

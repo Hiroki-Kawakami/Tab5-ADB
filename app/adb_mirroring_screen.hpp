@@ -1,6 +1,8 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
 #include "adb_app.hpp"     // PANEL_W, PANEL_H
 #include "agent_link.hpp"  // agent_link::Link, agent_link::VideoListener
@@ -81,7 +83,7 @@ private:
     // lands at the **viewer's** bottom-left: ROTATION_90 vs _270 put that corner at
     // opposite physical panel corners and need opposite PPA angles. Hidden/shown
     // without a timeout: the in-strip Hide button hides it; a swipe out of that
-    // corner (kCornerSwipe hot zone) reveals it again.
+    // corner (the L-shaped in_corner hot zone) reveals it again.
     static bool rot_landscape(uint8_t rot) { return (rot & 1) != 0; }
     // A landscape app is viewed by turning the Tab5 the opposite way from the naive
     // guess (verified on real HW), so the overlay's PPA angle + anchor corner use
@@ -105,12 +107,21 @@ private:
     // the spec'd order — vertical (portrait) or horizontal (landscape). The content
     // is always built "upright"; the footprint's PPA rotation orients it.
     void build_overlay_buttons(lv_obj_t* scr, bool landscape);
-    // True when (px,py) is inside the swipe hot zone (the anchor corner for `rot`).
+    // True when (px,py) is inside the reveal hot zone — an L hugging the anchor
+    // corner for `rot` (two narrow bands along the corner's two edges, see kEdge*).
     static bool in_corner(int px, int py, uint8_t rot);
+    // True when (px,py) is inside the overlay strip footprint for `rot`. Used to
+    // keep touches over a visible strip out of passthrough (LVGL handles them).
+    static bool in_overlay_footprint(int px, int py, uint8_t rot);
 
     // --- overlay control strip geometry (all adjustable). The strip hugs the
     // panel corner (no margin); one button size for both orientations. ---
-    static constexpr int kCornerSwipe = 80;  // corner reveal hot zone [px]
+    // Reveal hot zone: an L hugging the anchor corner = two NARROW bands, one
+    // along each edge meeting at the corner, so it steals little area from touch
+    // passthrough. A press starting in the L that drags >= kSwipeThresh reveals
+    // the hidden strip.
+    static constexpr int kEdgeThick = 24;    // band thickness along each edge [px]
+    static constexpr int kEdgeReach = 160;   // band length from the corner [px]
     static constexpr int kSwipeThresh = 28;  // min drag from the corner to reveal
     static constexpr int kBtn = 56;          // button (square) side
     static constexpr int kPad = 12;          // strip inner padding
@@ -165,12 +176,35 @@ private:
     int back_ = 0;     // index the decode task draws into next
     int front_ = -1;   // index currently displayed (last flushed; -1 = none yet)
 
-    // Corner-swipe reveal state. Touched only on the touch task thread (the
-    // DisplayManager::TouchListener callback), so it needs no lock.
-    bool  touch_prev_ = false;    // previous press state, for press-edge detection
-    bool  swipe_active_ = false;  // a reveal swipe is in progress from the corner
-    int   swipe_x0_ = 0, swipe_y0_ = 0;  // where the corner swipe started
     uint8_t cur_rot_ = 0;  // LVGL thread: device rotation the overlay was built for
+
+    // --- touch passthrough (§4.7) ---
+    // Touch-control mode: when on (the default), touches over the mirror (outside
+    // a visible overlay strip / the reveal corner) are injected to the source
+    // device as per-pointer MotionEvents. Toggled by the overlay OpMode button
+    // (LVGL thread); read on the touch task thread.
+    std::atomic<bool> passthrough_{true};
+
+    // Active touch points, keyed by the controller track id, tracked across
+    // touch-task samples so on_touch can emit per-pointer DOWN/MOVE/UP. Each
+    // pointer's role is decided at DOWN and kept for its lifetime: Pass = injected
+    // to the device, Reveal = a corner-swipe candidate, Ignore = handled by the
+    // overlay / dropped. Guarded by pass_mtx_ so onExit (LVGL thread) can
+    // release_all_pointers() any still-down Pass pointers.
+    enum class PtKind : uint8_t { Pass, Reveal, Ignore };
+    struct ActivePtr {
+        bool used = false;
+        int id = 0;
+        PtKind kind = PtKind::Ignore;
+        uint16_t x = 0, y = 0;     // last position (for the UP coords)
+        int rx0 = 0, ry0 = 0;      // reveal-swipe start (Reveal only)
+    };
+    static constexpr int kMaxPass = 10;
+    ActivePtr pass_[kMaxPass];
+    std::mutex pass_mtx_;
+    // UP every still-down Pass pointer and clear the table (any thread). Called on
+    // exit / when passthrough is turned off, so the source sees no stuck finger.
+    void release_all_pointers();
 
     FrameSlot slots_[kSlots];
     void* free_q_ = nullptr;   // QueueHandle_t<int>: slot indices the producer may fill

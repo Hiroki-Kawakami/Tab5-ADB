@@ -44,6 +44,41 @@ public final class ProjectionTest {
         eq("fill orientation", 0, fill.orientation);
         eq("fill disp", "0,-80,720,1360", rect(fill.dispL, fill.dispT, fill.dispR, fill.dispB));
 
+        // --- touch passthrough inverse mapping (§4.7) ---
+
+        // naturalSize un-rotates the current-rotation source size to portrait.
+        eq("naturalSize rot0", "1080,2160", arr(Projection.naturalSize(1080, 2160, 0)));
+        eq("naturalSize rot90", "1080,2160", arr(Projection.naturalSize(2160, 1080, 1)));
+        eq("naturalSize rot180", "1080,2160", arr(Projection.naturalSize(1080, 2160, 2)));
+        eq("naturalSize rot270", "1080,2160", arr(Projection.naturalSize(2160, 1080, 3)));
+
+        // Portrait fit (natW=1080,natH=2160 into 720x1280): s=.5926, disp 40,0..680,1280.
+        // The image center panel(360,640) maps to source center (540,1080) at rot0,
+        // and rotates with the device for the other rotations (logical coords).
+        eq("inv rot0 center", "540,1080",
+                arr(Projection.panelToLogical(360, 640, 1080, 2160, 720, 1280, 0, 0)));
+        eq("inv rot90 center", "1080,539",
+                arr(Projection.panelToLogical(360, 640, 1080, 2160, 720, 1280, 0, 1)));
+        eq("inv rot180 center", "539,1079",
+                arr(Projection.panelToLogical(360, 640, 1080, 2160, 720, 1280, 0, 2)));
+        eq("inv rot270 center", "1079,540",
+                arr(Projection.panelToLogical(360, 640, 1080, 2160, 720, 1280, 0, 3)));
+
+        // Corners of the image rectangle map to source corners (rot0).
+        eq("inv rot0 topleft", "0,0",
+                arr(Projection.panelToLogical(40, 0, 1080, 2160, 720, 1280, 0, 0)));
+
+        // Left/right letterbox bands have no source pixel -> null.
+        eq("inv letterbox left", "null",
+                arr(Projection.panelToLogical(10, 640, 1080, 2160, 720, 1280, 0, 0)));
+        eq("inv letterbox right", "null",
+                arr(Projection.panelToLogical(710, 640, 1080, 2160, 720, 1280, 0, 0)));
+
+        // Fill mode (no letterbox): the whole panel maps inside the source. A point
+        // near the top edge that fit would clip is valid here. s=.667, offY=-80.
+        eq("inv fill top", "540,120",
+                arr(Projection.panelToLogical(360, 0, 1080, 2160, 720, 1280, 1, 0)));
+
         if (failures == 0) {
             System.out.println("ProjectionTest: PASSED");
         } else {
@@ -54,6 +89,16 @@ public final class ProjectionTest {
 
     private static String rect(int l, int t, int r, int b) {
         return l + "," + t + "," + r + "," + b;
+    }
+
+    private static String arr(int[] a) {
+        if (a == null) return "null";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < a.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(a[i]);
+        }
+        return sb.toString();
     }
 
     private static void eq(String what, Object expected, Object actual) {
