@@ -942,8 +942,19 @@ live stream in place** (it breaks `streamVideo` when a new `MIRROR_START` sets
 listener / decode pipeline stay up. Entering Adapt runs `wm size <W>x<H>` and
 leaving it (or `onExit` while in Adapt) runs `wm size reset` to restore the device
 resolution; both chain `restart_mirror` over the `app::adb_client()->exec()`
-completion marshalled back to LVGL. (All four states + the in-place reconfigure +
-the `wm size` restore verified on a real Android device via `simulator/verify/mirror_dispmode.txt`.)
+completion marshalled back to LVGL. **DispMode availability is gated on the source's
+`wm size` at mirror start** (`query_disp_mode_availability`, one `wm size` query whose
+result sets two LVGL-thread flags; the effective resolution = the `Override size:` if
+present, else `Physical size:`): if it is **already panel-aspect** (9:16/16:9,
+`is_panel_aspect`) the button is **hidden** (`dispmode_show_` → `build_overlay_buttons`
+skips it; fit==fill==adapt anyway); else if a **non-default override** is set
+(`Override size:` ≠ `Physical size:`) **Adapt is dropped** from the cycle
+(`adapt_allowed_` → tap does `(disp+1)%2`, Fit↔Fill only) so it never clobbers the
+user's `wm size`. The flags load async (the overlay is built shown/full-cycle first;
+only hiding forces a re-`apply_overlay`, the cycle length is read live). (All four
+states + the in-place reconfigure + the `wm size` restore + the
+hidden/adapt-disabled gating verified on a real Android device via
+`simulator/verify/mirror_dispmode.txt` / `mirror_hidden.txt` / `mirror_noadapt.txt`.)
 **Touch passthrough (§4.7):** when
 OpMode is on, the screen's `on_touch` injects touches over the mirror to the source
 as per-pointer MotionEvents via `agent_client().link()->inject_touch(action,

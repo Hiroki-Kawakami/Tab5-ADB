@@ -1,0 +1,17 @@
+# Source has a non-default, non-panel `wm size` override (set to 1080x2000 before
+# launch). DispMode stays visible but Adapt is disabled, so 3 taps cycle
+# Fit->Fill->Fit (scale 1,0,1 in the agent log) and NEVER run `wm size` — the
+# override must remain 1080x2000 after the test.
+settle
+tap 360 640
+wait 6000
+settle
+tap 552 162
+wait 9000
+tap 40 698
+wait 2500
+tap 40 698
+wait 2500
+tap 40 698
+wait 2500
+quit

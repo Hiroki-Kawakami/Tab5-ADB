@@ -1,0 +1,12 @@
+# With the source forced to 9:16 (wm size 1080x1920) before launch, the DispMode
+# button must be HIDDEN (fit == fill == adapt). Capture the overlay strip so the
+# button set can be inspected: top->down it should be End(X), OpMode(pointer),
+# Power, ... with NO maximize/DispMode icon between End and OpMode.
+settle
+tap 360 640
+wait 6000
+settle
+tap 552 162
+wait 9000
+capture simulator/verify/out/hidden_overlay.jpg
+quit

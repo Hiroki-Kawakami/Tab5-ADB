@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -139,6 +140,10 @@ void ADBMirroringScreen::start_mirror_ui() {
     l->set_video_listener(std::static_pointer_cast<agent_link::VideoListener>(
         std::static_pointer_cast<ADBMirroringScreen>(shared_from_this())));
     l->start_mirror(mirror_config_for(disp_mode_));  // 720x1280, current display mode
+
+    // Tailor the DispMode button to the source's current resolution (hide it when
+    // already panel-aspect / drop Adapt when a `wm size` override is set).
+    query_disp_mode_availability();
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +178,41 @@ void ADBMirroringScreen::restart_mirror(int mode) {
 }
 
 namespace {
+// Parsed `wm size` output: the device's physical resolution and, if a `wm size`
+// override is active, the override. The CURRENT effective resolution is the override
+// when present, else the physical.
+struct WmSize {
+    bool ok = false;            // physical size parsed
+    int phys_w = 0, phys_h = 0;
+    bool has_override = false;  // an "Override size:" line is present
+    int ov_w = 0, ov_h = 0;
+};
+
+// Parse one "<Label> size: WxH" line at/after `label` in `out`.
+bool parse_wm_line(const std::string& out, const char* label, int* w, int* h) {
+    auto pos = out.find(label);
+    if (pos == std::string::npos) return false;
+    char fmt[40];
+    std::snprintf(fmt, sizeof(fmt), "%s %%dx%%d", label);  // "<label> %dx%d"
+    return std::sscanf(out.c_str() + pos, fmt, w, h) == 2 && *w > 0 && *h > 0;
+}
+
+WmSize parse_wm_size(const std::string& out) {
+    WmSize s;
+    s.ok = parse_wm_line(out, "Physical size:", &s.phys_w, &s.phys_h);
+    s.has_override = parse_wm_line(out, "Override size:", &s.ov_w, &s.ov_h);
+    return s;
+}
+
+// True when (w,h) is the Tab5 panel aspect (9:16 or 16:9), within tolerance — the
+// long:short ratio equals PANEL_H:PANEL_W either way, so one check covers both.
+bool is_panel_aspect(int w, int h) {
+    int lo = std::min(w, h), hi = std::max(w, h);
+    if (lo <= 0) return false;
+    double panel = static_cast<double>(PANEL_H) / PANEL_W;  // 16/9
+    return std::fabs(static_cast<double>(hi) / lo - panel) < 0.02;
+}
+
 // Parse `wm size` output and compute the override resolution that matches the Tab5
 // panel aspect (long:short = PANEL_H:PANEL_W). Keeps the device's short side and
 // stretches the long side to short * PANEL_H / PANEL_W, preserving portrait vs
@@ -238,6 +278,40 @@ void ADBMirroringScreen::adapt_exit(int mode) {
         c->exec("wm size reset", [restart](adb::Error, const std::string&) { restart(); });
     else
         restart_mirror(mode);
+}
+
+void ADBMirroringScreen::query_disp_mode_availability() {
+    auto* c = app::adb_client();
+    if (!c) return;  // keep the defaults (DispMode shown, full Fit/Fill/Adapt cycle)
+    std::weak_ptr<ADBMirroringScreen> self =
+        std::static_pointer_cast<ADBMirroringScreen>(shared_from_this());
+    c->exec("wm size", [self](adb::Error e, const std::string& out) {
+        // Reader thread: decide from the source's current resolution.
+        bool show = true, adapt = true;
+        if (e == adb::Error::Ok) {
+            WmSize w = parse_wm_size(out);
+            if (w.ok) {
+                int ew = w.has_override ? w.ov_w : w.phys_w;  // current effective size
+                int eh = w.has_override ? w.ov_h : w.phys_h;
+                if (is_panel_aspect(ew, eh)) {
+                    show = false;  // already panel-aspect: fit == fill == adapt, hide it
+                } else if (w.has_override &&
+                           (w.ov_w != w.phys_w || w.ov_h != w.phys_h)) {
+                    adapt = false;  // a user `wm size` override is set: don't offer Adapt
+                }
+            }
+        }
+        lv_async_call([self, show, adapt] {
+            auto s = self.lock();
+            if (!s || s->exited()) return;
+            bool need_rebuild = (s->dispmode_show_ != show) && s->overlay_active_;
+            s->dispmode_show_ = show;
+            s->adapt_allowed_ = adapt;  // read live by the DispMode click handler
+            // Only hiding/showing the button changes the overlay layout; the cycle
+            // length is read live, so a disabled Adapt needs no rebuild.
+            if (need_rebuild) s->apply_overlay(s->cur_rot_, /*first=*/false);
+        });
+    });
 }
 
 void ADBMirroringScreen::apply_overlay(uint8_t rot, bool first) {
@@ -315,6 +389,8 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
 
     for (int i = 0; i < kN; ++i) {
         int id = kOrder[land ? i : (kN - 1 - i)];  // portrait = reversed order
+        if (id == DISPMODE && !dispmode_show_)
+            continue;  // source already panel-aspect: no display mode to switch
         if (id == SEP) {
             // A thin line spanning the strip across its short axis.
             lv_obj_t* s = lv_obj_create(cont);
@@ -384,12 +460,14 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
                 break;
             }
             case DISPMODE:
-                // Cycle Fit -> Fill -> Adapt -> Fit. The active mode is evident from
-                // the mirrored image (letterbox / cropped / exact-fit), so the icon
-                // stays put. Capturing `this` is safe — the overlay (and this button)
-                // is torn down in onExit before the screen frees.
+                // Cycle Fit -> Fill -> Adapt -> Fit, or Fit <-> Fill when Adapt is
+                // disabled (a non-default `wm size` override we must not clobber). The
+                // active mode is evident from the mirrored image, so the icon stays
+                // put. Capturing `this` is safe — the overlay (and this button) is torn
+                // down in onExit before the screen frees; adapt_allowed_ is read live.
                 lv_obj_add_event_fn(b, LV_EVENT_CLICKED, [this](lv_event_t*) {
-                    apply_disp_mode((disp_mode_ + 1) % 3);
+                    int n = adapt_allowed_ ? 3 : 2;
+                    apply_disp_mode((disp_mode_ + 1) % n);
                 });
                 break;
             default:

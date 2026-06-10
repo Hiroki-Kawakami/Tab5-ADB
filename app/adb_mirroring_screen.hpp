@@ -84,6 +84,14 @@ private:
     // LVGL-thread only.
     enum DispMode { kDispFit = 0, kDispFill = 1, kDispAdapt = 2 };
     int disp_mode_ = kDispFit;
+    // Set from the `wm size` query at mirror start (LVGL thread):
+    //   dispmode_show_  — false hides the DispMode button entirely (the source is
+    //                     already panel-aspect 9:16/16:9, so fit == fill == adapt).
+    //   adapt_allowed_  — false drops Adapt from the cycle (Fit<->Fill only): the
+    //                     source runs a non-default `wm size` override we must not
+    //                     clobber with Adapt's resize/reset.
+    bool dispmode_show_ = true;
+    bool adapt_allowed_ = true;
     // The MIRROR_START config for `mode` (Adapt and Fit both send scale=fit).
     agent_link::MirrorConfig mirror_config_for(int mode) const;
     // Switch to `mode`: reconfigure the live mirror (the agent restarts the stream on
@@ -97,6 +105,10 @@ private:
     // completions marshalled back to the LVGL thread.
     void adapt_enter();
     void adapt_exit(int mode);
+    // Query `wm size` at mirror start: set dispmode_show_ / adapt_allowed_ from the
+    // source's current resolution (rebuilds the overlay if the DispMode button has to
+    // be hidden). LVGL thread + an adb exec completion marshalled back.
+    void query_disp_mode_availability();
 
     // The control overlay is an icon strip flush against one panel corner: a
     // vertical strip in portrait, a horizontal strip when the source device turns
