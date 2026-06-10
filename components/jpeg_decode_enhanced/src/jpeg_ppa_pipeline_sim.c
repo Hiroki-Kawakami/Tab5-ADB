@@ -5,10 +5,8 @@
 // libjpeg shim, then run one software-PPA scale/rotate/mirror into the output —
 // the strip ring is purely a device-side memory optimisation, so a full-frame
 // decode reproduces the same pixels. The libjpeg shim already decodes JFIF
-// full-range, so yuv_full_range is implicit (see jpeg_fullrange_decode_sim.c).
-//
-// Only Layer 2 is implemented (the app uses jpeg_ppa_pipeline_*); the Layer 1
-// jpeg_enh_* strip API has no host consumer.
+// full-range, so yuv_full_range is implicit (see jpeg_decode_enhanced_sim.c,
+// which hosts the Layer 1 whole-frame path the same way).
 
 #include "jpeg_ppa_pipeline.h"
 

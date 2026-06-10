@@ -1,8 +1,8 @@
 // Host implementation of the ESP-IDF JPEG decode engine API (driver/jpeg_decode.h),
 // backed by libjpeg. The device runs the P4 HW JPEG codec; here we decode on the
 // CPU. libjpeg's YCbCr->RGB is full-range (JFIF) — which is exactly what the
-// device's jpeg_fullrange_decode reproduces via CSC-register override — so the
-// simulator faithfully previews the fullrange-fixed device output.
+// device's jpeg_decode_enhanced produces with yuv_full_range via its CSC-matrix
+// override — so the simulator faithfully previews the full-range device output.
 //
 // Only RGB565 / RGB888 output is supported (the panel is RGB565); GRAY/YUV
 // outputs return ESP_ERR_NOT_SUPPORTED. rgb_order selects R/B channel order;
@@ -140,7 +140,7 @@ esp_err_t jpeg_decoder_process(jpeg_decoder_handle_t decoder_engine,
         jpeg_destroy_decompress(&cinfo);
         return ESP_ERR_INVALID_ARG;
     }
-    cinfo.out_color_space = JCS_RGB;  // full-range JFIF YCbCr->RGB (matches device fullrange)
+    cinfo.out_color_space = JCS_RGB;  // full-range JFIF YCbCr->RGB (matches the device's full-range CSC)
     jpeg_start_decompress(&cinfo);
 
     const uint32_t w = cinfo.output_width;

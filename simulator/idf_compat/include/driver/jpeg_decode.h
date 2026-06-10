@@ -4,9 +4,9 @@
 //
 // Per the idf_compat rule: this is an Espressif-defined API, so the host
 // implements the IDF API *itself* rather than re-abstracting it. The full-range
-// BT.601 fix the device needs (jpeg_fullrange_decode) is a 2D-DMA CSC artifact;
-// libjpeg already decodes JFIF full-range, so on the host the fullrange wrapper
-// just delegates to jpeg_decoder_process() here.
+// YUV->RGB fix the device needs (jpeg_decode_enhanced) is a 2D-DMA CSC artifact;
+// libjpeg already decodes JFIF full-range, so on the host that component's sim
+// build just delegates to jpeg_decoder_process() here.
 //
 // Only the decoder surface is shimmed (no encoder). Enum *values* are
 // shim-local (the device uses IDF's COLOR_TYPE_ID-derived ids); app code uses

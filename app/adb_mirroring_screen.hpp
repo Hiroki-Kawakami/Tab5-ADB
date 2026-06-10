@@ -7,7 +7,7 @@
 #include "adb_app.hpp"     // PANEL_W, PANEL_H
 #include "agent_link.hpp"  // agent_link::Link, agent_link::VideoListener
 #include "display_manager.hpp"   // DisplayManager::TouchListener
-#include "driver/jpeg_decode.h"  // jpeg_decoder_handle_t (IDF on device, shim on host)
+#include "jpeg_decode_enhanced.h"  // jpeg_enh_strip_decoder_handle_t (P4 HW on device, libjpeg on host)
 #include "screen.hpp"
 
 // Screen-mirror viewer. Launches tab5adb-agent on the connected device (pushes
@@ -259,9 +259,10 @@ private:
     uint64_t stats_bytes_ = 0;
 
     // JPEG decode (decode task only) — the device/host-shared seam
-    // (jpeg_fullrange_decode); strips land straight in the framebuffer, so there
-    // is no decoded-pixel scratch and the slot buffer is the compressed input.
-    jpeg_decoder_handle_t jpeg_ = nullptr;
+    // (jpeg_decode_enhanced, whole-frame full-range decode); strips land straight
+    // in the framebuffer, so there is no decoded-pixel scratch and the slot
+    // buffer is the compressed input.
+    jpeg_enh_strip_decoder_handle_t jpeg_ = nullptr;
 
     // LVGL thread only. The "Connecting…" label shown until the agent is ready;
     // overlay_active_ tracks whether we entered DM overlay mode (so onExit only

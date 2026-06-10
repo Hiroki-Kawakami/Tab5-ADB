@@ -1,9 +1,10 @@
 # Device: the real strip-pipelined HW JPEG + PPA implementation (depends on the
-# P4 JPEG/2D-DMA HW + ESP-IDF private headers). Simulator: a host implementation
-# of the same Layer 2 (jpeg_ppa_pipeline) API backed by the idf_compat libjpeg
-# decode shim + the software PPA shim — same per-target branch as m5stack-bsp.
-# (Same rule as jpeg_fullrange_decode: the libjpeg shim already decodes JFIF
-# full-range, so the sim reproduces the device's full-range colours.)
+# P4 JPEG/2D-DMA HW + ESP-IDF private headers). Simulator: host implementations
+# of the Layer 1 whole-frame path (jpeg_enh_decoder_process) and the Layer 2
+# (jpeg_ppa_pipeline) API, backed by the idf_compat libjpeg decode shim + the
+# software PPA shim — same per-target branch as m5stack-bsp. (The libjpeg shim
+# already decodes JFIF full-range, so the sim reproduces the device's
+# full-range colours.)
 if(ESP_PLATFORM)
     idf_component_register(
         SRCS
@@ -26,6 +27,7 @@ if(ESP_PLATFORM)
 else()
     idf_component_register(
         SRCS
+            "src/jpeg_decode_enhanced_sim.c"
             "src/jpeg_ppa_pipeline_sim.c"
         INCLUDE_DIRS "include"
         REQUIRES esp_driver_jpeg esp_driver_ppa

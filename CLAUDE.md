@@ -214,8 +214,8 @@ components/                  # SHARED  (both targets)
   agent_link/                #   Tab5-side link to tab5adb-agent (protocol.md) — over adb::Stream
     inc/                     #     agent_link.hpp (Link + LinkLifecycleListener/VideoListener) + agent_link_protocol.hpp (wire)
     src/  test/              #     impl + host HELLO test (test_hello.cpp)
-  jpeg_fullrange_decode/     #   full-range BT.601 JPEG decode (mirror strips); ESP_PLATFORM-branched
-    include/  src/           #     header + _p4.c (device: CSC-register override) / _sim.c (host delegate)
+  jpeg_decode_enhanced/      #   enhanced P4 HW JPEG decode (full-range CSC, strip pipeline, PPA); ESP_PLATFORM-branched
+    include/  src/           #     Layer 1 (jpeg_decode_enhanced.h) + Layer 2 (jpeg_ppa_pipeline.h); _sim.c = libjpeg/SW-PPA-backed (see its README)
 esp32p4/                     # DEVICE build root (IDF project)
   main/                      #   entry point (app_main + device LVGL runtime via esp_lvgl_port)
 simulator/                   # SIMULATOR build root (see below)
@@ -472,7 +472,7 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   hunt, then a wrong fix, then the right one):** at high bulk-IN throughput (the
   uncapped/GPU-offloaded mirror runs ~2-4 MB/s vs the old ~0.4) the P4 usb_host
   **intermittently corrupts a payload byte** → a malformed JPEG strip → a
-  `jpeg.fullrange` HW decode error. The first hunt wrongly concluded "a DWC2
+  HW JPEG decode error. The first hunt wrongly concluded "a DWC2
   *large-transfer* quirk" and mitigated it by reading the payload in ≤4 KB chunks —
   which only masked it at low rate. The **actual cause is RX-FIFO starvation**: the
   old rx=256-line (1 KiB = 2 packets) FIFO overflowed when the USB DMA drain
@@ -695,22 +695,26 @@ LVGL), verified headless against a real Android device.
 ### The JPEG decode seam (for the mirror render)
 
 `VideoListener::on_video_strip` hands the app a whole JPEG strip to decode into the
-`bsp` framebuffer. The decode is **the same call on both targets** —
-`jpeg_new_decoder_engine()` + `jpeg_decoder_process_full_range()` (+
-`jpeg_alloc_decoder_mem()` / `jpeg_del_decoder_engine()`) — split below per the
-two standard rules:
+`bsp` framebuffer. The decode is **the same call on both targets** — a
+`jpeg_enh_strip_decoder_new()` handle (`ring_count = 0`, whole-frame mode) +
+`jpeg_enh_decoder_process()` from `components/jpeg_decode_enhanced/` — split per
+the two standard rules:
 
 - The IDF JPEG **engine API** (`driver/jpeg_decode.h`) is Espressif's, so the
   host gets it in `simulator/idf_compat/` (libjpeg-backed). Device uses the real
-  `esp_driver_jpeg`.
-- `jpeg_decoder_process_full_range()` is **not** an Espressif API (it overrides
-  the 2D-DMA CSC matrix registers for full-range BT.601 — MJPEG/JFIF content is
-  full-range, but the IDF decoder bakes in the *limited-range* matrix and washes
-  the image out). So it's the shared, `ESP_PLATFORM`-branched
-  `components/jpeg_fullrange_decode/` component (device = the register-override
-  driver; host = a passthrough to the libjpeg shim, which is already full-range).
-  App code calls the one name and the simulator previews the fullrange-fixed
-  device output. **Colour gotcha (cost several HW cycles):** for **RGB565 output**
+  `esp_driver_jpeg` (the enhanced decoder grabs the IDF engine internally).
+- The full-range conversion is **not** an Espressif feature
+  (`cfg.decode.yuv_full_range = true` overrides the 2D-DMA CSC matrix registers —
+  MJPEG/JFIF content is full-range, but the IDF decoder bakes in the
+  *limited-range* matrix and washes the image out). So it lives in the shared,
+  `ESP_PLATFORM`-branched `components/jpeg_decode_enhanced/` component (device =
+  the 2D-DMA reimplementation with the matrix override; host =
+  `jpeg_decode_enhanced_sim.c`, a whole-frame delegate to the libjpeg shim, which
+  is already full-range). The component also offers strip-pipelined decode + a
+  PPA pipeline (its Layer 2, see its README) — the mirror uses only the
+  whole-frame Layer 1 API, **no PPA**. App code calls the one name and the
+  simulator previews the full-range device output.
+  **Colour gotcha (cost several HW cycles):** for **RGB565 output**
   on the Tab5 panel use `rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR`, **not** `RGB`.
   The panel is driven R-in-high-bits RGB565, and on the P4 the *BGR* scramble is
   what produces that packing; the *RGB* enum's 565 scramble mis-packs the 16-bit
@@ -718,10 +722,10 @@ two standard rules:
   rainbow noise with the structure intact. (Matches the proven
   `Tab5-Screen-Streamer` decoder, same panel.) The simulator's libjpeg shim
   (`idf_compat/jpeg_decode.c`) mirrors this — its RGB565 BGR branch packs R-high —
-  so the sim previews the device-correct colours with the same `dcfg`.
+  so the sim previews the device-correct colours with the same decode cfg.
 
-The API is **unchanged from the plain IDF `jpeg_decoder_process()` signature**
-(tightly-packed output) — no stride/offset parameter. That is deliberate: the
+The whole-frame API keeps the plain IDF `jpeg_decoder_process()` output model
+(tightly-packed) — no stride/offset parameter. That is deliberate: the
 **P4 JPEG 2D-DMA can only write a tightly-packed `process_h`×`process_v` picture**;
 it cannot place a narrower picture into a wider buffer with a row stride. (Two HW
 attempts to add that failed — HA-as-stride sheared the image with a black band per
@@ -739,7 +743,7 @@ sync (`decoded_buf`, `size = w*h*2`) is naturally aligned (`strip.y` and `h` are
 
 Two robustness measures live alongside the decode: `frame_ok_` drops any frame a
 strip fails to decode (don't present a half-updated buffer), and
-`jpeg_fullrange_decode_p4.c`'s error path soft-resets the JPEG FSM before
+`jpeg_decode_enhanced.c`'s error path soft-resets the JPEG FSM before
 `dma2d_force_end()` so a decode error can't leave the DMA2D RX ISR to panic on a
 non-idle FSM. (These mattered during a long mirror-stability hunt whose real cause
 turned out to be the **usb_host transport corrupting large bulk-IN payloads** — see
@@ -869,13 +873,13 @@ real throughput; this is the `Tab5-Screen-Streamer` split, which kept its USB
 receive free of decode). Two threads, handed slots through two FreeRTOS queues:
 - **producer = the adb reader thread** (`on_video_strip`): copies each strip's
   JPEG bytes into the current **frame slot** (`FrameSlot.buf`, PSRAM, grown lazily;
-  the HW-JPEG input DMA reads PSRAM directly and the fullrange decoder syncs the
+  the HW-JPEG input DMA reads PSRAM directly and the enhanced decoder syncs the
   input cache `UNALIGNED`, so concatenated strips need no DMA bounce buffer and no
   per-strip alignment — **one fewer copy** than the old per-strip DMA input) plus a
   per-strip `{y,h,off,len}` descriptor; on `frame_end` it publishes the finished
   frame and returns, so the link acks immediately and the USB stream keeps flowing.
 - **consumer = a private decode task** (`decode_loop`): drains finished frames,
-  HW-JPEG-decodes each strip through the `jpeg_fullrange_decode` seam **straight
+  HW-JPEG-decodes each strip through the `jpeg_decode_enhanced` seam **straight
   into a bsp framebuffer**, presents it, recycles the slot. It owns `fb_`/`back_`
   exclusively (no lock).
 
@@ -1093,9 +1097,9 @@ mode / per-screen verify scripts as the UI grows.
     (`jpeg_new_decoder_engine`/`jpeg_decoder_process`/`jpeg_alloc_decoder_mem`/
     `jpeg_del_decoder_engine` + cfg/enum types), backed by **libjpeg**
     (`src/jpeg_decode.c`). RGB565/RGB888 out only; libjpeg decodes JFIF
-    **full-range**, which is what the device's `jpeg_fullrange_decode` reproduces
-    (see that component). pkg `libjpeg` links to the `simulator` exe in
-    `simulator/CMakeLists.txt`.
+    **full-range**, which is what the device's `jpeg_decode_enhanced` produces
+    with `yuv_full_range` (see that component). pkg `libjpeg` links to the
+    `simulator` exe in `simulator/CMakeLists.txt`.
   - `driver/ppa` — the IDF PPA (Pixel-Processing Accelerator) API
     (`ppa_register_client`/`ppa_do_scale_rotate_mirror`/`ppa_do_blend`/
     `ppa_do_fill` + `hal/ppa_types.h`, `hal/color_types.h`), a **CPU software

@@ -19,7 +19,7 @@
 #include "display_manager.hpp"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
-#include "jpeg_fullrange_decode.h"
+#include "jpeg_decode_enhanced.h"
 #include "lvgl.hpp"
 #include "resources/resources.h"  // R.font.lucide_40, LUCIDE_*
 #include "screen_manager.hpp"
@@ -686,7 +686,7 @@ void ADBMirroringScreen::on_video_strip(agent_link::Link*,
     }
 
     // Grow the slot buffer to fit and concatenate the strip's JPEG bytes. The slot
-    // lives in PSRAM, which the HW-JPEG input DMA reads directly (the fullrange
+    // lives in PSRAM, which the HW-JPEG input DMA reads directly (the enhanced
     // decoder syncs the input cache UNALIGNED), so no separate DMA-input copy and
     // no alignment of the per-strip offset is needed — this is one fewer copy than
     // a per-strip DMA bounce buffer.
@@ -822,38 +822,41 @@ bool ADBMirroringScreen::decode_one(uint8_t* jpeg, uint32_t len, uint16_t y,
                                     uint16_t h, uint8_t* dst) {
     if (!jpeg || len == 0 || !dst) return false;
 
-    // Lazily create the engine (decode task only).
+    const bool rgb888 = (display_manager.format() == BSP_PIXEL_FORMAT_RGB888);
+    const size_t bpp = rgb888 ? 3 : 2;
+
+    // Lazily create the decoder (decode task only). The pixel format is baked
+    // into the handle, which is fine: it is chosen at bsp_init and fixed for the
+    // boot. ring_count = 0 — whole-frame decodes only, no strip ring (each strip
+    // already lands straight in its framebuffer row band).
     if (!jpeg_) {
-        jpeg_decode_engine_cfg_t ecfg = {};
-        ecfg.timeout_ms = 1000;
-        if (jpeg_new_decoder_engine(&ecfg, &jpeg_) != ESP_OK) { jpeg_ = nullptr; return false; }
+        jpeg_enh_strip_decoder_cfg_t cfg = {};
+        cfg.decode.output_format = rgb888 ? JPEG_DECODE_OUT_FORMAT_RGB888
+                                          : JPEG_DECODE_OUT_FORMAT_RGB565;
+        // BGR, not RGB, for both depths: the framebuffer byte order is LVGL's native
+        // RGB888 (B,G,R) / R-in-high-bits RGB565, and on the P4 HW JPEG decoder that
+        // packing is the one the BGR scramble produces — the RGB enum mis-orders the
+        // bytes and the image comes out as colour-swapped / rainbow noise. Matches the
+        // proven Tab5-Screen-Streamer 565 path; the host shim packs B,G,R the same way.
+        // (The 888 device scramble is still the remaining real-HW verification.)
+        cfg.decode.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+        cfg.decode.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+        cfg.decode.yuv_full_range = true;  // MJPEG/JFIF strips are full-range
+        cfg.max_pic_w = PANEL_W;
+        cfg.max_pic_h = PANEL_H;
+        cfg.timeout_ms = 1000;
+        if (jpeg_enh_strip_decoder_new(&cfg, &jpeg_) != ESP_OK) { jpeg_ = nullptr; return false; }
     }
 
     // Full-width strip → tightly-packed decode lands in place: the destination is
     // the framebuffer row band starting at row y (x == 0), and the decoded
     // PANEL_W×h picture is exactly PANEL_W*h pixels contiguous — no scratch, no
     // blit, no stride. (device: P4 HW JPEG straight to PSRAM; host: libjpeg.)
-    const bool rgb888 = (display_manager.format() == BSP_PIXEL_FORMAT_RGB888);
-    const size_t bpp = rgb888 ? 3 : 2;
-
-    jpeg_decode_cfg_t dcfg = {};
-    dcfg.output_format = rgb888 ? JPEG_DECODE_OUT_FORMAT_RGB888
-                                : JPEG_DECODE_OUT_FORMAT_RGB565;
-    // BGR, not RGB, for both depths: the framebuffer byte order is LVGL's native
-    // RGB888 (B,G,R) / R-in-high-bits RGB565, and on the P4 HW JPEG decoder that
-    // packing is the one the BGR scramble produces — the RGB enum mis-orders the
-    // bytes and the image comes out as colour-swapped / rainbow noise. Matches the
-    // proven Tab5-Screen-Streamer 565 path; the host shim packs B,G,R the same way.
-    // (The 888 device scramble is still the remaining real-HW verification.)
-    dcfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
-    dcfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
     uint8_t* out = dst + (size_t)y * PANEL_W * bpp;  // x == 0
-    uint32_t outbuf = (uint32_t)((size_t)PANEL_W * h * bpp);
-    uint32_t out_size = 0;
-    return jpeg_decoder_process_full_range(jpeg_, &dcfg, jpeg, len,
-               out, outbuf, &out_size) == ESP_OK;
+    size_t outbuf = (size_t)PANEL_W * h * bpp;
+    return jpeg_enh_decoder_process(jpeg_, jpeg, len, out, outbuf, nullptr) == ESP_OK;
 }
 
 void ADBMirroringScreen::free_decoder() {
-    if (jpeg_) { jpeg_del_decoder_engine(jpeg_); jpeg_ = nullptr; }
+    if (jpeg_) { jpeg_enh_strip_decoder_del(jpeg_); jpeg_ = nullptr; }
 }

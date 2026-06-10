@@ -672,6 +672,13 @@ static esp_err_t s_run_frame(jpeg_enh_strip_decoder_handle_t h)
 
     if (err != ESP_OK) {
         bool need_yield;
+        // On a decode error the JPEG FSM may still be mid-frame. Soft-reset the
+        // JPEG peripheral BEFORE ending the DMA so the RX channel can go idle —
+        // otherwise the DMA's late RX-EOF ISR asserts dma2d_ll_rx_is_fsm_idle()
+        // and panics the whole device. force_end() alone is enough for clean
+        // inputs but not when frames actually error (e.g. a corrupted strip the
+        // HW chokes on).
+        jpeg_ll_soft_rst(h->engine->codec_base->hal.dev);
         dma2d_force_end(h->engine->trans_desc, &need_yield);
         return err;
     }
