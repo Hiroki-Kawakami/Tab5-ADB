@@ -2,16 +2,21 @@
 
 #include <zlib.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
 
 #include "adb_app.hpp"
 #include "adb_client.hpp"
+#include "driver/jpeg_decode.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "jpeg_ppa_pipeline.h"
 
 static const char* TAG = "screencap_preview";
 
@@ -59,7 +64,8 @@ bool unfilter(uint8_t ft, const uint8_t* in, const uint8_t* prev, uint8_t* out,
 // rows straight into `out`. Constraints (all met by Android `screencap -p`):
 // 8-bit, colour type RGB(2)/RGBA(6), non-interlaced. Returns false otherwise.
 bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
-                                 uint16_t* out, int dst_w, int dst_h) {
+                                 uint16_t* out, int dst_w, int dst_h,
+                                 int* src_w = nullptr, int* src_h = nullptr) {
     static const uint8_t SIG[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
     if (len < 8 + 25 || memcmp(png, SIG, 8) != 0) return false;
 
@@ -92,6 +98,8 @@ bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
         pos += 12 + clen;  // length + type + data + CRC
     }
     if (!seen_ihdr || idat.empty()) return false;
+    if (src_w) *src_w = W;
+    if (src_h) *src_h = H;
 
     const int stride = W * bpp;
     z_stream zs{};
@@ -198,6 +206,13 @@ void ScreencapPreview::stop() {
         decode_task_ = nullptr;  // sems freed in the dtor (a late on_stream_close may
                                  // still give work_sem_ while the weak listener is locked)
     }
+    // The decode task (sole owner of the pipeline) is now joined, so it's safe to
+    // release the JPEG HW engine / PPA client / ring buffers here.
+    if (jpeg_pipe_) {
+        jpeg_ppa_pipeline_del(static_cast<jpeg_ppa_pipeline_handle_t>(jpeg_pipe_));
+        jpeg_pipe_ = nullptr;
+        jpeg_pipe_max_ = 0;
+    }
 }
 
 void ScreencapPreview::capture_once() {
@@ -210,10 +225,12 @@ void ScreencapPreview::capture_once() {
         return;
     }
     png_.clear();
-    // exec: (not shell:) — binary-safe, no PTY CR/LF translation of the PNG bytes.
+    t_capture_us_ = esp_timer_get_time();
+    // exec: (not shell:) — binary-safe, no PTY CR/LF translation of the image bytes.
+    // -j (JPEG, much smaller) on capable devices; -p (PNG) otherwise.
+    const char* service = use_jpeg_.load() ? "exec:screencap -j" : "exec:screencap -p";
     stream_ = client->open_stream(
-        "exec:screencap -p",
-        std::weak_ptr<adb::StreamListener>(shared_from_this()));
+        service, std::weak_ptr<adb::StreamListener>(shared_from_this()));
     if (!stream_) {
         capturing_ = false;
         schedule_next();
@@ -240,6 +257,17 @@ void ScreencapPreview::present(int idx, bool ok) {
     write_idx_.store(idx ^ 1);
     lv_image_set_src(image_, &dsc_);
     lv_obj_invalidate(image_);
+
+    // Per-stage timing (µs->ms) for tuning. xfer = phone screencap + USB transfer;
+    // wait = decode task scheduling latency (low prio, Core 1); decode = inflate +
+    // downscale; total = capture open -> shown.
+    int64_t now = esp_timer_get_time();
+    ESP_LOGI(TAG, "preview %s %dx%d->%dx%d %ukB | xfer %lldms wait %lldms decode %lldms total %lldms",
+             last_fmt_, src_w_, src_h_, dst_w_, dst_h_, (unsigned)(png_bytes_ / 1024),
+             (long long)((t_recv_us_ - t_capture_us_) / 1000),
+             (long long)((t_dec_start_us_ - t_recv_us_) / 1000),
+             (long long)((t_dec_end_us_ - t_dec_start_us_) / 1000),
+             (long long)((now - t_capture_us_) / 1000));
 }
 
 void ScreencapPreview::on_stream_data(adb::Stream*, const uint8_t* data, size_t len) {
@@ -251,7 +279,71 @@ void ScreencapPreview::on_stream_close(adb::Stream*, adb::Error) {
     // and return — decode/downscale must not run here or it blocks the reader (and
     // thus LVGL / other adb streams). The pipeline is serial (next capture only
     // arms 2 s after present), so png_ stays stable while the task reads it.
+    t_recv_us_ = esp_timer_get_time();
+    png_bytes_ = png_.size();
     if (work_sem_) xSemaphoreGive(static_cast<SemaphoreHandle_t>(work_sem_));
+}
+
+bool ScreencapPreview::decode_jpeg(const uint8_t* data, size_t len, int idx) {
+    jpeg_decode_picture_info_t pi;
+    if (jpeg_decoder_get_info(data, len, &pi) != ESP_OK) return false;
+
+    // Lazy pipeline, sized to cover both orientations of this device (max(W,H) on
+    // both axes, MCU-aligned) so a portrait<->landscape rotation needs no rebuild.
+    uint32_t maxdim = (std::max(pi.width, pi.height) + 15u) & ~15u;
+    if (!jpeg_pipe_ || jpeg_pipe_max_ < maxdim) {
+        if (jpeg_pipe_) jpeg_ppa_pipeline_del(static_cast<jpeg_ppa_pipeline_handle_t>(jpeg_pipe_));
+        jpeg_pipe_ = nullptr;
+        jpeg_ppa_pipeline_cfg_t cfg = {};
+        cfg.max_pic_w = maxdim;
+        cfg.max_pic_h = maxdim;
+        cfg.strip_h_hint = 16;
+        cfg.ring_count = 4;
+        cfg.strip_color_mode = PPA_SRM_COLOR_MODE_RGB565;
+        cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // R-high RGB565 for LVGL
+        cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+        cfg.yuv_full_range = true;                       // JFIF/UltraHDR base is full-range
+        cfg.strip_alloc_caps = MALLOC_CAP_SPIRAM;        // PSRAM ring; rate isn't critical
+        cfg.worker_core = 1;
+        cfg.worker_priority = 3;                         // low, like our decode task
+        jpeg_ppa_pipeline_handle_t p = nullptr;
+        if (jpeg_ppa_pipeline_new(&cfg, &p) != ESP_OK) {
+            ESP_LOGW(TAG, "jpeg pipeline new failed (%ux%u)", (unsigned)pi.width,
+                     (unsigned)pi.height);
+            return false;
+        }
+        jpeg_pipe_ = p;
+        jpeg_pipe_max_ = maxdim;
+    }
+
+    // Aspect-fit; quantize scale down to PPA's 1/16 step so the rendered extent is
+    // exact and fits the preview box, with black letterbox margins.
+    float s = std::min((float)dst_w_ / pi.width, (float)dst_h_ / pi.height);
+    float q = std::floor(s * 16.0f) / 16.0f;
+    if (q < 1.0f / 16) q = 1.0f / 16;
+    uint32_t ew = (uint32_t)(pi.width * q), eh = (uint32_t)(pi.height * q);
+
+    memset(img_buf_[idx], 0, buf_size_);  // letterbox
+
+    jpeg_ppa_transform_t t = {};
+    t.rotation = PPA_SRM_ROTATION_ANGLE_0;
+    t.scale_x = t.scale_y = q;
+    t.out_offset_x = ew < (uint32_t)dst_w_ ? ((uint32_t)dst_w_ - ew) / 2 : 0;
+    t.out_offset_y = eh < (uint32_t)dst_h_ ? ((uint32_t)dst_h_ - eh) / 2 : 0;
+
+    jpeg_ppa_output_t out = {};
+    out.buffer = img_buf_[idx];
+    out.buffer_size = buf_size_;
+    out.pic_w = dst_w_;
+    out.pic_h = dst_h_;
+    out.color_mode = PPA_SRM_COLOR_MODE_RGB565;
+
+    esp_err_t e = jpeg_ppa_pipeline_process(
+        static_cast<jpeg_ppa_pipeline_handle_t>(jpeg_pipe_), data, len, &out, &t, nullptr);
+    if (e != ESP_OK) { ESP_LOGW(TAG, "jpeg pipeline process: %d", (int)e); return false; }
+    src_w_ = pi.width;
+    src_h_ = pi.height;
+    return true;
 }
 
 void ScreencapPreview::decode_trampoline(void* arg) {
@@ -263,10 +355,29 @@ void ScreencapPreview::decode_loop() {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(work_sem_), portMAX_DELAY);
         if (decode_stop_.load()) break;
 
+        t_dec_start_us_ = esp_timer_get_time();
         int idx = write_idx_.load();  // the back buffer (front = idx ^ 1, shown by LVGL)
-        bool ok = decode_png_downscale_rgb565(
-            png_.data(), png_.size(),
-            reinterpret_cast<uint16_t*>(img_buf_[idx]), dst_w_, dst_h_);
+        const uint8_t* d = png_.data();
+        size_t n = png_.size();
+        bool is_jpeg = n >= 2 && d[0] == 0xFF && d[1] == 0xD8;
+        bool is_png = n >= 8 && d[0] == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G';
+        bool ok;
+        if (is_jpeg) {
+            last_fmt_ = "jpeg";
+            ok = decode_jpeg(d, n, idx);
+        } else {
+            last_fmt_ = "png";
+            ok = is_png && decode_png_downscale_rgb565(
+                              d, n, reinterpret_cast<uint16_t*>(img_buf_[idx]),
+                              dst_w_, dst_h_, &src_w_, &src_h_);
+        }
+        // We asked for `-j` but got something else (or nothing) → the device lacks
+        // it; drop to PNG for the rest of the session.
+        if (use_jpeg_.load() && !is_jpeg) {
+            use_jpeg_.store(false);
+            ESP_LOGW(TAG, "screencap -j unsupported here; falling back to PNG");
+        }
+        t_dec_end_us_ = esp_timer_get_time();
         png_.clear();
         if (!ok) ESP_LOGW(TAG, "decode failed");
 

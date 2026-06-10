@@ -76,7 +76,8 @@ private:
     void present(int idx, bool ok);   // LVGL thread: flip dsc_ to the freshly-decoded buffer
 
     static void decode_trampoline(void* arg);
-    void decode_loop();               // decode task (Core 1, low prio): PNG -> img_buf_[back]
+    void decode_loop();               // decode task (Core 1, low prio): PNG/JPEG -> img_buf_[back]
+    bool decode_jpeg(const uint8_t* data, size_t len, int idx);  // decode task
 
     lv_obj_t* image_;
     const int dst_w_, dst_h_;
@@ -99,10 +100,33 @@ private:
     // the heavy inflate never preempts LVGL or the high-priority adb reader. The
     // reader hands off the captured PNG via work_sem_ and returns immediately.
     void* decode_task_ = nullptr;     // TaskHandle_t
-    void* work_sem_ = nullptr;        // binary: a captured PNG is ready to decode
+    void* work_sem_ = nullptr;        // binary: a captured image is ready to decode
     void* decode_done_ = nullptr;     // binary: the decode task has exited (join)
     std::atomic<bool> decode_stop_{false};
 
+    // JPEG path: prefer `screencap -j` (UltraHDR base JPEG, ~5-8x smaller than PNG
+    // on photo-heavy screens), falling back to `-p` (PNG) when the device lacks
+    // `-j`. decode_loop auto-detects the format by magic bytes; use_jpeg_ flips off
+    // permanently if a `-j` capture comes back non-JPEG.
+    //
+    // Disabled by default: `screencap -j` only exists on Android 16+, and no test
+    // device on hand has it. The whole JPEG
+    // path is built and validated, just gated off — flip this to true once an
+    // Android 16 device is available to verify it for real.
+    std::atomic<bool> use_jpeg_{false};
+    void* jpeg_pipe_ = nullptr;       // jpeg_ppa_pipeline_handle_t (lazy, decode task)
+    uint32_t jpeg_pipe_max_ = 0;      // max_pic dimension the pipeline was built for
+    const char* last_fmt_ = "?";      // "jpeg"/"png" for the timing log
+
     std::atomic<bool> stopped_{false};
     bool capturing_ = false;          // LVGL thread: a capture is in flight
+
+    // Profiling timestamps (µs) for the per-stage timing log — written as the frame
+    // moves capture (LVGL) -> recv (reader) -> decode (task) -> present (LVGL).
+    int64_t t_capture_us_ = 0;        // stream opened
+    int64_t t_recv_us_ = 0;           // last PNG byte received (stream closed)
+    int64_t t_dec_start_us_ = 0;      // decode task picked up the work
+    int64_t t_dec_end_us_ = 0;        // decode+downscale finished
+    int src_w_ = 0, src_h_ = 0;       // source PNG dimensions (for the log)
+    size_t png_bytes_ = 0;            // last PNG size
 };

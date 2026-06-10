@@ -98,6 +98,7 @@ set(SHARED_COMPONENTS
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/adb
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/agent_link
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/jpeg_fullrange_decode
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/jpeg_decode_enhanced
     ${CMAKE_CURRENT_SOURCE_DIR}/../app)
 foreach(comp ${SHARED_COMPONENTS})
     get_filename_component(name "${comp}" NAME)
