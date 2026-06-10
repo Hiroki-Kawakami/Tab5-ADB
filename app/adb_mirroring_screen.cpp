@@ -31,12 +31,12 @@ ADBMirroringScreen::~ADBMirroringScreen() {
     // idempotent backstop. Stop the producer (clear our video listener so no more
     // on_video_strip arrives) before joining the consumer.
     if (auto l = app::agent_client().link()) l->set_video_listener({});
+    display_manager.set_touch_listener({});
     if (decode_task_) {
         decode_stop_ = true;
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
         decode_task_ = nullptr;
     }
-    if (poll_timer_) { lv_timer_delete(static_cast<lv_timer_t*>(poll_timer_)); poll_timer_ = nullptr; }
     if (overlay_active_) { display_manager.exit_overlay(); overlay_active_ = false; }
     if (decode_done_) { vSemaphoreDelete(static_cast<SemaphoreHandle_t>(decode_done_)); decode_done_ = nullptr; }
     if (ready_q_) { vQueueDelete(static_cast<QueueHandle_t>(ready_q_)); ready_q_ = nullptr; }
@@ -117,14 +117,12 @@ void ADBMirroringScreen::start_mirror_ui() {
     apply_overlay(cur_rot_, /*first=*/true);  // cur_rot_ defaults to 0 (portrait)
     display_manager.set_overlay_visible(true);
 
-    // Poll the raw panel touch on the LVGL thread: a swipe out of the bottom-left
-    // corner reveals a hidden strip. touch_point + the indev read both run on the
-    // LVGL thread, so the cached state is consistent.
-    poll_timer_ = lv_timer_create(
-        [](lv_timer_t* t) {
-            static_cast<ADBMirroringScreen*>(lv_timer_get_user_data(t))->poll_touch();
-        },
-        30, this);
+    // Observe raw touch (pushed from the DisplayManager touch task): a swipe out of
+    // the bottom-left corner reveals a hidden strip. on_touch fires off the LVGL
+    // thread, but the swipe logic only flips DM flags (no LVGL access).
+    display_manager.set_touch_listener(
+        std::static_pointer_cast<DisplayManager::TouchListener>(
+            std::static_pointer_cast<ADBMirroringScreen>(shared_from_this())));
 
     // Register on the established link, then start mirroring. The video channel
     // (on_mirror_started / on_video_strip / on_orientation) fires on the adb reader
@@ -277,21 +275,29 @@ bool ADBMirroringScreen::in_corner(int px, int py, uint8_t rot) {
            (bottom ? py > PANEL_H - kCornerSwipe : py < kCornerSwipe);
 }
 
-void ADBMirroringScreen::poll_touch() {
-    bsp_touch_point_t p;
-    bool pressed = display_manager.touch_point(&p);
+void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
+    // Touch task thread. The reveal gesture is a single-finger swipe, so track
+    // point 0; multi-touch (count > 1) is reserved for the future passthrough.
+    bool pressed = count > 0;
+    int px = pressed ? pts[0].x : 0;
+    int py = pressed ? pts[0].y : 0;
     bool visible = display_manager.overlay_visible();
 
     if (pressed && !touch_prev_) {
         // Press edge: arm a reveal swipe if it starts in the corner while hidden.
-        if (!visible && in_corner(p.x, p.y, cur_rot_)) {
+        if (!visible && in_corner(px, py, cur_rot_)) {
             swipe_active_ = true;
-            swipe_x0_ = p.x;
-            swipe_y0_ = p.y;
+            swipe_x0_ = px;
+            swipe_y0_ = py;
         }
     } else if (pressed && swipe_active_ && !visible) {
-        int dx = p.x - swipe_x0_, dy = p.y - swipe_y0_;
+        int dx = px - swipe_x0_, dy = py - swipe_y0_;
         if (dx * dx + dy * dy >= kSwipeThresh * kSwipeThresh) {
+            // Reveal, but mask this same press from the indev until the finger
+            // lifts — otherwise the gesture that reveals the strip would also land
+            // as a tap on a freshly-shown overlay button. consume FIRST so the
+            // overlay never becomes visible with an unmasked press in flight.
+            display_manager.consume_overlay_touch();
             display_manager.set_overlay_visible(true);  // revealed
             swipe_active_ = false;
         }
@@ -327,6 +333,9 @@ void ADBMirroringScreen::onExit() {
         l->stop_mirror();
         l->set_video_listener({});  // detach the producer (no more on_video_strip)
     }
+    // Stop observing touch: clear our listener so no more on_touch fires (an
+    // in-flight one keeps us alive via its weak lock).
+    display_manager.set_touch_listener({});
     // Producer detached; join the decode task before the framebuffers are reclaimed
     // by the previous screen's re-render, so it can't flush into a buffer being
     // reused.
@@ -336,9 +345,8 @@ void ADBMirroringScreen::onExit() {
         decode_task_ = nullptr;
     }
     // Both threads are stopped, so no DM.flush can race the teardown: drop the
-    // overlay (restores the indev to the main display + frees the overlay display)
-    // and the toggle timer. The previous screen's re-render reclaims the panel.
-    if (poll_timer_) { lv_timer_delete(static_cast<lv_timer_t*>(poll_timer_)); poll_timer_ = nullptr; }
+    // overlay (restores the indev to the main display + frees the overlay display).
+    // The previous screen's re-render reclaims the panel.
     if (overlay_active_) { display_manager.exit_overlay(); overlay_active_ = false; }
 }
 

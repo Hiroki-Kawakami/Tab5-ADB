@@ -4,6 +4,7 @@
 
 #include "adb_app.hpp"     // PANEL_W, PANEL_H
 #include "agent_link.hpp"  // agent_link::Link, agent_link::VideoListener
+#include "display_manager.hpp"   // DisplayManager::TouchListener
 #include "driver/jpeg_decode.h"  // jpeg_decoder_handle_t (IDF on device, shim on host)
 #include "screen.hpp"
 
@@ -46,7 +47,9 @@
 // composited over the stream (a back button / status label would force LVGL to
 // re-blend every frame — the draw cost we avoid): navigation back is the control
 // strip's End button, launch progress goes to the log.
-class ADBMirroringScreen : public Screen, public agent_link::VideoListener {
+class ADBMirroringScreen : public Screen,
+                           public agent_link::VideoListener,
+                           public DisplayManager::TouchListener {
 public:
     ADBMirroringScreen();
     ~ADBMirroringScreen() override;
@@ -59,6 +62,11 @@ public:
     void on_mirror_started(agent_link::Link* link, const agent_link::MirrorInfo& info) override;
     void on_video_strip(agent_link::Link* link, const agent_link::VideoStrip& strip) override;
     void on_orientation(agent_link::Link* link, const agent_link::OrientationInfo& info) override;
+
+    // DisplayManager::TouchListener — fires on the touch task thread. Detects the
+    // bottom-left corner swipe that reveals a hidden control strip (see poll-free
+    // note below).
+    void on_touch(const bsp_touch_point_t* pts, int count) override;
 
 private:
     // Once the agent is connected (or already live): swap the waiting label for the
@@ -146,9 +154,6 @@ private:
     bool decode_one(uint8_t* jpeg, uint32_t len, uint16_t y, uint16_t h,
                     uint8_t* dst);
     void free_decoder();
-    // LVGL-thread lv_timer callback: poll the raw touch and reveal a hidden
-    // control strip when the user swipes out of the bottom-left corner.
-    void poll_touch();
 
     // The bsp framebuffers (not owned), used as a TRIPLE buffer: the decode task
     // draws into fb_[back_], flushes it (it becomes the front/displayed buffer),
@@ -160,7 +165,8 @@ private:
     int back_ = 0;     // index the decode task draws into next
     int front_ = -1;   // index currently displayed (last flushed; -1 = none yet)
 
-    void* poll_timer_ = nullptr;  // lv_timer_t* (LVGL thread): corner-swipe reveal
+    // Corner-swipe reveal state. Touched only on the touch task thread (the
+    // DisplayManager::TouchListener callback), so it needs no lock.
     bool  touch_prev_ = false;    // previous press state, for press-edge detection
     bool  swipe_active_ = false;  // a reveal swipe is in progress from the corner
     int   swipe_x0_ = 0, swipe_y0_ = 0;  // where the corner swipe started

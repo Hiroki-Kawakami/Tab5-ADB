@@ -34,6 +34,9 @@ extern "C" int main(void) {
     }
 
     while (1) {
+        // Sample the mouse + drain SDL events on the main thread; the background
+        // touch task reads only the snapshot this maintains (SDL is main-thread-only).
+        sdl_backend_pump_input();
         uint32_t sleep_time_ms = lv_timer_handler();
         // Present on the main thread: display flushes (incl. from the mirror decode
         // task) only mark the frame dirty, since SDL/Cocoa is main-thread-only.

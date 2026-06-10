@@ -79,6 +79,9 @@ void adb_app() {
     // so switching back to BSP_PIXEL_FORMAT_RGB565 here is the only change required.
     config.display.pixel_format = BSP_PIXEL_FORMAT_RGB888;
     config.usb.usb5v_en = true;
+    // Enable the touch controller INT so the DisplayManager touch task can block on
+    // it (interrupt-driven wake) and idle when untouched instead of polling forever.
+    config.touch.interrupt = true;
     ESP_ERROR_CHECK(bsp_init(&config));
 
     display_manager.init();

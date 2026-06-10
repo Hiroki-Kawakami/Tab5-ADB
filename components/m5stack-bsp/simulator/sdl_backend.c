@@ -48,13 +48,16 @@ static int  s_last_flushed;
  * sdl_backend_present() on the main thread. */
 static bool s_dirty;
 
-/* Synthetic touch for the sim harness. In headless mode there is no mouse, so
- * touch_read reports this injected pointer instead. State is touched only from
- * the main/LVGL thread (the harness pumps lv_timer_handler, which calls
- * touch_read), so no locking is needed. */
-static bool s_inject_pressed;
-static int  s_inject_x;
-static int  s_inject_y;
+/* Touch snapshot in PANEL coordinates. touch_read now runs on the DisplayManager
+ * touch task (a background thread), not the LVGL/main thread, so it must not call
+ * SDL (SDL event pump + mouse query are main-thread-only on macOS). Instead the
+ * MAIN thread samples the source and updates this snapshot under s_touch_mtx:
+ * sdl_backend_pump_input() reads the mouse (interactive), and the sim harness's
+ * inject_down/up writes it directly (headless). touch_read just copies it. */
+static SDL_mutex *s_touch_mtx;
+static bool s_touch_pressed;
+static int  s_touch_x;
+static int  s_touch_y;
 
 static bsp_display_t s_display;
 static bsp_touch_t   s_touch;
@@ -131,28 +134,28 @@ static esp_err_t display_set_brightness(bsp_display_t *self, int brightness) {
 
 /* MARK: bsp_touch vtable */
 
+/* Update the touch snapshot under the lock (any setter, any thread). */
+static void set_touch_snapshot(bool pressed, int px, int py) {
+    if (s_touch_mtx) SDL_LockMutex(s_touch_mtx);
+    s_touch_pressed = pressed;
+    if (pressed) { s_touch_x = px; s_touch_y = py; }
+    if (s_touch_mtx) SDL_UnlockMutex(s_touch_mtx);
+}
+
 static int touch_read(bsp_touch_t *self, bsp_touch_point_t *points, uint8_t max_points) {
     (void)self;
     if (max_points == 0) return 0;
-
-    /* Headless: no mouse — report the harness's injected pointer (already in
-     * panel coordinates, just clamped). */
-    if (s_headless) {
-        if (!s_inject_pressed) return 0;
-        int x = s_inject_x, y = s_inject_y;
-        if (x < 0) x = 0; else if (x > s_panel_w - 1) x = s_panel_w - 1;
-        if (y < 0) y = 0; else if (y > s_panel_h - 1) y = s_panel_h - 1;
-        points[0].x = x;
-        points[0].y = y;
-        points[0].strength = 1;
-        return 1;
-    }
-
-    pump_events();
-    int wx, wy;
-    Uint32 buttons = SDL_GetMouseState(&wx, &wy);
-    if (!(buttons & SDL_BUTTON(SDL_BUTTON_LEFT))) return 0;
-    window_to_panel(wx, wy, &points[0].x, &points[0].y);
+    /* Just copy the snapshot the main thread maintains — no SDL calls here, so
+     * this is safe from the background touch task. The sim is single-point. */
+    if (s_touch_mtx) SDL_LockMutex(s_touch_mtx);
+    bool pressed = s_touch_pressed;
+    int x = s_touch_x, y = s_touch_y;
+    if (s_touch_mtx) SDL_UnlockMutex(s_touch_mtx);
+    if (!pressed) return 0;
+    if (x < 0) x = 0; else if (x > s_panel_w - 1) x = s_panel_w - 1;
+    if (y < 0) y = 0; else if (y > s_panel_h - 1) y = s_panel_h - 1;
+    points[0].x = x;
+    points[0].y = y;
     points[0].strength = 1;
     return 1;
 }
@@ -183,6 +186,7 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
     s_bpp       = bsp_pixel_format_bytes(config->format);
     s_format    = config->format;
     s_headless  = getenv("SIMULATOR_HEADLESS") != NULL;
+    s_touch_mtx = SDL_CreateMutex();  /* guards the touch snapshot (cross-thread) */
 
     SDL_SetMainReady();
     /* Headless still needs the SDL timer (LVGL's tick source is SDL_GetTicks)
@@ -255,13 +259,29 @@ void sdl_backend_present(void) {
 }
 
 void sdl_backend_inject_down(int x, int y) {
-    s_inject_x = x;
-    s_inject_y = y;
-    s_inject_pressed = true;
+    set_touch_snapshot(true, x, y);
 }
 
 void sdl_backend_inject_up(void) {
-    s_inject_pressed = false;
+    set_touch_snapshot(false, 0, 0);
+}
+
+void sdl_backend_pump_input(void) {
+    /* Main thread only. Headless touch comes from inject_down/up (the harness), so
+     * there is nothing to sample here; just drain SDL events when there is a
+     * window so a window-close still quits. Interactive: pump events + sample the
+     * mouse into the snapshot the (background) touch_read consumes. */
+    if (s_headless) return;
+    pump_events();
+    int wx, wy;
+    Uint32 buttons = SDL_GetMouseState(&wx, &wy);
+    if (buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) {
+        int px, py;
+        window_to_panel(wx, wy, &px, &py);
+        set_touch_snapshot(true, px, py);
+    } else {
+        set_touch_snapshot(false, 0, 0);
+    }
 }
 
 const void *sdl_backend_snapshot(int *width, int *height, bsp_pixel_format_t *format) {

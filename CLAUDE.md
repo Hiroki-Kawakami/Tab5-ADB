@@ -316,7 +316,12 @@ drivers. Three layers:
   `bsp_display` + `bsp_touch` provider. Per-model differences (window title, panel
   geometry, pixel format, frame-buffer count, on-screen scale) are passed via
   `sdl_backend_config_t`, so every model's simulator board shares the same SDL
-  plumbing. SDL events are pumped inside `bsp_touch_read` (mouse → touch);
+  plumbing. `bsp_touch_read` is now called from a background touch task (see the
+  DisplayManager touch section), so SDL — which is main-thread-only on macOS — is
+  **not** touched there: the **main thread** drains events + samples the mouse into
+  a mutex-guarded touch snapshot in `sdl_backend_pump_input()` (called each
+  `main.cpp` loop iteration; the headless harness writes the snapshot directly via
+  `inject_down/up`), and `bsp_touch_read` just copies that snapshot.
   `set_brightness` is a no-op. SDL2 is linked to the `simulator` executable by
   `simulator/CMakeLists.txt`, so the backend just `#include <SDL2/SDL.h>`.
 - **Boards (`boards/<model>/`)** — `bsp_init()`/`bsp_restart()`, the only per-model
@@ -347,9 +352,10 @@ the shared sources once a simulator audio board exists.
   on the main thread. No scheduler bootstrap — host FreeRTOS tasks are pthreads
   (see "FreeRTOS on the host" below), so `main()` mirrors device `app_main()`.
 
-`adb_app()` in `app/adb_app.cpp` is the shared entry: it calls `bsp_init()`, sets
-up the LVGL display on the two `bsp_display` frame buffers + an indev on
-`bsp_touch_read`, and pushes the first screen. Panel is 720×1280 portrait
+`adb_app()` in `app/adb_app.cpp` is the shared entry: it calls `bsp_init()`, then
+`DisplayManager::init()` (which owns the LVGL display on the `bsp_display` frame
+buffers, the touch indev, and the mirror overlay compositor — see the
+DisplayManager touch section below), and pushes the first screen. Panel is 720×1280 portrait
 (`PANEL_W`/`PANEL_H` in `app/adb_app.hpp`); the pixel format is chosen at
 `bsp_init` (one line in `adb_app()`) and fixed for the boot — RGB888 by default
 (RGB565 also supported). RGB888 framebuffers hold LVGL's native **B,G,R** byte
@@ -358,6 +364,40 @@ overlay's PPA 565→888 composite, the mirror's JPEG decode via `BGR` rgb_order,
 the sim's `SDL_PIXELFORMAT_BGR24` texture + capture swap). The mirror decode and
 the DisplayManager honour `bsp_display_get_pixel_format()`, so the format is the
 single boot-time switch.
+
+### DisplayManager touch input (decoupled from LVGL, multi-touch, pushed)
+
+`DisplayManager` (`app/display_manager.{hpp,cpp}`) owns the touch indev, but the
+**hardware read is decoupled from the LVGL render loop**: a dedicated FreeRTOS
+**touch task** (started in `init()`) does all `bsp_touch_read`, so panel refresh /
+JPEG decode latency never delays input. The task is **interrupt-gated + idle-stop**:
+it blocks on `bsp_touch_wait_interrupt()` (device = the GT911/ST7123 INT semaphore;
+sim = a short `SDL_Delay`), then polls at `touch_poll_hz_` (default **60 Hz**,
+`set_touch_poll_hz()` at runtime; quantized to the 100 Hz tick), and after **3
+consecutive empty reads** stops polling and waits for the next INT again. This needs
+the touch controller INT, so `adb_app()` sets `config.touch.interrupt = true` in the
+`bsp_init` config: the GT911/ST7123 INT semaphore is created **only** when that flag
+is set, so a caller of `bsp_touch_wait_interrupt()` MUST enable it (otherwise the
+driver takes a NULL semaphore and asserts — `bsp_touch_wait_interrupt()` was
+previously never called by anyone).
+
+Each sample it (a) updates the **single-tap LVGL feed** (id 0 only — `lvgl_pressed_`
+/ `lvgl_pt_`, under `touch_mtx_`) that `indev_read_cb` now just *returns* (no
+`bsp_touch_read` on the LVGL thread), and (b) **pushes all contemporaneous points
+to a `DisplayManager::TouchListener`** (`on_touch(pts, count)`, count==0 = all
+lifted) — the multi-touch, **push not poll** path a feature registers with
+`set_touch_listener(weak_ptr)` (held weakly, Shell/Sync-style; **fires on the touch
+task thread**, so the listener marshals to LVGL itself). This replaces the old
+`touch_point()` poll (removed) + the mirror's `lv_timer`. The mirror's
+`ADBMirroringScreen` is a `TouchListener`: its `on_touch` runs the corner-swipe
+reveal detection.
+
+**Swipe-reveal masking (`consume_overlay_touch()`):** when the reveal swipe makes
+the hidden overlay visible, the *same* in-flight press would otherwise land as a tap
+on a freshly-shown overlay button. `consume_overlay_touch()` sets `lvgl_suppress_`,
+which masks the press from the indev until the finger lifts (the task clears it on
+the first all-lifted sample); the mirror calls it **before** `set_overlay_visible(true)`
+to close the visible-without-mask window.
 
 ### NVS — the `nvs_flash` C API, used directly
 
@@ -865,7 +905,12 @@ strip), End (pops to the device screen), and the six device buttons
 `agent_client().link()->tap_key(KEYCODE_*)` (§4.7 INPUT channel, fire-and-forget,
 straight from the LVGL event since `tap_key` is non-blocking and the link is live
 while streaming). **OpMode/DispMode stay stubs** pending their final UI. No timeout auto-hide: the in-strip **Hide** button hides it, and a **swipe out of
-the anchor corner** (`kCornerSwipe` hot zone, `poll_touch`) reveals it again.
+the anchor corner** (`kCornerSwipe` hot zone) reveals it again — detected in the
+screen's `on_touch` (`DisplayManager::TouchListener`, registered via
+`set_touch_listener` in `start_mirror_ui`, cleared on exit; fires on the touch
+task thread, see the DisplayManager touch section), **not** a poll timer. The
+reveal calls `consume_overlay_touch()` then `set_overlay_visible(true)` so the
+swipe gesture itself isn't delivered as a tap to the just-revealed buttons.
 On pop the previous screen's full re-render reclaims the framebuffers.
 `onExit()`/dtor stop the producer (`stop_mirror()` + `set_video_listener({})` — the
 agent link is kept connected) **before** joining the decode task, so it can't flush
@@ -939,15 +984,18 @@ boards reuse them:
   `move <x> <y>`, `up`, `quit`. `settle` pumps `lv_timer_handler` until no
   animation runs for a few frames (drains `lv_async_call` work), so capturing
   before the frame settles is the caller's mistake. `tap` = inject press →
-  hold a few frames → release → hold a few frames, so each edge spans an LVGL
-  indev read and the click registers; `down`/`move`/`up` build drags/swipes.
+  hold a few frames → release → hold a few frames, so each edge spans both a
+  background touch-task sample (which feeds the indev) and an LVGL indev read, and
+  the click registers; `down`/`move`/`up` build drags/swipes.
 
 Layering split: the **primitives** live in the SDL backend (the hardware seam) —
 `sdl_backend.c` honours `SIMULATOR_HEADLESS`, reports the harness's injected
-pointer from `touch_read` (`sdl_backend_inject_down`/`_up`; headless has no
-mouse), and exposes `sdl_backend_snapshot()` (the most-recently-flushed
-framebuffer + geometry/format, RGB565). State is main-thread-only (the harness
-pumps `lv_timer_handler`, which calls `touch_read`), so no locking. The
+pointer from `touch_read` (`sdl_backend_inject_down`/`_up` write the touch
+snapshot; headless has no mouse), and exposes `sdl_backend_snapshot()` (the
+most-recently-flushed framebuffer + geometry/format, RGB565). `touch_read` now
+runs on the DisplayManager touch task (a background thread), so the touch snapshot
+is **mutex-guarded** and the main thread maintains it (`sdl_backend_pump_input()`
+samples the mouse; the harness injects directly) — `touch_read` never calls SDL. The
 **orchestration** (script loop, `lv_timer_handler` pumping, JPEG encode via the
 already-linked libjpeg) lives in the platform-layer harness — so the BSP stays
 image-format-agnostic. The agent's loop becomes: write a script → run headless →

@@ -47,6 +47,12 @@ esp_err_t sdl_backend_create(const sdl_backend_config_t *config,
  * headless or when nothing has been flushed since the last present. */
 void sdl_backend_present(void);
 
+/* Sample the interactive touch source (mouse) into the touch snapshot, and drain
+ * SDL events. Call from the MAIN thread once per loop iteration: touch_read runs
+ * on a background task and must not touch SDL, so the main thread maintains the
+ * snapshot. No-op when headless (the harness injects the snapshot directly). */
+void sdl_backend_pump_input(void);
+
 /* Inject a synthetic touch for the sim harness (headless mode only — there is
  * no mouse). Coordinates are panel pixels. _down presses/holds (call again with
  * new coords to drag); _up releases. touch_read reports the injected pointer
