@@ -58,7 +58,10 @@ The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
 
 ## Layout
 
-- `app/` — application screens and logic (shared by device + simulator).
+- `app/` — application screens and logic (shared by device + simulator):
+  device home (summary header + screen preview + tools), Device Info / Metrics,
+  Mirroring, Shell, File Manager, Apps, Logcat. `app/test/` holds host unit
+  tests for the pure parsers (`app/test/run.sh`, no phone).
 - `components/` — shared components (both targets): `m5stack-bsp/` (board support
   behind the `bsp.h` API — device chip drivers in `devices/`, the SDL simulator
   backend in `simulator/`, and per-model bring-up in `boards/<model>/` with a

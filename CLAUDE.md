@@ -195,6 +195,7 @@ USB host). See `android-agent/README.md`.
 ```
 app/                         # SHARED  app logic / screens (a single component)
   terminal/                  #   ADBShellScreen's terminal widgets: term_view (cell-grid renderer) + term_keyboard
+  test/                      #   host unit tests (device_info parsers) + run.sh — no phone, no LVGL
 components/                  # SHARED  (both targets)
   m5stack-bsp/               #   board support (bsp_*) — device drivers + SDL sim backend
     inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_sd.h, bsp_types.h
@@ -828,13 +829,61 @@ outlive the transient screens) and implements `adb::ClientListener`. The `Client
 owns the connection lifecycle + reader task; the holder's only job is to marshal
 the reader-thread `on_state` callbacks to the LVGL thread with `lv_async_call`
 (marshalling is the app's job — the library never touches LVGL). On reaching
-Online it pushes `ADBDeviceScreen`, which shows banner-derived fields
-(model/name/device) and fetches a few live `getprop`s via a single
-`app::adb_client()->exec(...)` one-shot (its completion fires on the reader thread,
-so the label update is marshalled back to LVGL). The app pulls in no
+Online it pushes `ADBDeviceScreen`. The app pulls in no
 protocol/transport details, only the `adb` component's typed surface. On `Closed`
 the holder also calls `app::agent_client().on_adb_disconnected()` so the
 tab5adb-agent connection is torn down with the adb link.
+
+`ADBDeviceScreen`'s **summary header** is a tappable card: device name
+(`settings get global device_name`, falls back to the banner model), a
+"model • Android ver • marketed storage" sub-line, and battery (+%) / Wi-Fi /
+cellular status icons; tap → **`ADBDeviceInfoScreen`**. It renders immediately
+from the CNXN banner, then **one chained exec** (`---SEP---`-separated:
+device_name / version / `dumpsys battery` / `df -k /data` / `cmd wifi status` /
+`gsm.sim.state` / a `dumpsys telephony.registry` grep) fills the live fields —
+parsed **on the reader thread**, applied in one `lv_async_call`; `onAppear`
+fetches + starts a **10 s `lv_timer`** re-fetch (killed in `onDisappear`,
+in-flight flag prevents overlap). Parsing lives in **`app/device_info.{hpp,cpp}`**
+(`app::devinfo`) — pure string parsers/formatters (battery / wifi / cellular /
+df / meminfo / `/proc/stat` deltas / getprop), no LVGL/adb deps, **host-tested**
+with verbatim Pixel 10 fixtures via `nix develop -c app/test/run.sh` (the app's
+own test runner; `app/CMakeLists.txt` excludes `app/test/` from the source glob —
+those have their own `main()`). Icon/color mapping (lucide glyphs) is the
+UI-side companion `app/device_icons.hpp`. Parser contract: **a field that fails
+to parse is hidden/grey, never an error** (formats vary by vendor/version —
+e.g. a SIM-less device still reports LTE `level=3`, so the cellular icon gates on
+`gsm.sim.state` containing READY/LOADED, and `cmd wifi status`'s first `RSSI:`
+is the active one, before the MLO link list). Within the header card the child
+containers need `LV_OBJ_FLAG_CLICKABLE` *removed* or they swallow the tap
+(plain `lv_obj`s are clickable by default and the click doesn't bubble).
+
+**`ADBDeviceInfoScreen`** (`app/adb_device_info_screen.*`) — device detail:
+one chained exec (full `getprop` + meminfo grep + df + battery + wifi +
+telephony grep + `/proc/version` + `wm size`/`density` + max cpufreq/core count
++ `/proc/uptime`) parsed on the reader thread into a `DeviceInfoData`, then one
+marshalled rebuild: six **featured cards** in a 2-column wrap (SoC `ro.soc.*` /
+Memory marketed+available / Storage used-total with an `lv_bar` / Battery
+level•status•health•temp / Network wifi state+RSSI+IP & cellular state / System
+Android ver•SDK•patch•build•kernel), a **Performance Metrics** button (→
+`ADBMetricsScreen`), and a key-value list of the miscellaneous fields
+(manufacturer…fingerprint…timezone; empty values skipped). Spinner until the
+exec lands (AppDetail pattern).
+
+**`ADBMetricsScreen`** (`app/adb_metrics_screen.*`) — live CPU/memory: **one
+streaming shell** runs a device-side loop (`while true; do echo @@@; grep ^cpu
+/proc/stat; …; sleep 1; done`) instead of an exec per tick — the device's
+`sleep 1` is the tick, no per-sample fork/stream-open. Logcat-pattern threading
+(`on_shell_data` → capped FIFO + one coalesced `lv_async_call`; frames split on
+the `@@@` marker on the LVGL thread, **latest complete frame wins**). CPU % =
+delta of consecutive `/proc/stat` samples (`devinfo::cpu_usage`; `top` output is
+too vendor-dependent): total % + a 60-point `lv_chart` (`lv_chart_set_axis_range`
+/ `set_all_values` — the LVGL ≥9.5 names, both targets) + per-core `lv_bar` rows
+built on the first sample, memory used/total + %-chart, load average + battery
+temp rows. `onDisappear` closes the shell (USB traffic stops; `expected_closes_`
+distinguishes our close from a dying stream), `onAppear` reopens with a fresh
+baseline. All three verified headless against a real Android device:
+`./run.sh simverify simulator/verify/device_summary.txt` / `device_info.txt` /
+`metrics.txt` (the last exercises the close-on-leave + reopen-on-reentry cycle).
 
 `ADBDeviceScreen`'s **Shell** button pushes **`ADBShellScreen`**
 (`app/adb_shell_screen.*`) — a real VT terminal over `Client::open_shell()`,

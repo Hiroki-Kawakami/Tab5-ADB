@@ -1,0 +1,23 @@
+# Metrics screen: Connect -> Device Info -> Performance Metrics. The streaming
+# shell ticks at 1 s; the first frame only seeds the /proc/stat baseline, so
+# wait several ticks for the charts to fill. Then back out and re-enter to
+# exercise the stream close (onDisappear) + reopen-with-fresh-baseline path.
+# Needs a real phone plugged into the PC.
+settle
+tap 360 640
+wait 6000
+settle
+tap 360 90
+wait 3000
+settle
+tap 360 963
+settle
+wait 8000
+capture simulator/verify/out/metrics.jpg
+tap 60 60
+settle
+tap 360 963
+settle
+wait 4000
+capture simulator/verify/out/metrics_reentry.jpg
+quit

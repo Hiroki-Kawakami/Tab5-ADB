@@ -8,14 +8,19 @@
 #include "adb.hpp"  // adb::Client
 #include "adb_app.hpp"
 #include "adb_app_manager_screen.hpp"
+#include "adb_device_info_screen.hpp"
 #include "adb_file_manager_screen.hpp"
 #include "adb_logcat_screen.hpp"
 #include "adb_mirroring_screen.hpp"
 #include "adb_shell_screen.hpp"
+#include "device_icons.hpp"
+#include "device_info.hpp"
 #include "screen_manager.hpp"
 #include "resources/resources.h"
 
 namespace {
+
+namespace devinfo = app::devinfo;
 
 // Extract a value from a banner "device::key=val;key=val;..." string.
 std::string banner_field(const std::string &banner, const std::string &key) {
@@ -27,6 +32,42 @@ std::string banner_field(const std::string &banner, const std::string &key) {
     pos += needle.size();
     auto end = body.find(';', pos);
     return body.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+}
+
+// One chained exec fills the whole summary (AppManager-style ---SEP--- split).
+const char *kSummaryCmd =
+    "settings get global device_name; echo ---SEP---; "
+    "getprop ro.build.version.release; echo ---SEP---; "
+    "dumpsys battery; echo ---SEP---; "
+    "df -k /data; echo ---SEP---; "
+    "cmd wifi status; echo ---SEP---; "
+    "getprop gsm.sim.state; echo ---SEP---; "
+    "dumpsys telephony.registry | grep -E 'mServiceState=|mSignalStrength=' | head -4";
+
+struct Summary {
+    std::string name;     // user-set device name ("" = fall back to model)
+    std::string version;  // Android release
+    devinfo::Battery battery;
+    devinfo::Storage storage;
+    devinfo::Wifi wifi;
+    devinfo::Cellular cell;
+};
+
+Summary parse_summary(const std::string &out) {
+    Summary s;
+    auto sec = devinfo::split_sections(out);
+    auto section = [&sec](size_t i) -> const std::string & {
+        static const std::string kEmpty;
+        return i < sec.size() ? sec[i] : kEmpty;
+    };
+    s.name = devinfo::first_line(section(0));
+    if (s.name == "null") s.name.clear();
+    s.version = devinfo::first_line(section(1));
+    s.battery = devinfo::parse_dumpsys_battery(section(2));
+    s.storage = devinfo::parse_df(section(3));
+    s.wifi = devinfo::parse_wifi_status(section(4));
+    s.cell = devinfo::parse_cellular(section(5), section(6));
+    return s;
 }
 
 }  // namespace
@@ -58,6 +99,15 @@ void ADBDeviceScreen::onAppear() {
     // (Mirroring/Shell/...).
     preview_ = ScreencapPreview::create(preview_image_, 360, 860);
     preview_->start();
+
+    // Live summary fields: fetch now, then every 10 s while the screen shows
+    // (battery and signal move; returning from a sub-screen refreshes too).
+    refreshSummary();
+    summary_timer_ = lv_timer_create(
+        [](lv_timer_t *t) {
+            static_cast<ADBDeviceScreen *>(lv_timer_get_user_data(t))->refreshSummary();
+        },
+        10000, this);
 }
 
 void ADBDeviceScreen::onDisappear() {
@@ -65,16 +115,20 @@ void ADBDeviceScreen::onDisappear() {
         preview_->stop();
         preview_.reset();
     }
+    if (summary_timer_) {
+        lv_timer_delete(summary_timer_);
+        summary_timer_ = nullptr;
+    }
 }
 
 void ADBDeviceScreen::createHeader() {
-    // ---- Device summary, parsed from the CNXN banner (no live ADB calls) ----
+    // ---- Device summary: banner fields render immediately, live fields (name /
+    // battery / network / storage) land via refreshSummary(). ----
     adb::Client *client = app::adb_client();
     static const std::string kNoBanner;
     const std::string &banner = client ? client->banner() : kNoBanner;
-    std::string model = banner_field(banner, "ro.product.model");
-    if (model.empty()) model = "ADB Device";
-    std::string device = banner_field(banner, "ro.product.device");
+    model_ = banner_field(banner, "ro.product.model");
+    if (model_.empty()) model_ = "ADB Device";
 
     if (header_) lv_obj_delete(header_);
     header_ = lv_obj_create(root_);
@@ -83,21 +137,113 @@ void ADBDeviceScreen::createHeader() {
     lv_obj_add_flag(header_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(header_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(header_, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_add_event_fn(header_, LV_EVENT_CLICKED, [](lv_event_t *) {
-        // screen_manager.push(std::make_unique<PlaceholderScreen>("Device Info"));
-    });
-    lv_obj_set_flex_flow(header_, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(header_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_color(header_, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+    lv_obj_add_event_fn(header_, LV_EVENT_CLICKED, [](lv_event_t *) {
+        screen_manager.push(std::make_shared<ADBDeviceInfoScreen>());
+    });
 
-    auto label = lv_label_create(header_);
-    lv_label_set_text(label, model.c_str());
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    auto text_box = lv_obj_create(header_);
+    lv_obj_remove_style_all(text_box);
+    lv_obj_remove_flag(text_box, LV_OBJ_FLAG_CLICKABLE);  // taps land on header_
+    lv_obj_set_size(text_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(text_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(text_box, 4, 0);
+    lv_obj_set_flex_grow(text_box, 1);
 
-    auto chevron = lv_label_create(header_);
+    name_label_ = lv_label_create(text_box);
+    lv_label_set_text(name_label_, model_.c_str());
+    lv_obj_set_style_text_font(name_label_, &lv_font_montserrat_28, 0);
+    lv_obj_set_width(name_label_, LV_PCT(100));
+    lv_label_set_long_mode(name_label_, LV_LABEL_LONG_DOT);
+
+    sub_label_ = lv_label_create(text_box);
+    lv_label_set_text(sub_label_, model_.c_str());
+    lv_obj_set_style_text_font(sub_label_, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(sub_label_, lv_color_hex(0x888888), 0);
+    lv_obj_set_width(sub_label_, LV_PCT(100));
+    lv_label_set_long_mode(sub_label_, LV_LABEL_LONG_DOT);
+
+    auto status_box = lv_obj_create(header_);
+    lv_obj_remove_style_all(status_box);
+    lv_obj_remove_flag(status_box, LV_OBJ_FLAG_CLICKABLE);  // taps land on header_
+    lv_obj_set_size(status_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(status_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(status_box, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(status_box, 12, 0);
+
+    auto status_icon = [&status_box](void) {
+        auto icon = lv_label_create(status_box);
+        lv_obj_set_style_text_font(icon, R.font.lucide_40, 0);
+        lv_obj_set_style_text_color(icon, devinfo::icon_inactive_color(), 0);
+        lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);  // shown once data lands
+        return icon;
+    };
+    batt_icon_ = status_icon();
+    batt_pct_ = lv_label_create(status_box);
+    lv_obj_set_style_text_font(batt_pct_, &lv_font_montserrat_20, 0);
+    lv_obj_add_flag(batt_pct_, LV_OBJ_FLAG_HIDDEN);
+    wifi_icon_ = status_icon();
+    cell_icon_ = status_icon();
+
+    auto chevron = lv_label_create(status_box);
     lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
     lv_obj_set_style_text_font(chevron, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(chevron, lv_color_hex(0xe0e0e0), 0);
+    lv_obj_set_style_text_color(chevron, lv_color_hex(0xc0c0c0), 0);
+}
+
+void ADBDeviceScreen::refreshSummary() {
+    adb::Client *client = app::adb_client();
+    if (!client || summary_inflight_) return;
+    summary_inflight_ = true;
+    client->exec(kSummaryCmd, [self = shared_from_this(), this](adb::Error err,
+                                                                const std::string &out) {
+        // Reader thread: parse here, hand the LVGL thread a finished struct.
+        auto sum = std::make_shared<Summary>();
+        bool ok = err == adb::Error::Ok && !out.empty();
+        if (ok) *sum = parse_summary(out);
+        lv_async_call([self, this, sum, ok]() {
+            if (exited()) return;
+            summary_inflight_ = false;
+            if (!ok) return;  // keep the previous (or banner placeholder) render
+
+            lv_label_set_text(name_label_,
+                              sum->name.empty() ? model_.c_str() : sum->name.c_str());
+
+            // "Pixel 10 • Android 16 • 128 GB" — skip the parts that didn't parse.
+            std::string sub = model_;
+            if (!sum->version.empty()) sub += " \xE2\x80\xA2 Android " + sum->version;
+            if (int gb = devinfo::marketed_storage_gb(sum->storage.total_kb))
+                sub += " \xE2\x80\xA2 " + std::to_string(gb) + " GB";
+            lv_label_set_text(sub_label_, sub.c_str());
+
+            if (sum->battery.level >= 0) {
+                lv_label_set_text(batt_icon_, devinfo::battery_icon(sum->battery));
+                lv_obj_set_style_text_color(batt_icon_, devinfo::battery_color(sum->battery), 0);
+                lv_label_set_text_fmt(batt_pct_, "%d%%", sum->battery.level);
+                lv_obj_remove_flag(batt_icon_, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(batt_pct_, LV_OBJ_FLAG_HIDDEN);
+            }
+
+            lv_label_set_text(wifi_icon_, devinfo::wifi_icon(sum->wifi));
+            lv_obj_set_style_text_color(wifi_icon_,
+                                        sum->wifi.state == devinfo::Wifi::State::Connected
+                                            ? devinfo::icon_active_color()
+                                            : devinfo::icon_inactive_color(), 0);
+            lv_obj_remove_flag(wifi_icon_, LV_OBJ_FLAG_HIDDEN);
+
+            // No SIM -> no cellular icon at all; out of service -> greyed zero bars.
+            if (sum->cell.sim_present) {
+                lv_label_set_text(cell_icon_, devinfo::cellular_icon(sum->cell));
+                lv_obj_set_style_text_color(cell_icon_,
+                                            sum->cell.in_service ? devinfo::icon_active_color()
+                                                                 : devinfo::icon_inactive_color(), 0);
+                lv_obj_remove_flag(cell_icon_, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(cell_icon_, LV_OBJ_FLAG_HIDDEN);
+            }
+        });
+    });
 }
 
 void ADBDeviceScreen::createPreviewContainer() {

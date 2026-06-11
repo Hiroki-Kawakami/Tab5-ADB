@@ -1,0 +1,30 @@
+# Device Info screen: Connect -> tap the summary header -> featured cards +
+# Performance Metrics button + misc key-value list (one chained exec fills
+# everything). Scroll down for the misc list. Needs a real phone on the PC.
+settle
+tap 360 640
+wait 6000
+settle
+tap 360 90
+wait 3000
+settle
+capture simulator/verify/out/device_info_top.jpg
+down 360 1100
+wait 100
+move 360 800
+wait 100
+move 360 300
+wait 100
+up
+settle
+capture simulator/verify/out/device_info_mid.jpg
+down 360 1100
+wait 100
+move 360 800
+wait 100
+move 360 200
+wait 100
+up
+settle
+capture simulator/verify/out/device_info_bottom.jpg
+quit

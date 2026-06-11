@@ -9,6 +9,8 @@
 file(GLOB_RECURSE APP_SRCS
      "${CMAKE_CURRENT_SOURCE_DIR}/*.c"
      "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+# app/test/ holds host-only unit tests with their own main() (app/test/run.sh).
+list(FILTER APP_SRCS EXCLUDE REGEX "/test/")
 
 idf_component_register(
     SRCS ${APP_SRCS}
