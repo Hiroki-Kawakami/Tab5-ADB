@@ -194,6 +194,7 @@ USB host). See `android-agent/README.md`.
 
 ```
 app/                         # SHARED  app logic / screens (a single component)
+  terminal/                  #   ADBShellScreen's terminal widgets: term_view (cell-grid renderer) + term_keyboard
 components/                  # SHARED  (both targets)
   m5stack-bsp/               #   board support (bsp_*) — device drivers + SDL sim backend
     inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_types.h
@@ -216,6 +217,8 @@ components/                  # SHARED  (both targets)
     src/  test/              #     impl + host HELLO test (test_hello.cpp)
   jpeg_decode_enhanced/      #   enhanced P4 HW JPEG decode (full-range CSC, strip pipeline, PPA); ESP_PLATFORM-branched
     include/  src/           #     Layer 1 (jpeg_decode_enhanced.h) + Layer 2 (jpeg_ppa_pipeline.h); _sim.c = libjpeg/SW-PPA-backed (see its README)
+  term_emu/                  #   VT100/xterm-subset terminal emulator (bytes in -> Cell grid out); no LVGL/adb deps
+    inc/  src/  test/        #     term_emu.hpp; vt_parser.cpp (FSM) + term_emu.cpp (grid); host test (run.sh, no phone)
 esp32p4/                     # DEVICE build root (IDF project)
   main/                      #   entry point (app_main + device LVGL runtime via esp_lvgl_port)
 simulator/                   # SIMULATOR build root (see below)
@@ -809,28 +812,63 @@ protocol/transport details, only the `adb` component's typed surface. On `Closed
 the holder also calls `app::agent_client().on_adb_disconnected()` so the
 tab5adb-agent connection is torn down with the adb link.
 
-`ADBDeviceScreen` has an **Open Terminal** button that pushes **`ADBShellScreen`**
-(`app/adb_shell_screen.*`) — an interactive terminal over `Client::open_shell()`.
-The screen **is** the `adb::ShellListener`: device output streams into a read-only
-monospace (`lv_font_unscii_16`) `lv_textarea`, and an input `lv_textarea` + an
-on-screen `lv_keyboard` send a line per OK keypress (`shell_->write(line+"\n")`;
-the PTY echoes input back, so the UI does **not** local-echo). Two threading
-concerns the screen handles, both from the cross-cutting `adb` contract: (1) Shell
-callbacks fire on the **reader thread**, so `on_shell_data`/`on_shell_close`
-sanitize (strip CR + ANSI/VT escapes the bitmap font can't render) and marshal the
-widget update with `lv_async_call`; (2) the screen (the listener) can be destroyed
-on `pop()`, so `onExit()` just runs `shell_->close()` (the shell holds the
-listener as a `weak_ptr` — the screen passes a `shared_ptr` aliasing
-`shared_from_this()`, and the weak ref expires when the screen frees).
-Each marshalled lambda captures `self = shared_from_this()` (keeping the screen
-alive until it drains on the LVGL thread) and skips when the base
-`Screen::exited()` flag is set, so an update already queued before teardown skips
-the freed widgets — race-free because teardown and the `lv_async_call` body both run
-on the LVGL thread. (`ScreenManager` owns screens via `shared_ptr` and sets
-`exited_` right before `onExit()` — see the screen_manager component.)
-`LV_FONT_UNSCII_16` is enabled
-on both targets for the terminal (sim `lv_conf.h`; device `sdkconfig`/
-`sdkconfig.defaults`). v1 is line-oriented (touch keyboard), not a raw VT.
+`ADBDeviceScreen`'s **Shell** button pushes **`ADBShellScreen`**
+(`app/adb_shell_screen.*`) — a real VT terminal over `Client::open_shell()`,
+light-mode (FileManager-style 120px nav bar) with a **direct-typing UX**: there
+is no input line — the on-screen keys send bytes straight to the PTY and the
+PTY's echo is the feedback. Three pieces:
+- **`components/term_emu`** — a pure-C++ (no LVGL/adb) VT100/xterm-subset
+  terminal emulator: bytes in, 72×42 `Cell` grid out. Paul-Williams-style FSM
+  (`src/vt_parser.cpp`) + grid ops (`src/term_emu.cpp`): cursor/erase/
+  insert-delete CSI set, DECSTBM regions, SGR (16 + bright + 38/48;5 256-color,
+  default fg/bg as attr bits), DEC modes (DECCKM, DECAWM with deferred wrap,
+  ?25 cursor, ?1049 alt screen), DSR/DA responses via a responder callback,
+  OSC/DCS discarded, `ESC ( 0` DEC graphics → ASCII approximations, UTF-8
+  decoded to '?' placeholder cells (wide CJK = 2 cells) so the cursor column
+  tracks the device's wcwidth. ~1000-line PSRAM scrollback
+  (`heap_caps_malloc(MALLOC_CAP_SPIRAM)`, row-pointer rotation on scroll).
+  Single-threaded by design — feed it on the LVGL thread only. Host unit test:
+  `nix develop -c components/term_emu/test/run.sh` (no phone; includes a
+  chunk-split fuzz that catches FSM state lost across feed() boundaries).
+- **`app/terminal/term_view`** — the renderer: a plain `lv_obj` +
+  `LV_EVENT_DRAW_MAIN` drawing bg-runs (`lv_draw_fill`) and (fg,underline)-
+  grouped text runs (`lv_draw_label`, **`text_local=1` mandatory** — LVGL
+  renders draw tasks after the event returns, a stack buffer would dangle).
+  Hack 16px cells (`R.font.hack_16`, **10×17px** — LVGL rounds the fmt_txt
+  advance per glyph, `(154+8)>>4`, so the grid pitch is 10 not 154/16; the
+  vendored font's `.fallback` is stripped to NULL, montserrat metrics would
+  break the grid and the emulator never emits non-ASCII anyway). Dirty rows →
+  `lv_obj_invalidate_area` (absolute coords); draw walks only clip-intersecting
+  rows. Light 256-color palette (Tango-ish 16 base, 7/15 darkened to grays so
+  "white" text survives the white bg); bold→bright, dim→mix toward bg, reverse
+  swaps. Block cursor with a 530ms blink timer (invalidates one cell). Swipe
+  down = scrollback (LV_EVENT_PRESSING vect accumulation; viewport stays pinned
+  while output arrives by growing the offset with scrollback_used()).
+- **`app/terminal/term_keyboard`** — a raw `lv_buttonmatrix` (NOT `lv_keyboard`
+  — that's textarea-coupled), 3 static maps (base/Shift/Sym), Esc/Tab/arrows/
+  Home..Del, sticky one-shot Ctrl (`c & 0x1f`), Shift one-shot, Sym latched.
+  Arrows/Home/End honour DECCKM (CSI vs SS3) via a query into the emulator.
+  Keys auto-repeat (press-time `VALUE_CHANGED` + `LONG_PRESSED_REPEAT`); **the
+  modifiers are deliberately NOT `CHECKABLE`** — lv_buttonmatrix toggles
+  CHECKED on *release*, after the press-time VALUE_CHANGED the handler keys
+  off, so the armed state is tracked in the class and CHECKED is set/cleared
+  manually for the visual.
+The screen **is** the `adb::ShellListener`: `on_shell_data` (reader thread)
+appends to the capped (~256KB) `pending_out_` FIFO and coalesces one
+`lv_async_call` flush that runs `TermEmu::feed()` + `TermView::refresh()` on
+the LVGL thread (on overflow the flush feeds CAN to re-ground the parser, then
+an `[output dropped]` marker). Key bytes go `shell_->write()` directly
+(non-blocking; QueueFull = key dropped) after `snap_to_live()`. v1 `shell:` has
+no window-size/TERM channel, so `build()` bootstraps the PTY in-band:
+`stty rows 42 columns 72; export TERM=xterm-256color; clear` as the first write
+(pre-open writes queue until the stream opens; the echo is wiped by the
+`clear`). Teardown is the standard pattern: `onExit()` → `shell_->close()`,
+weak listener, `self = shared_from_this()` + `Screen::exited()` guards in every
+marshalled lambda. Verified headless against a real Android device
+(`./run.sh simverify simulator/verify/terminal.txt`): prompt, `ls --color`,
+`top` (full-screen redraw + reverse video, q back to prompt), getprop +
+swipe-scrollback, Ctrl+C (`^C` + exit code 130). Device-side flash-and-check
+(scroll-burst redraw cost) is still pending.
 
 `ADBDeviceScreen`'s **File Manager** button pushes **`ADBFileManagerScreen`**
 (`app/adb_file_manager_screen.*`) — a virtual root that lists the available

@@ -1,0 +1,76 @@
+# ADBShellScreen terminal E2E: light-mode VT terminal over a real PTY.
+# Needs a real phone plugged into the PC (the sim adb transport is libusb).
+# Connect -> device screen -> Shell, then drive the on-screen keyboard by
+# tapping keys (R2 q..p y=972, R3 a..l y=1059, R4 z..' y=1146, R5 y=1232;
+# Enter=(674,1059), Ctrl=(46,1059), space=(340,1232)).
+settle
+tap 360 640
+wait 6000
+settle
+tap 551 258
+wait 3000
+settle
+# stty/TERM bootstrap done; prompt up
+capture simulator/verify/out/terminal_open.jpg
+# type: ls --color /   (SGR colors on the light palette)
+tap 600 1059
+tap 180 1059
+tap 340 1232
+tap 132 1232
+tap 132 1232
+tap 248 1146
+tap 623 972
+tap 600 1059
+tap 623 972
+tap 311 972
+tap 340 1232
+tap 198 1232
+tap 674 1059
+wait 1500
+settle
+capture simulator/verify/out/terminal_ls_color.jpg
+# type: top   (full-screen CUP/ED redraws, reverse-video header, 72x42 stty)
+tap 373 972
+tap 623 972
+tap 685 972
+tap 674 1059
+wait 4000
+settle
+capture simulator/verify/out/terminal_top.jpg
+# q quits top; prompt continues below its last frame
+tap 123 972
+wait 1500
+settle
+# type: getprop   (long output -> scrollback history)
+tap 360 1059
+tap 248 972
+tap 373 972
+tap 685 972
+tap 311 972
+tap 623 972
+tap 685 972
+tap 674 1059
+wait 2500
+settle
+# swipe down to scroll back into history (needs pumped frames between moves)
+down 360 300
+wait 50
+move 360 380
+wait 50
+move 360 460
+wait 50
+move 360 560
+wait 50
+move 360 660
+wait 50
+up
+settle
+capture simulator/verify/out/terminal_scrollback.jpg
+# Ctrl (armed, key highlights) + c -> SIGINT on the PTY, snaps back to live
+tap 46 1059
+wait 300
+tap 248 1146
+wait 800
+settle
+capture simulator/verify/out/terminal_ctrl_c.jpg
+quit

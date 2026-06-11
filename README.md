@@ -70,7 +70,10 @@ The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
   and exposes `Client`/`Shell`/`Sync`; see `components/adb/README.md`). For screen
   mirroring: `agent_link/` (the Tab5 end of the `tab5adb-agent` wire protocol) and
   `jpeg_decode_enhanced/` (enhanced P4 HW JPEG decode — full-range YUV→RGB,
-  strip pipelining, PPA pipeline; libjpeg-backed in the simulator).
+  strip pipelining, PPA pipeline; libjpeg-backed in the simulator). For the
+  terminal: `term_emu/` (a VT100/xterm-subset terminal emulator — PTY bytes in,
+  cell grid out; no LVGL/adb deps, host unit test via its `test/run.sh`) behind
+  the **Shell** screen's grid renderer + on-screen keyboard (`app/terminal/`).
 - `esp32p4/` — device build root (IDF project): `main/` is the entry point
   (`app_main` + device LVGL runtime via esp_lvgl_port).
 - `simulator/` — host SDL2/LVGL build of `app/`: `platform/` is the SDL/LVGL

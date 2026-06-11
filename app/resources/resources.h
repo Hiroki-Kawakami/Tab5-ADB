@@ -12,6 +12,7 @@ struct Resources {
     } icon;
     struct {
         const lv_font_t *lucide_40;
+        const lv_font_t *hack_16;  // monospace terminal font (ASCII, 10x17px cells)
     } font;
 };
 extern const struct Resources R;
