@@ -981,6 +981,42 @@ snapshot, so drag scripts need `wait`s between steps to be sampled as a drag) �
 `com.tab5adb.testapp` on the phone; clean up with `adb uninstall
 com.tab5adb.testapp`).
 
+`ADBDeviceScreen`'s **Logcat** button pushes **`ADBLogcatScreen`**
+(`app/adb_logcat_screen.*`) — a live `logcat` viewer over a streaming
+`Client::open_shell(listener, "logcat -v threadtime -T 500")` session. Lines
+live in a **PSRAM `LogRing`** (2 MB byte pool + 16 K line descriptors, oldest
+evicted first; a line never splits across the pool end — the tail is abandoned
+on wrap, and lines *ahead of the write offset are always the oldest*, which is
+what keeps head-order eviction == offset-order overwrite). Every line gets a
+monotonic `seq`, so the filtered view (a `deque<seq>`) and scroll anchoring
+survive eviction. Threading is the ShellScreen pattern: `on_shell_data` (reader
+thread) appends to the capped FIFO + coalesces one `lv_async_call`; the flush
+splits/parses (threadtime level + timestamp) and appends to the ring **on the
+LVGL thread only** (no ring lock). The list is the AppManager-style **recycled
+row pool** (24 px hack_16 rows, extent child, rebind on scroll) and rendering is
+**throttled**: appends only set `dirty_`, a 100 ms `lv_timer` does the
+extent/scroll/rebind pass; at the bottom the view follows the tail, scrolling up
+detaches (floating jump-to-live button returns), and front-evicted rows pull
+`scroll_y` back so a scrolled-back view stays anchored. Filtering is
+client-side (the buffer always keeps everything): min-level chips (V/D/I/W/E,
+selected chip wears the level color) + a substring `lv_textarea` whose
+`lv_keyboard` applies on READY/DEFOCUSED — two LVGL gotchas baked in:
+the keyboard widget pre-sets `ALIGN_BOTTOM_MID`, so `lv_obj_set_pos` *offsets
+from the bottom* (re-`align` it instead), and it drops `CLICK_FOCUSABLE`, so
+typing never updates the indev's last-pressed and re-tapping the still-focused
+textarea sends **no FOCUSED** — hook `LV_EVENT_CLICKED` too. Tapping a (clipped)
+row shows the full line in a modal. **Pause** closes the shell (USB traffic
+stops too; `expected_closes_` tells our own closes from a dying logcat);
+**resume** reopens with `-T '<last timestamp>'` so the paused span backfills
+(same-ms lines may duplicate; logcat re-emits its `--------- beginning of ...`
+buffer headers mid-stream). **Save** snapshots the ring into a PSRAM buffer on
+the LVGL thread and a one-shot FreeRTOS task writes `/sd/logcat_NNN.txt`
+(no RTC → sequence number, not a date; the job owns the buffer, InstallJob
+style). Verified E2E headless against a real Android device
+(`./run.sh simverify simulator/verify/logcat.txt` — live tail, both filters via
+on-screen-keyboard taps, pause/resume backfill, scrollback + jump, modal, and a
+real save into `simulator/sdcard/`; delete the `logcat_*.txt` it leaves there).
+
 `ADBDeviceScreen`'s **Mirroring** button pushes **`ADBMirroringScreen`**
 (`app/adb_mirroring_screen.*`) — the live screen-mirror viewer over `agent_link`.
 The screen **is** the `agent_link::VideoListener`; the agent lifecycle (jar push +

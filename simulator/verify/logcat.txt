@@ -1,0 +1,87 @@
+# Logcat viewer E2E: Connect -> device screen -> Logcat. Live tail, the
+# minimum-level filter, the text filter (on-screen keyboard: row1 y=900
+# q..p x=96..597, row2 y=1007 a..l x=131..572 Enter=657, row3 y=1113
+# z..m x=152..505, row4 y=1220 check=657; backspace=(671,900)), pause/resume,
+# the full-line modal, scrollback + jump-to-live, and save-to-SD (writes
+# logcat_NNN.txt under simulator/sdcard/ via sd_redirect — delete it after).
+# Needs a real phone plugged into the PC.
+settle
+tap 360 640
+wait 6000
+settle
+tap 551 546
+wait 4000
+settle
+capture simulator/verify/out/logcat_live.jpg
+# min level = W
+tap 256 156
+wait 500
+settle
+capture simulator/verify/out/logcat_level_w.jpg
+# back to V
+tap 52 156
+wait 500
+settle
+# text filter: focus, type "adbd", apply with the keyboard checkmark
+tap 530 156
+wait 300
+settle
+tap 131 1007
+tap 241 1007
+tap 387 1113
+tap 241 1007
+tap 657 1220
+wait 500
+settle
+capture simulator/verify/out/logcat_text_filter.jpg
+# clear the filter: backspace x4, apply
+tap 530 156
+wait 300
+tap 671 900
+tap 671 900
+tap 671 900
+tap 671 900
+tap 657 1220
+wait 500
+settle
+# pause the stream (nav icon flips to play)
+tap 468 60
+wait 1000
+settle
+capture simulator/verify/out/logcat_paused.jpg
+# tapping a row shows the full line in a modal (stable while paused)
+tap 360 400
+wait 300
+settle
+capture simulator/verify/out/logcat_row_modal.jpg
+tap 360 712
+wait 300
+settle
+# resume: backfills the paused span from the last timestamp
+tap 468 60
+wait 2000
+settle
+capture simulator/verify/out/logcat_resumed.jpg
+# drag down into scrollback: tail-follow detaches, jump button appears
+down 360 300
+wait 50
+move 360 450
+wait 50
+move 360 600
+wait 50
+move 360 750
+wait 50
+up
+settle
+capture simulator/verify/out/logcat_scrollback.jpg
+# jump back to the live tail
+tap 656 1216
+wait 300
+settle
+capture simulator/verify/out/logcat_jump_live.jpg
+# save the buffer to the SD card
+tap 660 60
+wait 2000
+settle
+capture simulator/verify/out/logcat_saved.jpg
+quit
