@@ -1,0 +1,21 @@
+# App detail: Connect -> Apps -> first user app row -> info + actions, then
+# the Clear data confirm modal (Cancel — nothing is mutated on the phone).
+# Needs a real phone plugged into the PC.
+settle
+tap 360 640
+wait 6000
+settle
+tap 551 450
+wait 3000
+settle
+tap 360 232
+wait 2000
+settle
+capture simulator/verify/out/appdetail.jpg
+tap 360 973
+settle
+capture simulator/verify/out/appdetail_modal.jpg
+tap 220 698
+settle
+capture simulator/verify/out/appdetail_cancel.jpg
+quit

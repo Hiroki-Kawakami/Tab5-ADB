@@ -7,6 +7,7 @@
 
 #include "adb.hpp"  // adb::Client
 #include "adb_app.hpp"
+#include "adb_app_manager_screen.hpp"
 #include "adb_file_manager_screen.hpp"
 #include "adb_mirroring_screen.hpp"
 #include "adb_shell_screen.hpp"
@@ -150,7 +151,9 @@ void ADBDeviceScreen::createToolsContainer() {
     tool_button(LUCIDE_FOLDER_CLOSED, "File Manager", [](lv_event_t*){
         screen_manager.push(std::make_shared<ADBFileManagerScreen>());
     });
-    tool_button(LUCIDE_LAYOUT_GRID, "Apps", [](lv_event_t*){});
+    tool_button(LUCIDE_LAYOUT_GRID, "Apps", [](lv_event_t*){
+        screen_manager.push(std::make_shared<ADBAppManagerScreen>());
+    });
     tool_button(LUCIDE_LOGS, "Logcat", [](lv_event_t*){});
     tool_button(LUCIDE_POWER, "Power Menu", [](lv_event_t*){});
     tool_button(LUCIDE_UNPLUG, "Disconect", [](lv_event_t*){});

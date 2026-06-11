@@ -1,0 +1,15 @@
+# App manager list: Connect -> device screen -> Apps; User list, then the
+# System filter. Needs a real phone plugged into the PC.
+settle
+tap 360 640
+wait 6000
+settle
+tap 551 450
+wait 3000
+settle
+capture simulator/verify/out/apps_user.jpg
+tap 530 156
+wait 1000
+settle
+capture simulator/verify/out/apps_system.jpg
+quit

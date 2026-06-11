@@ -1,0 +1,23 @@
+# APK install E2E: Connect -> Apps -> Install (nav) -> pick testapp.apk off
+# the SD card -> confirm -> push + pm install -> "Install complete." Really
+# installs com.tab5adb.testapp on the phone — uninstall afterwards with
+#   adb uninstall com.tab5adb.testapp
+# Needs a real phone plugged into the PC.
+settle
+tap 360 640
+wait 6000
+settle
+tap 551 450
+wait 3000
+settle
+tap 564 60
+settle
+capture simulator/verify/out/apk_picker.jpg
+tap 360 403
+settle
+capture simulator/verify/out/apk_confirm.jpg
+tap 500 698
+wait 5000
+settle
+capture simulator/verify/out/apk_result.jpg
+quit

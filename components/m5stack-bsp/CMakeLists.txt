@@ -20,6 +20,7 @@ if(ESP_PLATFORM)
             ${BSP_COMMON_SRCS}
             "src/audio_eq.c"
             "boards/tab5/tab5.c"
+            "boards/tab5/tab5_sd.c"
             "devices/pi4io/pi4io.c"
             "devices/ili9881c/ili9881c.c"
             "devices/gt911/gt911.c"
@@ -28,7 +29,7 @@ if(ESP_PLATFORM)
             "devices/es8388/es8388.c"
         INCLUDE_DIRS "inc"
         PRIV_INCLUDE_DIRS "inc_private" "devices"
-        PRIV_REQUIRES driver nvs_flash bt)
+        PRIV_REQUIRES driver nvs_flash bt fatfs sdmmc esp_driver_sdmmc)
 
     # Enable Link Time Optimization
     target_compile_options(${COMPONENT_LIB} PRIVATE -flto)
@@ -42,6 +43,7 @@ else()
             ${BSP_COMMON_SRCS}
             "boards/tab5/tab5_sim.c"
             "simulator/sdl_backend.c"
+            "simulator/sd_redirect.c"
         INCLUDE_DIRS "inc"
         PRIV_INCLUDE_DIRS "inc_private" "simulator")
 endif()

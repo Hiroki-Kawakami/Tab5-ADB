@@ -197,12 +197,12 @@ app/                         # SHARED  app logic / screens (a single component)
   terminal/                  #   ADBShellScreen's terminal widgets: term_view (cell-grid renderer) + term_keyboard
 components/                  # SHARED  (both targets)
   m5stack-bsp/               #   board support (bsp_*) — device drivers + SDL sim backend
-    inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_types.h
+    inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_sd.h, bsp_types.h
     inc_private/             #     internal driver interfaces (bsp_display.h / bsp_touch.h vtables)
     src/                     #     shared dispatch: bsp_display.c/bsp_touch.c (+ audio_eq.c, device)
     devices/                 #     DEVICE reusable chip drivers (ili9881c/st7123/gt911/es8388/pi4io)
-    simulator/               #     SIM reusable SDL backend (sdl_backend.cpp -> display/touch provider)
-    boards/<model>/          #     per-model bring-up: <model>.c (device) + <model>_sim.cpp (sim)
+    simulator/               #     SIM reusable SDL backend (sdl_backend.cpp) + sd_redirect.c (bsp_sd on host)
+    boards/<model>/          #     per-model bring-up: <model>.c (device, + tab5_sd.c) + <model>_sim.cpp (sim)
   lvgl++/                    #   C++ helpers (lv_async_call, lv_obj_add_event_fn)
   screen_manager/            #   Screen base + screen stack
   embedded_adb/              #   ADB host-side client (C++) — usb_host vs libusb split
@@ -356,6 +356,30 @@ Audio (`bsp_tab5_audio_*` in `inc/bsp_audio.h`) is Tab5-specific with no
 cross-model contract yet, so it keeps its name and lives in the tab5 board.
 `audio_eq.c` is device-only for now (the host has no audio path); it moves into
 the shared sources once a simulator audio board exists.
+
+**SD card (`inc/bsp_sd.h`)** — mount/unmount only; once mounted, app code uses
+plain POSIX file I/O under the mount point on both targets (no further BSP
+seam). `bsp_sd_mount(mount_point, cfg)` / `bsp_sd_unmount()` /
+`bsp_sd_is_mounted()`; mount on demand, treat `ESP_ERR_INVALID_STATE` as
+"already mounted", no hot-plug detection (a failed scan unmounts so the next
+Refresh re-mounts). Device (`boards/tab5/tab5_sd.c`): the TF slot is on the
+P4's SDMMC, routed like the P4 EV board — CLK=G43, CMD=G44, D0..D3=G39..G42,
+4-bit, card power from the **on-chip LDO channel 4** (`sd_pwr_ctrl_new_on_chip_ldo`,
+kept acquired across remounts), default 40 MHz high speed;
+`esp_vfs_fat_sdmmc_mount` (PRIV_REQUIRES `fatfs sdmmc esp_driver_sdmmc`).
+sdkconfig: `CONFIG_FATFS_LFN_HEAP` (long file names — the default LFN_NONE
+truncates to 8.3), `CONFIG_FATFS_API_ENCODING_UTF_8`, and
+`CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096` (stdio buffering). **Read-performance
+rule:** plain `fread` is slow on this path — read with unbuffered `read()` in
+16 KB chunks into a `heap_caps_malloc(..., MALLOC_CAP_CACHE_ALIGNED)` buffer
+(what the APK install push source does). Simulator
+(`simulator/sd_redirect.c`): "mount" maps the mount point onto a host
+directory (`SIMULATOR_SDCARD_PATH` env var, default `simulator/sdcard/` from
+the repo root) by defining `open`/`fopen`/`opendir`/`stat` in the executable —
+statically-linked calls resolve there, the path is translated, and the real
+libc is reached via `dlsym(RTLD_NEXT, ...)` (NameCardKnot's approach). Device
+SDMMC bring-up is **not yet verified on real HW** (sim path verified headless);
+first flash should check the `BSP_SD` mount log.
 
 ### App entry & the LVGL runtime (not in the BSP)
 
@@ -888,6 +912,61 @@ so no `detach()`); marshalled lambdas capture `self = shared_from_this()` and
 skip on `Screen::exited()`. One extra guard: a `nav_gen_` counter (LVGL-thread
 only) bumped on every navigation drops **stale list completions** when the user
 taps faster than the device responds.
+
+The FileManager's **SD Card** card pushes **`SDFileBrowserScreen`**
+(`app/sd_file_browser_screen.*`) — the *local* (Tab5 SD card) counterpart of
+the ADB browser: `bsp_sd_mount("/sd")` on demand at build, then synchronous
+POSIX `opendir`/`readdir` scans **on the LVGL thread** (local FS is fast; no
+listener/marshalling machinery), same list UI/sort, dotfiles skipped, errors
+("SD card not found." / unreadable dir) shown in-list with Refresh re-mounting.
+Two modes: **browse** (default; plain files inert) and **pick**
+(`SDFileBrowserScreen::Pick{ext, on_pick}` — only files matching the
+case-insensitive extension are tappable, the rest are greyed; tapping one
+**pops the screen first**, then calls `on_pick(path)` on the LVGL thread with
+the caller's screen back on top — copy the callback/path to locals before the
+pop since pop frees the lambda's storage). Verified headless:
+`simulator/verify/sdcard.txt` (browse vs `simulator/sdcard/`).
+
+`ADBDeviceScreen`'s **Apps** button pushes **`ADBAppManagerScreen`**
+(`app/adb_app_manager_screen.*`) — the installed-app manager. Listing is **one
+exec round trip**: `pm list packages -3; echo ---SEP---; pm list packages -s;
+echo ---SEP---; pm list packages -d` parsed into user/system/disabled sets
+(package names only — human labels/icons aren't reachable via shell; an
+agent-side `GET_APP_LIST` over the CONTROL_REQUEST channel is the future
+enrichment path). A **User / System** filter toggle picks the rendered set
+(User default; disabled packages grey with a "disabled" tag); rows push
+**`ADBAppDetailScreen`**. `onAppear()` re-lists (so returning from
+detail/install refreshes); a `load_gen_` counter drops stale exec completions.
+**`ADBAppDetailScreen`** (`app/adb_app_detail_screen.*`) shows
+version/installed/updated/path/status parsed out of one `dumpsys package
+<pkg>` (`<key>=` to end-of-line; install times contain spaces) and the
+actions: **Launch** (`monkey -p <pkg> -c ...LAUNCHER 1`; failure modal when
+"Events injected" is missing), **Force stop** (`am force-stop`), **Clear
+data** (`pm clear`, confirm), **Uninstall** (user apps; `pm uninstall`,
+confirm, pops on Success), **Disable** (`pm disable-user --user 0`, system
+apps, confirm) / **Enable** (`pm enable`, offered whenever disabled). Confirm/
+result dialogs are the shared **`app/modal.{hpp,cpp}`** helpers
+(`modal_confirm`/`modal_message`/`modal_open` — scrim with
+`LV_OBJ_FLAG_IGNORE_LAYOUT` pinned over the whole screen root + centered card;
+dialogs die with the screen). All exec completions marshal with
+`lv_async_call` + `self`/`exited()` guards.
+
+The app manager's nav **Install** button runs the **APK install flow**:
+`SDFileBrowserScreen` in pick mode (`.apk`) → size-confirm modal →
+`Sync::push` to `/data/local/tmp/tab5adb_install.apk` with a progress dialog →
+`pm install -r` → `rm -f` the temp + result modal + re-list. The push
+`SyncSource` runs on the **Sync worker thread** and reads the file per the SD
+rule (16 KB `read()` chunks into a `MALLOC_CAP_CACHE_ALIGNED` buffer, sliced
+into the cap-sized wire chunks), bumping an atomic byte counter that a 200 ms
+`lv_timer` renders — no per-chunk marshalling. The job state lives in a
+`shared_ptr<InstallJob>` held by the source closure (never the screen), whose
+dtor releases fd/buffer whenever the last ref drops; Cancel sets an atomic
+`abort` the source turns into a push abort; `onExit()` aborts + closes the
+session and the `job != job_` guard ignores superseded completions. Verified
+E2E headless against a real Android device (`simulator/verify/apps.txt`, `appdetail.txt`,
+`apk_install.txt` — the last really installs `simulator/sdcard/testapp.apk`'s
+`com.tab5adb.testapp` on the phone; clean up with `adb uninstall
+com.tab5adb.testapp`).
 
 `ADBDeviceScreen`'s **Mirroring** button pushes **`ADBMirroringScreen`**
 (`app/adb_mirroring_screen.*`) — the live screen-mirror viewer over `agent_link`.

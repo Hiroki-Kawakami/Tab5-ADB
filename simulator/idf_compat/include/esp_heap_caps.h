@@ -21,6 +21,7 @@ extern "C" {
 #define MALLOC_CAP_RETENTION   (1 << 14)
 #define MALLOC_CAP_RTCRAM      (1 << 15)
 #define MALLOC_CAP_TCM         (1 << 16)
+#define MALLOC_CAP_CACHE_ALIGNED (1 << 19)
 #define MALLOC_CAP_INVALID     (1 << 31)
 
 void *heap_caps_malloc(size_t size, uint32_t caps);

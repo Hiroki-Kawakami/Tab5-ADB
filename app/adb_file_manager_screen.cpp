@@ -1,5 +1,9 @@
 #include "adb_file_manager_screen.hpp"
+
+#include <functional>
+
 #include "adb_file_browser_screen.hpp"
+#include "sd_file_browser_screen.hpp"
 #include "screen_manager.hpp"
 #include "resources/resources.h"
 
@@ -71,7 +75,7 @@ void ADBFileManagerScreen::onExit() {
 
 void ADBFileManagerScreen::refresh() {
     lv_obj_clean(list_);
-    auto item = [this](std::string title, std::string path){
+    auto item = [this](std::string title, std::function<void()> on_click){
         auto button = lv_button_create(list_);
         lv_obj_remove_style_all(button);
         lv_obj_set_size(button, LV_PCT(100), 160);
@@ -86,8 +90,8 @@ void ADBFileManagerScreen::refresh() {
         lv_obj_set_flex_align(button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_hor(button, 32, 0);
         lv_obj_set_style_pad_column(button, 24, 0);
-        lv_obj_add_event_fn(button, LV_EVENT_CLICKED, [=](lv_event_t*){
-            screen_manager.push(std::make_shared<ADBFileBrowserScreen>(path));
+        lv_obj_add_event_fn(button, LV_EVENT_CLICKED, [on_click](lv_event_t*){
+            on_click();
         });
 
         auto icon = lv_image_create(button);
@@ -100,13 +104,20 @@ void ADBFileManagerScreen::refresh() {
         lv_obj_set_style_text_font(icon, &lv_font_montserrat_28, 0);
     };
 
+    auto adb_browser = [](std::string path) {
+        return [path]() {
+            screen_manager.push(std::make_shared<ADBFileBrowserScreen>(path));
+        };
+    };
     auto adb_title = lv_label_create(list_);
     lv_label_set_text(adb_title, "ADB Device");
-    item("Internal Storage", "/sdcard");
-    item("System", "/");
+    item("Internal Storage", adb_browser("/sdcard"));
+    item("System", adb_browser("/"));
 
     auto tab5_title = lv_label_create(list_);
     lv_label_set_text(tab5_title, "M5Stack Tab5");
     lv_obj_set_style_pad_top(tab5_title, 24, 0);
-    item("SD Card", "");
+    item("SD Card", []() {
+        screen_manager.push(std::make_shared<SDFileBrowserScreen>());
+    });
 }

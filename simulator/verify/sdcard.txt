@@ -1,0 +1,20 @@
+# Tab5 SD card browser (local POSIX, sim = simulator/sdcard/ via sd_redirect).
+# Needs a real phone plugged into the PC (Connect gates the FileManager).
+# Connect -> device screen -> File Manager -> SD Card -> folder -> back.
+settle
+tap 360 640
+wait 6000
+settle
+tap 551 354
+settle
+capture simulator/verify/out/sd_filemanager.jpg
+tap 360 730
+settle
+capture simulator/verify/out/sd_root.jpg
+tap 360 160
+settle
+capture simulator/verify/out/sd_folder.jpg
+tap 60 60
+settle
+capture simulator/verify/out/sd_back.jpg
+quit
