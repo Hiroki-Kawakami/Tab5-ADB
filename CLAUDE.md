@@ -930,13 +930,24 @@ pop since pop frees the lambda's storage). Verified headless:
 `ADBDeviceScreen`'s **Apps** button pushes **`ADBAppManagerScreen`**
 (`app/adb_app_manager_screen.*`) — the installed-app manager. Listing is **one
 exec round trip**: `pm list packages -3; echo ---SEP---; pm list packages -s;
-echo ---SEP---; pm list packages -d` parsed into user/system/disabled sets
-(package names only — human labels/icons aren't reachable via shell; an
-agent-side `GET_APP_LIST` over the CONTROL_REQUEST channel is the future
-enrichment path). A **User / System** filter toggle picks the rendered set
-(User default; disabled packages grey with a "disabled" tag); rows push
-**`ADBAppDetailScreen`**. `onAppear()` re-lists (so returning from
-detail/install refreshes); a `load_gen_` counter drops stale exec completions.
+echo ---SEP---; pm list packages -d`, **parsed + sorted on the adb reader
+thread** into user/system/disabled sets (the LVGL thread just swaps the
+vectors in; package names only — human labels/icons aren't reachable via
+shell; an agent-side `GET_APP_LIST` over the CONTROL_REQUEST channel is the
+future enrichment path). The list is **recycled, RecyclerView-style** (a
+per-package LVGL build was visibly slow on device even for the User set): a
+fixed pool of row widgets (`ensure_pool`, viewport/81px + 3, created once) is
+**rebound** to the visible index window on `LV_EVENT_SCROLL`
+(`update_rows`/`bind_row` — set y/labels/disabled-tag, no object churn), an
+invisible `extent_` child spans `count*81` to define the scroll range, the
+row's click handler reads its bound `data_idx` at tap time, and the separator
+is the row's own bottom border. While a listing is in flight the list shows a
+**spinner** (FileBrowser-style); the scroll position survives an `onAppear()`
+re-list (clamped if the list shrank) and resets on filter switch. A **User /
+System** filter toggle picks the rendered set (User default; disabled packages
+grey with a "disabled" tag); rows push **`ADBAppDetailScreen`**. `onAppear()`
+re-lists (so returning from detail/install refreshes); a `load_gen_` counter
+drops stale exec completions.
 **`ADBAppDetailScreen`** (`app/adb_app_detail_screen.*`) shows
 version/installed/updated/path/status parsed out of one `dumpsys package
 <pkg>` (`<key>=` to end-of-line; install times contain spaces) and the
@@ -963,8 +974,10 @@ into the cap-sized wire chunks), bumping an atomic byte counter that a 200 ms
 dtor releases fd/buffer whenever the last ref drops; Cancel sets an atomic
 `abort` the source turns into a push abort; `onExit()` aborts + closes the
 session and the `job != job_` guard ignores superseded completions. Verified
-E2E headless against a real Android device (`simulator/verify/apps.txt`, `appdetail.txt`,
-`apk_install.txt` — the last really installs `simulator/sdcard/testapp.apk`'s
+E2E headless against a real Android device (`simulator/verify/apps.txt`, `apps_scroll.txt`
+— the recycler under a long drag (note: `down`/`move` only write the touch
+snapshot, so drag scripts need `wait`s between steps to be sampled as a drag) —
+`appdetail.txt`, `apk_install.txt` — the last really installs `simulator/sdcard/testapp.apk`'s
 `com.tab5adb.testapp` on the phone; clean up with `adb uninstall
 com.tab5adb.testapp`).
 

@@ -15,12 +15,18 @@
 // card (SDFileBrowserScreen pick mode) and installs it: Sync::push to
 // /data/local/tmp with a progress dialog, then `pm install -r`.
 //
-// The push source streams the file on the Sync worker thread — read() in
-// 16 KB chunks into a MALLOC_CAP_CACHE_ALIGNED buffer (the FATFS/SD fast
-// path; see bsp_sd.h) — and bumps an atomic byte counter an lv_timer renders,
-// so no per-chunk marshalling. exec/push completions fire on adb threads and
-// are marshalled to the LVGL thread with lv_async_call (self + exited()
-// guards); load_gen_ drops stale list completions.
+// The list is **recycled**, not built per package: a fixed pool of row widgets
+// (viewport / row height + spillover) is created once, an invisible extent
+// object spans count*row_height to define the scroll range, and the scroll
+// handler rebinds the pool to the visible index window (set label text / tag /
+// y position — no object churn). A few hundred system packages therefore cost
+// the same LVGL work as one screenful. While a listing is in flight the list
+// shows a spinner (FileBrowser-style); the output is parsed and sorted on the
+// adb reader thread so the LVGL thread only swaps the result vectors in.
+//
+// exec completions fire on the adb reader thread and are marshalled to the
+// LVGL thread with lv_async_call (self + exited() guards); load_gen_ drops
+// stale completions when Refresh is tapped faster than the device responds.
 class ADBAppManagerScreen : public Screen, public adb::SyncListener {
 public:
     void build() override;
@@ -33,6 +39,17 @@ public:
 
 private:
     enum class Filter { User, System };
+
+    // One recycled list row. The widgets are created once (ensure_pool) and
+    // rebound while scrolling; data_idx is the bound index into filtered()
+    // (-1 = hidden), read by the row's click handler.
+    struct Row {
+        lv_obj_t *btn;
+        lv_obj_t *icon;
+        lv_obj_t *name;
+        lv_obj_t *tag;  // "disabled" badge, hidden unless bound pkg is disabled
+        int data_idx = -1;
+    };
 
     // One APK install in flight. The Sync push source holds the shared_ptr
     // (never the screen), so the worker thread outliving the screen is safe;
@@ -54,9 +71,14 @@ private:
     std::vector<std::string> user_pkgs_, system_pkgs_;
     std::set<std::string> disabled_;
     uint32_t load_gen_ = 0;
-    bool listed_once_ = false;
     lv_obj_t *list_{nullptr};
     lv_obj_t *user_btn_{nullptr}, *system_btn_{nullptr};
+
+    // Recycler state.
+    std::vector<Row> pool_;
+    lv_obj_t *extent_{nullptr};  // invisible, height = count*row_h (scroll range)
+    lv_obj_t *status_{nullptr};  // spinner / error / empty label
+    int first_bound_ = -1;       // pool_[0]'s data index; -1 forces a rebind
 
     std::shared_ptr<InstallJob> job_;
     lv_obj_t *progress_card_{nullptr};
@@ -69,7 +91,10 @@ private:
     }
     void set_filter(Filter f);
     void refresh();  // run pm list via exec, then rebuild
-    void rebuild();  // render the current filter's packages
+    void rebuild();  // render filter state + status + rebind the row pool
+    void ensure_pool();              // create the row widgets once (lazy)
+    void bind_row(Row &r, int idx);  // bind one pool row to filtered()[idx]
+    void update_rows(bool force);    // rebind the pool to the scroll window
 
     // ---- APK install flow (all LVGL thread unless noted) ----
     void pick_apk();                              // push the SD picker

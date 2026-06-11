@@ -1,0 +1,50 @@
+# Recycled app list: System filter (few hundred rows), then a long drag-scroll
+# — the captures must show rows from deep in the list (pool rebinding) with no
+# blank rows. Needs a real phone plugged into the PC. The waits between move
+# steps matter: down/move only write the touch snapshot, so each step needs
+# frames to be sampled as a drag.
+settle
+tap 360 640
+wait 6000
+settle
+tap 551 450
+wait 3000
+settle
+capture simulator/verify/out/apps_user2.jpg
+tap 530 156
+wait 1500
+settle
+capture simulator/verify/out/apps_system2.jpg
+down 360 1100
+wait 50
+move 360 1000
+wait 30
+move 360 850
+wait 30
+move 360 700
+wait 30
+move 360 550
+wait 30
+move 360 400
+wait 30
+move 360 300
+wait 30
+up
+settle
+capture simulator/verify/out/apps_scrolled.jpg
+down 360 1100
+wait 50
+move 360 950
+wait 30
+move 360 750
+wait 30
+move 360 550
+wait 30
+move 360 350
+wait 30
+move 360 200
+wait 30
+up
+settle
+capture simulator/verify/out/apps_scrolled2.jpg
+quit

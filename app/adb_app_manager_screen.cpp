@@ -64,6 +64,7 @@ std::string trimmed(std::string s) {
 
 constexpr const char *kRemoteApk = "/data/local/tmp/tab5adb_install.apk";
 constexpr size_t kReadChunk = 16 * 1024;
+constexpr int32_t kRowH = 81;  // 80px row + 1px bottom-border separator
 
 std::string fmt_size(size_t bytes) {
     char buf[32];
@@ -180,12 +181,19 @@ void ADBAppManagerScreen::build() {
     user_btn_ = filter_button("User", Filter::User);
     system_btn_ = filter_button("System", Filter::System);
 
+    // No layout: the recycled rows position themselves (lv_obj_set_pos) and
+    // the invisible extent child defines the scroll range.
     list_ = lv_obj_create(root_);
     lv_obj_remove_style_all(list_);
     lv_obj_set_width(list_, LV_PCT(100));
     lv_obj_set_flex_grow(list_, 1);
-    lv_obj_set_flex_flow(list_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(list_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(list_, LV_DIR_VER);
+    lv_obj_add_event_fn(list_, LV_EVENT_SCROLL, [this](lv_event_t*){ update_rows(false); });
+
+    extent_ = lv_obj_create(list_);
+    lv_obj_remove_style_all(extent_);
+    lv_obj_set_size(extent_, 1, 0);
+    lv_obj_set_pos(extent_, 0, 0);
 }
 
 void ADBAppManagerScreen::onAppear() {
@@ -218,6 +226,7 @@ ADBAppManagerScreen::InstallJob::~InstallJob() {
 void ADBAppManagerScreen::set_filter(Filter f) {
     if (filter_ == f) return;
     filter_ = f;
+    lv_obj_scroll_to_y(list_, 0, LV_ANIM_OFF);
     rebuild();
 }
 
@@ -235,8 +244,16 @@ void ADBAppManagerScreen::refresh() {
     uint32_t gen = ++load_gen_;
     client->exec(kListCmd, [self = shared_from_this(), this, gen](
                                adb::Error err, const std::string &out) {
-        // Reader thread: hand the output to the LVGL thread.
-        auto box = std::make_shared<std::string>(out);
+        // Reader thread: parse + sort here so the LVGL thread only swaps the
+        // result vectors in.
+        struct Parsed {
+            std::vector<std::string> user, system;
+            std::set<std::string> disabled;
+        };
+        auto box = std::make_shared<Parsed>();
+        if (err == adb::Error::Ok) {
+            parse_sections(out, &box->user, &box->system, &box->disabled);
+        }
         lv_async_call([self, this, gen, err, box]() {
             if (exited() || gen != load_gen_) return;
             loading_ = false;
@@ -245,19 +262,15 @@ void ADBAppManagerScreen::refresh() {
                 rebuild();
                 return;
             }
-            user_pkgs_.clear();
-            system_pkgs_.clear();
-            disabled_.clear();
-            parse_sections(*box, &user_pkgs_, &system_pkgs_, &disabled_);
-            listed_once_ = true;
+            user_pkgs_ = std::move(box->user);
+            system_pkgs_ = std::move(box->system);
+            disabled_ = std::move(box->disabled);
             rebuild();
         });
     });
 }
 
 void ADBAppManagerScreen::rebuild() {
-    lv_obj_clean(list_);
-
     if (filter_ == Filter::User) {
         lv_obj_add_state(user_btn_, LV_STATE_CHECKED);
         lv_obj_remove_state(system_btn_, LV_STATE_CHECKED);
@@ -266,67 +279,121 @@ void ADBAppManagerScreen::rebuild() {
         lv_obj_remove_state(user_btn_, LV_STATE_CHECKED);
     }
 
-    if (loading_ && !listed_once_) {
-        auto spinner = lv_spinner_create(list_);
-        lv_obj_set_size(spinner, 80, 80);
-        lv_obj_set_style_margin_all(spinner, 80, 0);
-        return;
+    if (status_) {
+        lv_obj_delete(status_);
+        status_ = nullptr;
     }
-    if (!error_.empty()) {
-        auto label = lv_label_create(list_);
-        lv_label_set_text(label, error_.c_str());
-        lv_obj_set_style_margin_ver(label, 80, 0);
-        lv_obj_set_style_text_color(label, lv_color_hex(0x444444), 0);
-        return;
-    }
-    if (listed_once_ && filtered().empty()) {
-        auto label = lv_label_create(list_);
-        lv_label_set_text(label, "No apps.");
-        lv_obj_set_style_margin_ver(label, 80, 0);
-        lv_obj_set_style_text_color(label, lv_color_hex(0x444444), 0);
+    auto status_label = [this](const char *text) {
+        status_ = lv_label_create(list_);
+        lv_label_set_text(status_, text);
+        lv_obj_set_style_text_color(status_, lv_color_hex(0x444444), 0);
+        lv_obj_align(status_, LV_ALIGN_TOP_MID, 0, 80);
+    };
+
+    size_t count = 0;
+    if (loading_) {
+        status_ = lv_spinner_create(list_);
+        lv_obj_set_size(status_, 80, 80);
+        lv_obj_align(status_, LV_ALIGN_TOP_MID, 0, 80);
+    } else if (!error_.empty()) {
+        status_label(error_.c_str());
+    } else if (filtered().empty()) {
+        status_label("No apps.");
+    } else {
+        count = filtered().size();
     }
 
-    for (const auto &pkg : filtered()) {
-        bool disabled = disabled_.count(pkg) != 0;
+    ensure_pool();
+    lv_obj_set_height(extent_, (int32_t)count * kRowH);
+    // Keep the scroll position across a re-list (onAppear), clamped when the
+    // list shrank below it.
+    lv_obj_update_layout(list_);
+    int32_t max_scroll = (int32_t)count * kRowH - lv_obj_get_height(list_);
+    if (max_scroll < 0) max_scroll = 0;
+    if (lv_obj_get_scroll_y(list_) > max_scroll) {
+        lv_obj_scroll_to_y(list_, max_scroll, LV_ANIM_OFF);
+    }
+    update_rows(true);
+}
 
-        auto button = lv_button_create(list_);
-        lv_obj_remove_style_all(button);
-        lv_obj_set_size(button, LV_PCT(100), 80);
-        lv_obj_set_style_pad_hor(button, 24, 0);
-        lv_obj_set_style_pad_column(button, 24, 0);
-        lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_bg_color(button, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_STATE_PRESSED);
-        bool system_app = filter_ == Filter::System;
-        lv_obj_add_event_fn(button, LV_EVENT_CLICKED,
-                            [pkg, system_app, disabled](lv_event_t*){
-            screen_manager.push(
-                std::make_shared<ADBAppDetailScreen>(pkg, system_app, disabled));
+void ADBAppManagerScreen::ensure_pool() {
+    if (!pool_.empty()) return;
+    lv_obj_update_layout(list_);
+    int32_t h = lv_obj_get_height(list_);
+    if (h <= 0) h = 1088;  // pre-layout fallback: panel minus nav + filter row
+    size_t n = (size_t)(h / kRowH) + 3;  // partial top/bottom + one of lookbehind
+    pool_.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        Row r = {};
+        r.btn = lv_button_create(list_);
+        lv_obj_remove_style_all(r.btn);
+        lv_obj_set_size(r.btn, LV_PCT(100), kRowH);
+        lv_obj_add_flag(r.btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_border_side(r.btn, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(r.btn, 1, 0);
+        lv_obj_set_style_border_color(r.btn, lv_color_hex(0xc0c0c0), 0);
+        lv_obj_set_style_pad_hor(r.btn, 24, 0);
+        lv_obj_set_style_pad_column(r.btn, 24, 0);
+        lv_obj_set_flex_flow(r.btn, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(r.btn, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_bg_color(r.btn, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(r.btn, LV_OPA_COVER, LV_STATE_PRESSED);
+        // The handler reads the slot's bound index at tap time (the pool_
+        // vector is created once and never reallocates).
+        size_t slot = i;
+        lv_obj_add_event_fn(r.btn, LV_EVENT_CLICKED, [this, slot](lv_event_t*){
+            int idx = pool_[slot].data_idx;
+            if (idx < 0 || idx >= (int)filtered().size()) return;
+            const std::string &pkg = filtered()[idx];
+            screen_manager.push(std::make_shared<ADBAppDetailScreen>(
+                pkg, filter_ == Filter::System, disabled_.count(pkg) != 0));
         });
 
-        auto icon = lv_label_create(button);
-        lv_label_set_text(icon, LUCIDE_PACKAGE);
-        lv_obj_set_style_text_font(icon, R.font.lucide_40, 0);
-        auto label = lv_label_create(button);
-        lv_label_set_text(label, pkg.c_str());
-        lv_obj_set_flex_grow(label, 1);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-        if (disabled) {
-            lv_obj_set_style_text_color(icon, lv_color_hex(0xb0b0b0), 0);
-            lv_obj_set_style_text_color(label, lv_color_hex(0xb0b0b0), 0);
-            auto tag = lv_label_create(button);
-            lv_label_set_text(tag, "disabled");
-            lv_obj_set_style_text_color(tag, lv_color_hex(0xb0b0b0), 0);
-            lv_obj_set_style_text_font(tag, &lv_font_montserrat_20, 0);
-        }
+        r.icon = lv_label_create(r.btn);
+        lv_label_set_text(r.icon, LUCIDE_PACKAGE);
+        lv_obj_set_style_text_font(r.icon, R.font.lucide_40, 0);
+        r.name = lv_label_create(r.btn);
+        lv_obj_set_flex_grow(r.name, 1);
+        lv_label_set_long_mode(r.name, LV_LABEL_LONG_DOT);
+        r.tag = lv_label_create(r.btn);
+        lv_label_set_text(r.tag, "disabled");
+        lv_obj_set_style_text_color(r.tag, lv_color_hex(0xb0b0b0), 0);
+        lv_obj_set_style_text_font(r.tag, &lv_font_montserrat_20, 0);
+        pool_.push_back(r);
+    }
+}
 
-        auto sep = lv_obj_create(list_);
-        lv_obj_remove_style_all(sep);
-        lv_obj_set_style_bg_color(sep, lv_color_hex(0xc0c0c0), 0);
-        lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
-        lv_obj_set_size(sep, LV_PCT(100), 1);
-        lv_obj_set_style_margin_hor(sep, 24, 0);
+void ADBAppManagerScreen::bind_row(Row &r, int idx) {
+    if (idx < 0 || idx >= (int)filtered().size()) {
+        r.data_idx = -1;
+        lv_obj_add_flag(r.btn, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    r.data_idx = idx;
+    lv_obj_remove_flag(r.btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(r.btn, 0, idx * kRowH);
+    const std::string &pkg = filtered()[idx];
+    bool disabled = disabled_.count(pkg) != 0;
+    lv_label_set_text(r.name, pkg.c_str());
+    lv_color_t color = disabled ? lv_color_hex(0xb0b0b0) : lv_color_black();
+    lv_obj_set_style_text_color(r.icon, color, 0);
+    lv_obj_set_style_text_color(r.name, color, 0);
+    if (disabled) {
+        lv_obj_remove_flag(r.tag, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(r.tag, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void ADBAppManagerScreen::update_rows(bool force) {
+    if (pool_.empty()) return;
+    int32_t sy = lv_obj_get_scroll_y(list_);
+    int first = (int)(sy / kRowH) - 1;  // one row of lookbehind above the fold
+    if (first < 0) first = 0;
+    if (!force && first == first_bound_) return;
+    first_bound_ = first;
+    for (size_t i = 0; i < pool_.size(); ++i) {
+        bind_row(pool_[i], first + (int)i);
     }
 }
 
