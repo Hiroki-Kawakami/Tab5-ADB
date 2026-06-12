@@ -102,6 +102,13 @@ enum Status : uint8_t {
 // video_codec (MIRROR_START response, §4.4).
 constexpr uint8_t kVideoCodecJpeg = 0x01;
 
+// audio_codec (MIRROR_START response audio tail, §6). One AUDIO frame carries one
+// codec unit; the codec is fixed here so the frame body needs no per-frame header.
+enum AudioCodec : uint8_t {
+    kAudioCodecPcmS16le = 0x01,  // interleaved 16-bit LE PCM (v1)
+    kAudioCodecOpus = 0x02,      // reserved (frame body = one Opus packet)
+};
+
 // --- INPUT channel (§4.7) — TYPE=INPUT, Tab5->agent, fire-and-forget ---
 //
 // The agent injects these via the hidden InputManager.injectInputEvent (the
@@ -166,7 +173,15 @@ constexpr size_t kHelloResultLen = 8;  // after cmd+req_id+status
 // the *Base lengths are the minimum a parser requires.
 constexpr size_t kMirrorStartArgsLen = 12;       // after cmd+req_id (what we send)
 constexpr size_t kMirrorStartResultBaseLen = 8;  // after cmd+req_id+status (minimum)
-constexpr size_t kMirrorStartResultLen = 12;     // with out_width/out_height
+constexpr size_t kMirrorStartResultLen = 12;     // with out_width/out_height (video only)
+
+// MIRROR_START response with the §6 audio tail appended (audio_codec, audio_channels,
+// reserved u16, audio_rate u32 at +12..+19, within the result after cmd+req_id+status).
+// Present only when AUDIO was started; a video-only response is kMirrorStartResultLen.
+constexpr size_t kMirrorStartResultAudioLen = 20;
+constexpr size_t kMirrorAudioCodecOff = 12;     // u8
+constexpr size_t kMirrorAudioChannelsOff = 13;  // u8
+constexpr size_t kMirrorAudioRateOff = 16;      // u32 (LE)
 
 // JPEG block subheader (§5.2): x, y, w, h (all u16), then the JPEG bytes.
 constexpr size_t kJpegSubheaderSize = 8;

@@ -18,6 +18,7 @@
 #include "agent_client.hpp"
 #include "display_manager.hpp"
 #include "esp_heap_caps.h"
+#include "settings.hpp"  // app::audio_output_mode
 #include "esp_timer.h"
 #include "jpeg_decode_enhanced.h"
 #include "lvgl.hpp"
@@ -137,9 +138,21 @@ void ADBMirroringScreen::start_mirror_ui() {
         std::printf("mirror: link gone after connect\n");
         return;
     }
+
+    // Audio (§6): Tab5Only streams the device's audio to the Tab5 (the agent mutes
+    // the phone via REMOTE_SUBMIX); PhoneOnly streams none. Set up the player BEFORE
+    // start_mirror so its audio listener is registered when the agent answers — and
+    // audio_on_ adds the AUDIO bit to the MIRROR_START streams (mirror_config_for).
+    audio_on_ = (app::audio_output_mode() == app::AudioOutputMode::Tab5Only);
+    if (audio_on_) {
+        agent_audio_ = AgentAudio::create();
+        if (agent_audio_) agent_audio_->start();  // registers the audio listener
+        else audio_on_ = false;                    // no ring -> fall back to no audio
+    }
+
     l->set_video_listener(std::static_pointer_cast<agent_link::VideoListener>(
         std::static_pointer_cast<ADBMirroringScreen>(shared_from_this())));
-    l->start_mirror(mirror_config_for(disp_mode_));  // 720x1280, current display mode
+    l->start_mirror(mirror_config_for(disp_mode_));  // 720x1280, current display mode + audio
 
     // Tailor the DispMode button to the source's current resolution (hide it when
     // already panel-aspect / drop Adapt when a `wm size` override is set).
@@ -155,6 +168,9 @@ agent_link::MirrorConfig ADBMirroringScreen::mirror_config_for(int mode) const {
     // Fill asks the agent to cover+crop; Fit and Adapt both send scale=fit (Adapt
     // pre-resizes the source via `wm size` so fit already fills the panel).
     cfg.scale_mode = (mode == kDispFill) ? agent_link::kScaleFill : agent_link::kScaleFit;
+    // Keep AUDIO in the streams across DispMode restarts so the audio stream isn't
+    // dropped when only the video scale/size changes (§6.1 Tab5Only).
+    cfg.streams = agent_link::kCapVideo | (audio_on_ ? agent_link::kCapAudio : 0);
     return cfg;
 }
 
@@ -620,6 +636,13 @@ void ADBMirroringScreen::onExit() {
         l->stop_mirror();
         l->set_video_listener({});  // detach the producer (no more on_video_strip)
     }
+    // Stop audio playback (clears its audio listener, closes bsp_audio); the link
+    // stays connected for next time. Safe before or after the video detach.
+    if (agent_audio_) {
+        agent_audio_->stop();
+        agent_audio_.reset();
+    }
+    audio_on_ = false;
     // If we leave while in Adapt, restore the device's resolution (we overrode it via
     // `wm size`). Fire-and-forget — the source returns to its real size.
     if (disp_mode_ == kDispAdapt) {

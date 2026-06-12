@@ -43,6 +43,11 @@ void Link::set_video_listener(std::weak_ptr<VideoListener> video) {
     video_ = std::move(video);
 }
 
+void Link::set_audio_listener(std::weak_ptr<AudioListener> audio) {
+    std::lock_guard<std::mutex> lk(audio_mtx_);
+    audio_ = std::move(audio);
+}
+
 adb::Error Link::start_mirror(const MirrorConfig& cfg) {
     if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
 
@@ -258,8 +263,10 @@ void Link::on_frame(const FrameHeader& h, const uint8_t* payload) {
         case kTypeJpeg:
             handle_jpeg(h, payload);
             break;
-        // AUDIO arrives in a later slice; unknown TYPEs are ignored for forward
-        // compatibility (§3.1).
+        case kTypeAudio:
+            handle_audio(h, payload);
+            break;
+        // Unknown TYPEs are ignored for forward compatibility (§3.1).
         default:
             break;
     }
@@ -356,6 +363,18 @@ void Link::handle_control_response(const uint8_t* p, size_t len) {
     std::shared_ptr<VideoListener> v;
     { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
     if (v) v->on_mirror_started(this, info);
+
+    // §6.2 audio tail: present only when AUDIO was started. Hand the chosen format
+    // to the audio channel so it can open its sink before the PCM frames arrive.
+    if (len >= 3 + kMirrorStartResultAudioLen) {
+        AudioInfo ainfo;
+        ainfo.codec = r[kMirrorAudioCodecOff];
+        ainfo.channels = r[kMirrorAudioChannelsOff];
+        ainfo.sample_rate = rd_u32(r + kMirrorAudioRateOff);
+        std::shared_ptr<AudioListener> a;
+        { std::lock_guard<std::mutex> lk(audio_mtx_); a = audio_.lock(); }
+        if (a) a->on_audio_started(this, ainfo);
+    }
 }
 
 // EVENT (§4.3): an async agent->Tab5 notification. payload = event(u8) + data.
@@ -403,6 +422,15 @@ void Link::handle_jpeg(const FrameHeader& h, const uint8_t* payload) {
     std::shared_ptr<VideoListener> v;
     { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
     if (v) v->on_video_strip(this, strip);
+}
+
+// AUDIO (§6.3): one frame = one codec unit. There is no per-frame subheader — the
+// whole payload is the codec data (raw PCM for codec=PCM; the format came in the
+// MIRROR_START response). Hand it to the audio channel (it copies into its ring).
+void Link::handle_audio(const FrameHeader& h, const uint8_t* payload) {
+    std::shared_ptr<AudioListener> a;
+    { std::lock_guard<std::mutex> lk(audio_mtx_); a = audio_.lock(); }
+    if (a) a->on_audio_data(this, payload, h.length);
 }
 
 void Link::send_hello_response(uint8_t req_id, uint8_t status) {

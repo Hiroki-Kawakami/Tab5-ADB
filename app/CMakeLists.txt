@@ -17,4 +17,4 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES m5stack-bsp "lvgl++" screen_manager lvgl adb agent_link
              jpeg_decode_enhanced esp_driver_jpeg esp_driver_ppa
-             esp_timer zlib term_emu)
+             esp_timer zlib term_emu nvs_flash)

@@ -5,6 +5,7 @@
 #include <mutex>
 
 #include "adb_app.hpp"     // PANEL_W, PANEL_H
+#include "agent_audio.hpp"  // AgentAudio (Tab5Only audio playback)
 #include "agent_link.hpp"  // agent_link::Link, agent_link::VideoListener
 #include "display_manager.hpp"   // DisplayManager::TouchListener
 #include "jpeg_decode_enhanced.h"  // jpeg_enh_strip_decoder_handle_t (P4 HW on device, libjpeg on host)
@@ -269,4 +270,12 @@ private:
     // exits it once we actually started mirroring).
     void* waiting_label_ = nullptr;  // lv_obj_t*
     bool overlay_active_ = false;
+
+    // Audio (§6, Tab5Only mode): when on, the mirror also streams the device's
+    // audio (the agent mutes the phone) and AgentAudio plays it on the Tab5.
+    // PhoneOnly leaves both null/false. Set from the persisted setting at
+    // start_mirror_ui; audio_on_ keeps AUDIO in the MIRROR_START streams across
+    // DispMode restarts (mirror_config_for). LVGL thread.
+    std::shared_ptr<AgentAudio> agent_audio_;
+    bool audio_on_ = false;
 };

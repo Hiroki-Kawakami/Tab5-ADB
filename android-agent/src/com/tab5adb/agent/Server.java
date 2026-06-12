@@ -45,6 +45,7 @@ public final class Server {
     private static final int TYPE_EVENT = 0x03;
     private static final int TYPE_INPUT = 0x04;
     private static final int TYPE_JPEG = 0x10;
+    private static final int TYPE_AUDIO = 0x11;
     private static final int INPUT_KEY = 0x00;  // input_type (§4.7)
     private static final int INPUT_TOUCH = 0x01;  // input_type (§4.7)
     private static final int EVENT_ORIENTATION = 0x03;
@@ -61,6 +62,7 @@ public final class Server {
     private static final int STATUS_EFAIL = 0xFF;
     private static final int PROTO_VERSION = 1;
     private static final int CAP_VIDEO = 0x0001;
+    private static final int CAP_AUDIO = 0x0002;
     private static final int CAP_APPINFO = 0x0004;
     private static final int VIDEO_CODEC_JPEG = 0x01;
     private static final int SCALE_ASPECT = 2;  // scale_mode (§5.3)
@@ -80,6 +82,7 @@ public final class Server {
     private static final int TARGET_FPS = 60;
 
     private final boolean testPattern;
+    private final boolean testTone;  // stream a deterministic sine instead of REMOTE_SUBMIX
     private final int testW;
     private final int testH;
 
@@ -94,18 +97,22 @@ public final class Server {
     // and the commands answer ENOTSUP.
     private AppInfo appInfo;
 
-    private Server(boolean testPattern, int testW, int testH) {
+    private Server(boolean testPattern, boolean testTone, int testW, int testH) {
         this.testPattern = testPattern;
+        this.testTone = testTone;
         this.testW = testW;
         this.testH = testH;
     }
 
     public static void main(String[] args) throws Exception {
         boolean testPattern = false;
+        boolean testTone = false;
         int testW = 1080, testH = 2160;  // portrait; differs from 9:16 to exercise fit
         for (int i = 0; i < args.length; i++) {
             if ("--test-pattern".equals(args[i])) {
                 testPattern = true;
+            } else if ("--test-tone".equals(args[i])) {
+                testTone = true;
             } else if ("--test-size".equals(args[i]) && i + 1 < args.length) {
                 String[] wh = args[++i].split("x");
                 testW = Integer.parseInt(wh[0]);
@@ -124,7 +131,7 @@ public final class Server {
         System.out.println("tab5adb-agent: listening on localabstract:" + SOCKET_NAME
                 + (testPattern ? " [test-pattern " + testW + "x" + testH + "]" : ""));
 
-        Server server = new Server(testPattern, testW, testH);
+        Server server = new Server(testPattern, testTone, testW, testH);
         // Build the input injector here on the main thread (it constructs an
         // ActivityThread whose internal Handler needs *this* thread's Looper). The
         // ActivityThread is a process singleton, so the reader thread then just
@@ -156,7 +163,8 @@ public final class Server {
                 new DataInputStream(client.getInputStream()));
 
         // Agent-initiated HELLO request (§4.4); its response is read by the reader.
-        int caps = CAP_VIDEO | (appInfo != null ? CAP_APPINFO : 0);
+        int caps = CAP_VIDEO | (audioAvailable() ? CAP_AUDIO : 0)
+                | (appInfo != null ? CAP_APPINFO : 0);
         byte[] args = new byte[8];
         args[0] = (byte) PROTO_VERSION;
         args[1] = (byte) AGENT_VER_MAJOR;
@@ -186,7 +194,25 @@ public final class Server {
                 conn.pendingStart = null;
             }
             if (conn.closed) break;
-            streamVideo(conn, mp);  // returns on MIRROR_STOP (READY) or disconnect
+            // Audio (§6) runs on its own thread alongside the video flow, started
+            // for this MIRROR_START and torn down when streaming ends (MIRROR_STOP,
+            // reconfigure, or disconnect). A real-capture init failure degrades to
+            // video-only (the Tab5's audio player just stays silent).
+            AudioStreamer audio = null;
+            if (mp.audio) {
+                try {
+                    audio = new AudioStreamer(conn);
+                    audio.start();
+                } catch (Throwable t) {
+                    System.err.println("tab5adb-agent: audio start failed, video-only: " + t);
+                    audio = null;
+                }
+            }
+            try {
+                streamVideo(conn, mp);  // returns on MIRROR_STOP (READY) / reconfigure / disconnect
+            } finally {
+                if (audio != null) audio.stop();
+            }
         }
         reader.join();
     }
@@ -383,6 +409,7 @@ public final class Server {
 
     private static final class MirrorParams {
         int targetW, targetH, scaleMode, streams, maxFps, quality, split;
+        boolean audio;  // start the AUDIO stream (streams has AUDIO and we can capture)
     }
 
     /** Parse + answer MIRROR_START; hand the params to the session loop. */
@@ -420,13 +447,17 @@ public final class Server {
         conn.curTargetH = mp.targetH;
         conn.curScaleMode = mp.scaleMode;
 
-        if ((mp.streams & CAP_VIDEO) == 0) {  // we only offer video today
+        if ((mp.streams & CAP_VIDEO) == 0) {  // mirror always carries video
             conn.sendControlResponse(CMD_MIRROR_START, reqId, STATUS_ENOTSUP, null);
             return;
         }
 
+        // Audio is started only if requested AND we can capture it (Android 12+ /
+        // test-tone); otherwise we proceed video-only and omit the §6.2 audio tail.
+        mp.audio = (mp.streams & CAP_AUDIO) != 0 && audioAvailable();
+
         int[] src = sourceSize();
-        byte[] result = new byte[12];
+        byte[] result = new byte[mp.audio ? 20 : 12];
         writeU16(result, 0, src[0]);          // source_width
         writeU16(result, 2, src[1]);          // source_height
         result[4] = (byte) VIDEO_CODEC_JPEG;  // video_codec
@@ -434,6 +465,12 @@ public final class Server {
         writeU16(result, 6, 0);               // reserved
         writeU16(result, 8, mp.targetW);      // out_width (== target after the remap)
         writeU16(result, 10, mp.targetH);     // out_height
+        if (mp.audio) {  // §6.2 audio tail: PCM_S16LE / stereo / 48 kHz
+            result[12] = (byte) AudioCapture.CODEC_PCM_S16LE;  // audio_codec
+            result[13] = (byte) AudioCapture.CHANNELS;         // audio_channels
+            writeU16(result, 14, 0);                           // reserved
+            writeU32(result, 16, AudioCapture.SAMPLE_RATE);    // audio_rate
+        }
         conn.sendControlResponse(CMD_MIRROR_START, reqId, STATUS_OK, result);
 
         // Hand off to the session loop; clear any stale stop from a prior session.
@@ -574,6 +611,79 @@ public final class Server {
             }
             int flags = (i == 0 ? FLAG_FRAME_START : 0) | (i == n - 1 ? FLAG_FRAME_END : 0);
             conn.writeFrame(TYPE_JPEG, flags, payload);
+        }
+    }
+
+    // --- audio stream (§6) — captured + sent on its own thread, parallel to video ---
+
+    /** Whether we can offer the AUDIO stream: Android 12+ for real capture, or test-tone. */
+    private boolean audioAvailable() {
+        return testTone || android.os.Build.VERSION.SDK_INT >= 31;  // Android 12+ (§6)
+    }
+
+    /**
+     * Captures device audio ({@link AudioCapture}) and writes it as TYPE=AUDIO frames
+     * on a dedicated thread, so audio never blocks the JPEG flow and vice versa
+     * (frame writes serialize in {@link Conn#writeFrame}). Each chunk is one
+     * self-contained PCM frame (FRAME_START|FRAME_END, §6.3). Stops when streaming
+     * ends — the session loop {@link #stop}s it after {@code streamVideo} returns,
+     * and the loop also exits on the same {@code conn} flags.
+     */
+    private final class AudioStreamer {
+        private final Conn conn;
+        private final AudioCapture cap;
+        private final Thread thread;
+        private volatile boolean running = true;
+
+        AudioStreamer(Conn conn) {
+            this.conn = conn;
+            this.cap = new AudioCapture(testTone);
+            this.thread = new Thread(this::loop, "tab5adb-audio");
+            this.thread.setDaemon(true);
+        }
+
+        /** Open capture (may throw) then start the send thread. */
+        void start() {
+            cap.start();
+            thread.start();
+        }
+
+        private void loop() {
+            byte[] buf = new byte[AudioCapture.CHUNK_BYTES];
+            long chunks = 0;
+            try {
+                while (running && !conn.closed && !conn.stopRequested
+                        && conn.pendingStart == null) {
+                    int n = cap.read(buf);
+                    if (n <= 0) break;
+                    // writeFrame is synchronous, so reusing `buf` next iteration is safe;
+                    // copy only the short last chunk.
+                    byte[] payload = (n == buf.length) ? buf : java.util.Arrays.copyOf(buf, n);
+                    conn.writeFrame(TYPE_AUDIO, FLAG_FRAME_START | FLAG_FRAME_END, payload);
+                    chunks++;
+                }
+            } catch (IOException eof) {
+                synchronized (conn.lock) {
+                    conn.closed = true;
+                    conn.lock.notifyAll();
+                }
+            } catch (Throwable t) {
+                System.err.println("tab5adb-agent: audio: " + t);
+            } finally {
+                cap.close();
+            }
+            System.out.println("tab5adb-agent: audio stopped after " + chunks + " chunks");
+        }
+
+        /** Stop the send thread and release capture (idempotent; unblocks read()). */
+        void stop() {
+            running = false;
+            cap.close();
+            try {
+                thread.join(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

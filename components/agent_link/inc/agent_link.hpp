@@ -26,7 +26,9 @@
 //   - VideoListener — the JPEG mirror stream. The feature (e.g. the mirror
 //     screen) implements it and registers it with set_video_listener(); it comes
 //     and goes independently of the link, which the owner keeps alive across
-//     features. Future AUDIO / EVENT channels add the same kind of set_* setter.
+//     features.
+//   - AudioListener — the PCM mirror stream (§6), registered with
+//     set_audio_listener(); the same independent come-and-go as VideoListener.
 #pragma once
 
 #include <atomic>
@@ -92,6 +94,15 @@ struct MirrorInfo {
     uint8_t video_codec = 0;     // 0x01 = JPEG(YUV420)
     uint16_t out_width = 0;      // streamed frame width [px]
     uint16_t out_height = 0;     // streamed frame height [px]
+};
+
+// The audio format the agent chose, from the MIRROR_START response audio tail
+// (§6.2). Delivered to the AudioListener as on_audio_started when AUDIO was
+// started; open the audio sink (bsp_audio_open) with these. v1 codec is PCM_S16LE.
+struct AudioInfo {
+    uint32_t sample_rate = 0;  // e.g. 48000
+    uint8_t channels = 0;      // e.g. 2 (stereo; the Tab5 BSP downmixes for speaker)
+    uint8_t codec = 0;         // agent_link::AudioCodec (kAudioCodecPcmS16le)
 };
 
 // The source device's logical orientation (§4.4 ORIENTATION event). The Tab5
@@ -164,6 +175,27 @@ public:
     virtual void on_video_strip(Link* /*link*/, const VideoStrip& /*strip*/) = 0;
 };
 
+// Audio channel delegate — the PCM mirror stream (TYPE=AUDIO, §6). The AUDIO
+// analogue of VideoListener: a feature registers it with Link::set_audio_listener()
+// while it wants audio and clears it ({}) to detach; the link survives. Held weakly
+// (lock()ed before each dispatch). Callbacks fire on the reader thread, so NEVER
+// block here — copy the PCM into a ring and let an audio task drain it (§6.3);
+// blocking would stall the per-A_WRTE flow control that gates the video stream.
+class AudioListener {
+public:
+    virtual ~AudioListener() = default;
+
+    // The MIRROR_START response carried the §6.2 audio tail: the audio stream is
+    // about to flow with `info`'s format. Open the audio sink (bsp_audio_open) from
+    // this. Fires once per start_mirror() that requested (and got) AUDIO.
+    virtual void on_audio_started(Link* /*link*/, const AudioInfo& /*info*/) {}
+
+    // One AUDIO frame = one codec unit (§6.3): for codec=PCM, `pcm`/`len` is a raw
+    // interleaved 16-bit-LE PCM chunk. `pcm` points into the Link's rx buffer and is
+    // valid only for the duration of this call — copy what you keep.
+    virtual void on_audio_data(Link* /*link*/, const uint8_t* /*pcm*/, size_t /*len*/) = 0;
+};
+
 class Link : public adb::StreamListener,
              public std::enable_shared_from_this<Link> {
 public:
@@ -188,6 +220,12 @@ public:
     // weakly. Callable from any thread; the new listener takes effect for the next
     // strip dispatched on the reader thread.
     void set_video_listener(std::weak_ptr<VideoListener> video);
+
+    // Register (or clear, with an empty weak_ptr) the audio-channel listener. Held
+    // weakly. Callable from any thread; takes effect for the next AUDIO frame /
+    // on_audio_started dispatched on the reader thread. The AUDIO analogue of
+    // set_video_listener.
+    void set_audio_listener(std::weak_ptr<AudioListener> audio);
 
     // Start mirroring: send MIRROR_START (§4.4) with `cfg` (panel size / scale
     // mode / streams). Non-blocking — the agent's response arrives as
@@ -265,6 +303,7 @@ private:
     void handle_control_response(const uint8_t* payload, size_t len);
     void handle_event(const uint8_t* payload, size_t len);
     void handle_jpeg(const FrameHeader& h, const uint8_t* payload);
+    void handle_audio(const FrameHeader& h, const uint8_t* payload);
     void send_hello_response(uint8_t req_id, uint8_t status);
     void fail(adb::Error err);          // protocol error: close + notify
     void fire_close_once(adb::Error err);
@@ -287,6 +326,10 @@ private:
     // the reader thread, so guarded by video_mtx_.
     std::weak_ptr<VideoListener> video_;
     mutable std::mutex video_mtx_;
+    // Audio channel listener (the feature). Same model as video_: set/cleared from
+    // any thread, read on the reader thread, guarded by audio_mtx_.
+    std::weak_ptr<AudioListener> audio_;
+    mutable std::mutex audio_mtx_;
     HelloConfig cfg_;
 
     std::vector<uint8_t> rx_;  // frame accumulator (reader thread only)

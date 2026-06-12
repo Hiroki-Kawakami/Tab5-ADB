@@ -15,9 +15,10 @@ Tab5（ESP32-P4。組み込み ADB ホスト）と Android 側の `tab5adb-agent
   確認に限る。mirror など個別機能のパラメータは扱わず、それらは各機能の開始メッセージ
   （`MIRROR_START` 等）が運ぶ。agent_link は mirror 専用ではなく Tab5⇄Android の汎用リンク。
 
-> **ステータス。** フレーム層（§3）・HELLO + `MIRROR_START`（§4）・映像（§5）はこの版で確定。
-> 音声（§6）は **枠だけ**（`MIRROR_START` の `AUDIO` ビット＋ AUDIO フレームを将来追記）。実機で
-> 詰める数値（`max_payload`/`SPLIT_COUNT` の最適値など）は §10。
+> **ステータス。** フレーム層（§3）・HELLO + `MIRROR_START`（§4）・映像（§5）・音声（§6）は
+> この版で確定。音声は **Tab5Only / PhoneOnly の2モード**（`MIRROR_START` の `streams` の `AUDIO`
+> ビット ON/OFF で選択）、コーデックは v1 = 生 PCM（Opus 予約）、**ターゲットは Android 12 以降**。
+> 実機で詰める数値（`max_payload`/`SPLIT_COUNT` の最適値、音声チャンク長/リング深さなど）は §10。
 
 ---
 
@@ -228,7 +229,8 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
  +0   u16     target_width        ビューア面の幅 [px] (LE)。全画面 mirror = 720
  +2   u16     target_height       ビューア面の高さ [px] (LE)。全画面 mirror = 1280
  +4   u8      scale_mode          スケールモード。0=fit（既定） / 1=fill / 2=aspect（§5.3）
- +5   u8      streams             開始するストリームのビットマスク（§4.6 と同じ bit 割当）。v1 = 0x01（VIDEO のみ）
+ +5   u8      streams             開始するストリームのビットマスク（§4.6 と同じ bit 割当）。映像のみ=0x01、
+                                  Tab5Only 音声つき=0x03（VIDEO|AUDIO。§6）。AUDIO 単独は非対応（mirror は常に映像を伴う）
  +6   u16     reserved            0
  +8   u8      max_fps             フレームレート上限。0 = 無制限（agent 既定の上限のみ）。低レート用途
                                   （DeviceScreen の preview 等）で帯域とエンコード負荷をソースで絞る
@@ -254,7 +256,12 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
  +8   u16     out_width           実際に流すフレームの幅 [px] (LE)。fit/fill = target_width、
                                   aspect = agent が決めたサイズ（§5.3）。受信側はこれでバッファを確保する
  +10  u16     out_height          実際に流すフレームの高さ [px] (LE)
- (= 12 bytes。将来は末尾に append-only。+8 以降を欠く旧応答は out = target とみなす)
+ +12  u8      audio_codec         音声コーデック。0x01=PCM_S16LE（§6）。0x02 以降を Opus 等に予約。
+                                  AUDIO を開始しないとき（streams に AUDIO 無し / agent が音声非対応）は +12 以降が不在
+ +13  u8      audio_channels      音声チャンネル数（2=ステレオ）
+ +14  u16     reserved            0
+ +16  u32     audio_rate          サンプルレート [Hz] (LE)。48000
+ (= 映像のみ 12 bytes / 音声つき 20 bytes。append-only。音声タイル(+12 以降)を欠く応答 = 音声なし)
 ```
 
 - `streams` に立っているが agent が提供できない（HELLO の `capabilities` に無い）ビットがあれば、agent は
@@ -370,12 +377,12 @@ mirror 中、**agent が EVENT として送る**。ソース端末（ディス�
 | bit | 名前 | 意味 |
 |---|---|---|
 | 0 | `VIDEO` | 映像 mirror（JPEG ストリップ。§5） |
-| 1 | `AUDIO` | 音声 mirror（§6。**予約**） |
+| 1 | `AUDIO` | 音声 mirror（§6。Android 12+） |
 | 2 | `APPINFO` | アプリ情報（`GET_APP_LIST` / `GET_APP_ICON`。§4.4） |
 | 3-15 | 予約 | 0 |
 
-agent・Tab5 とも `VIDEO` と `APPINFO` を立てる（agent は PackageManager に届かない環境では
-`APPINFO` を落とす。`AUDIO` は将来）。両者の `capabilities` の **AND** が利用可能な機能集合。
+agent・Tab5 とも `VIDEO` / `AUDIO`（§6） / `APPINFO` を立てる（agent は PackageManager に届かない
+環境では `APPINFO` を落とす）。両者の `capabilities` の **AND** が利用可能な機能集合。
 
 ### 4.5 ステータスコード（共通の基準値・拡張可）
 
@@ -572,17 +579,57 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 
 ---
 
-## 6. 音声ストリーム（AUDIO）— 枠のみ・予約
+## 6. 音声ストリーム（AUDIO）
 
-`TYPE = AUDIO`(0x11) のフレームで音声（PCM またはエンコード済み）を Android→Tab5 へ運ぶ予定。
-**本版では構造を確定しない**（拡張の余地だけ確保）。実装時に決めるもの:
+`TYPE = AUDIO`(0x11) のフレームで音声を Android→Tab5 の単方向で運ぶ。**ターゲットは Android 12
+以降**（それ以前では音声機能を動かさない）。agent は `AudioRecord` の hidden ソース
+`REMOTE_SUBMIX`（値 8）で端末の出力ミックスを取り込む — app_process の shell uid が持つ
+`CAPTURE_AUDIO_OUTPUT` のおかげで **MediaProjection もパーミッションダイアログも不要**（scrcpy と
+同じ手法。実機 Android 14 でキャプチャ成立と消音挙動を確認済み）。
 
-- パラメータ（sample_rate / channels / フォーマット / 圧縮）は **`MIRROR_START`（§4.4）の末尾に
-  append したフィールドが運ぶ**（`streams` の `AUDIO` ビットで開始を選択）。
-- AUDIO payload のサブヘッダ（タイムスタンプ/通し番号など）と本体形式。
-- ストリーム境界は §3.2 の `FRAME_START`/`FRAME_END` を流用。
+### 6.1 モードと開始
+
+音声は **2 モード**のみ。`MIRROR_START`（§4.4）の `streams` の `AUDIO`(0x02) ビットで選択する
+（mirror は常に映像を伴うので音声つきは `streams = VIDEO|AUDIO = 0x03`）:
+
+- **Tab5Only（既定）= `AUDIO` ビット ON**: agent が `REMOTE_SUBMIX` でキャプチャして Tab5 へ流す。
+  REMOTE_SUBMIX は出力をサブミックスへリルートするので、**キャプチャ中はスマホ本体が消音**される
+  （開始/終了に一瞬のトーン漏れがある）。= 「Tab5 からのみ再生」。
+- **PhoneOnly = `AUDIO` ビット OFF**: agent は音声を取り込まない。スマホがそのまま鳴る。
+  = 「スマホからのみ再生（音声転送なし）」。
+
+「両方から再生」は REMOTE_SUBMIX が端末を消すため別機構（scrcpy `--audio-dup` 相当の
+`AudioPolicy` + loopback-render `AudioMix`）が要り、**現状は非対応**。将来やるなら `MIRROR_START`
+引数末尾に `audio_flags`（append-only）を足して選ぶ余地を残す。
+
+### 6.2 フォーマット（agent が決め、MIRROR_START 応答が運ぶ）
+
+agent が音声フォーマットを決定し、`MIRROR_START` 応答（§4.4）の末尾フィールド（`audio_codec` /
+`audio_channels` / `audio_rate`）で Tab5 へ伝える。Tab5 はこれで音声出力（`bsp_audio_open`）を
+構成する。Tab5 側からのネゴシエーションはしない。v1 は **生 PCM**:
+
+- `audio_codec` = `0x01` (PCM_S16LE)。`0x02` 以降を Opus 等に予約。
+- `audio_channels` = 2（ステレオ。Tab5 の BSP がスピーカー用にモノミックス、HP はステレオ）。
+- `audio_rate` = 48000。
+
+### 6.3 AUDIO フレーム payload
+
+**1 AUDIO フレーム = 1 コーデック単位**。コーデックは MIRROR_START 応答の `audio_codec` で確定し、
+フレームごとには重複して持たせない（Opus へ無改造で差し替えられる構成）:
+
+- **PCM (codec=0x01)**: payload = インターリーブ 16bit LE PCM チャンク（任意長。低レイテンシと
+  JPEG とのバースト回避のため **~10ms 刻み**で送る運用）。
+- **Opus (将来 codec=0x02)**: payload = 1 Opus パケット（フレーム層の `LENGTH` がパケット境界を
+  与えるので追加のサブヘッダは不要）。
+
+`FRAME_START`/`FRAME_END` は両方立てる（各 AUDIO フレームが自己完結）。タイムスタンプ/通し番号が
+要るようになったら §6 にサブヘッダを後付けする（フレーム層 §3 は不変）。
 
 映像と同じ 1 本のストリーム上を `TYPE` で多重化するので、音声追加でフレーム層（§3）は変えない。
+agent は **音声送出を JPEG 送出と別スレッド**で行い、`Conn.writeFrame` の直列化（§3）でワイヤ整合を
+保つ。Tab5 側は受信スレッドでは PCM をリングへコピーするだけにして、別の音声タスクが
+`bsp_audio_write`（I2S DMA で自然ペーシング）で吐き出す — 受信スレッドを音声出力でブロックさせない
+（映像のフロー制御を守る。リング満杯時は最古を捨てる＝音声グリッチ ≪ 映像ストール）。
 
 ---
 
@@ -668,4 +715,6 @@ A5 10 01 07 <LEN u32 LE> 00 00 00 00 D0 02 40 01 <jpeg…>
 - **`SPLIT_COUNT` の最適値**（§5.3）: 既定 4。負荷分散と転送効率の兼ね合いで実機調整。
 - **JPEG の細部**: HW JPEG デコーダの制約（最小タイルサイズ・整列。16 整列は §5.2 で前提化）と
   YUV420 サブサンプルの相性を実機確認。
-- 音声（§6）の全フィールド（`MIRROR_START` の `AUDIO` 拡張定義時）。
+- **音声（§6）の実機調整**: PCM チャンク長（~10ms 仮）と Tab5 側リングバッファ深さ（~200–300ms
+  仮）、HW JPEG デコードの AXI 占有が音声 realtime に与える影響（`SPLIT_COUNT` との兼ね合い）。
+  形式は確定（PCM_S16LE / 48k / stereo、Opus 予約）。

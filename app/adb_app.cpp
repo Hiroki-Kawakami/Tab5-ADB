@@ -82,6 +82,9 @@ void adb_app() {
     // Enable the touch controller INT so the DisplayManager touch task can block on
     // it (interrupt-driven wake) and idle when untouched instead of polling forever.
     config.touch.interrupt = true;
+    // Route audio to the speaker only while no headphone is plugged in: plugging in
+    // headphones (e.g. for the mirror audio) silences the speaker automatically.
+    config.audio.speaker_mode = BSP_AUDIO_SPEAKER_MODE_AUTO;
     ESP_ERROR_CHECK(bsp_init(&config));
 
     display_manager.init();
