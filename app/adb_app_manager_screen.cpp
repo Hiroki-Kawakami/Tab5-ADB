@@ -1,8 +1,6 @@
 #include "adb_app_manager_screen.hpp"
 
-#include <fcntl.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -57,15 +55,6 @@ void parse_sections(const std::string &out, std::vector<std::string> *user,
     std::sort(system->begin(), system->end());
 }
 
-std::string trimmed(std::string s) {
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
-    size_t i = 0;
-    while (i < s.size() && (s[i] == '\n' || s[i] == '\r' || s[i] == ' ')) ++i;
-    return s.substr(i);
-}
-
-constexpr const char *kRemoteApk = "/data/local/tmp/tab5adb_install.apk";
-constexpr size_t kReadChunk = 16 * 1024;
 constexpr int32_t kRowH = 81;  // 80px row + 1px bottom-border separator
 
 std::string fmt_size(size_t bytes) {
@@ -205,24 +194,13 @@ void ADBAppManagerScreen::onAppear() {
 }
 
 void ADBAppManagerScreen::onExit() {
-    // Abort an in-flight install: the source sees `abort` (or the closed
-    // session) on the worker thread and the push completion's exited() guard
-    // skips the UI; the job dtor releases the file/buffer. The progress dialog
-    // dies with root_.
-    if (progress_timer_) {
-        lv_timer_delete(progress_timer_);
-        progress_timer_ = nullptr;
-    }
+    // Abort an in-flight install: the transfer sees the abort on its worker
+    // thread and ends quietly (the progress dialog dies with root_; the job
+    // releases the file/buffer when the last ref drops).
     if (job_) {
-        job_->abort = true;
-        if (job_->sync) job_->sync->close();
+        job_->abort();
         job_.reset();
     }
-}
-
-ADBAppManagerScreen::InstallJob::~InstallJob() {
-    if (fd >= 0) close(fd);
-    if (buf) heap_caps_free(buf);
 }
 
 void ADBAppManagerScreen::set_filter(Filter f) {
@@ -605,154 +583,13 @@ void ADBAppManagerScreen::confirm_install(const std::string &path) {
 }
 
 void ADBAppManagerScreen::start_install(const std::string &path) {
-    adb::Client *client = app::adb_client();
-    if (!client) {
-        app::modal_message(root_, "Install failed", "Not connected.");
-        return;
-    }
-
-    auto job = std::make_shared<InstallJob>();
-    job->fd = open(path.c_str(), O_RDONLY);
-    if (job->fd < 0) {
-        app::modal_message(root_, "Install failed", "Cannot open the file.");
-        return;
-    }
-    struct stat st = {};
-    fstat(job->fd, &st);
-    job->total = (size_t)st.st_size;
-    job->buf = (uint8_t *)heap_caps_malloc(kReadChunk, MALLOC_CAP_CACHE_ALIGNED);
-    if (!job->buf) {
-        app::modal_message(root_, "Install failed", "Out of memory.");
-        return;
-    }
-    std::shared_ptr<adb::SyncListener> listener(
-        shared_from_this(), static_cast<adb::SyncListener *>(this));
-    job->sync = client->open_sync(listener);
-    if (!job->sync) {
-        app::modal_message(root_, "Install failed", "Not connected.");
-        return;
-    }
-    job_ = job;
-
-    // ---- progress dialog ----
-    progress_card_ = app::modal_open(root_);
-    auto title = lv_label_create(progress_card_);
-    lv_label_set_text(title, "Installing APK");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    progress_label_ = lv_label_create(progress_card_);
-    lv_label_set_text(progress_label_, "");
-    lv_obj_set_style_text_font(progress_label_, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(progress_label_, lv_color_hex(0x444444), 0);
-    progress_bar_ = lv_bar_create(progress_card_);
-    lv_obj_set_size(progress_bar_, LV_PCT(100), 16);
-    lv_bar_set_range(progress_bar_, 0, 100);
-    auto cancel = lv_button_create(progress_card_);
-    lv_obj_set_height(cancel, 72);
-    lv_obj_set_width(cancel, LV_PCT(100));
-    lv_obj_set_style_radius(cancel, 12, 0);
-    lv_obj_set_style_bg_color(cancel, lv_color_hex(0xe0e0e0), 0);
-    lv_obj_set_style_text_color(cancel, lv_color_black(), 0);
-    auto cancel_label = lv_label_create(cancel);
-    lv_label_set_text(cancel_label, "Cancel");
-    lv_obj_center(cancel_label);
-    lv_obj_add_event_fn(cancel, LV_EVENT_CLICKED, [this](lv_event_t*){
-        if (job_) job_->abort = true;  // the source aborts the push
-    });
-    progress_timer_ = lv_timer_create([](lv_timer_t *t) {
-        static_cast<ADBAppManagerScreen *>(lv_timer_get_user_data(t))->update_progress();
-    }, 200, this);
-    update_progress();
-
-    // The source runs on the Sync worker thread: 16 KB cache-aligned read()
-    // chunks (the SD fast path), handed out in cap-sized slices.
-    adb::SyncSource source = [job](uint8_t *dst, size_t cap) -> int {
-        if (job->abort) return -1;
-        if (job->buf_off >= job->buf_len) {
-            ssize_t n = read(job->fd, job->buf, kReadChunk);
-            if (n < 0) return -1;
-            if (n == 0) return 0;
-            job->buf_len = (size_t)n;
-            job->buf_off = 0;
+    // The shared install flow owns the progress dialog / push / pm install;
+    // a successful install changes the package set, so re-list.
+    auto weak = std::weak_ptr<ADBAppManagerScreen>(
+        std::static_pointer_cast<ADBAppManagerScreen>(shared_from_this()));
+    job_ = app::install_apk(root_, path, [weak](bool ok) {
+        if (auto self = weak.lock(); self && !self->exited()) {
+            if (ok) self->refresh();
         }
-        size_t n = std::min(cap, job->buf_len - job->buf_off);
-        memcpy(dst, job->buf + job->buf_off, n);
-        job->buf_off += n;
-        job->sent += n;
-        return (int)n;
-    };
-    job->sync->push(kRemoteApk, 0644, (uint32_t)st.st_mtime, std::move(source),
-                    [self = shared_from_this(), this, job](adb::Error err) {
-        // Sync worker thread: marshal to LVGL.
-        lv_async_call([self, this, job, err]() {
-            if (exited() || job != job_) return;
-            if (err != adb::Error::Ok || job->abort) {
-                bool aborted = job->abort;
-                close_progress();
-                app::adb_client()->exec(std::string("rm -f ") + kRemoteApk,
-                                        [](adb::Error, const std::string &) {});
-                if (!aborted) {
-                    app::modal_message(root_, "Install failed",
-                                       (std::string("push: ") + adb::to_string(err)).c_str());
-                }
-                return;
-            }
-            // The APK landed in /data/local/tmp; hand off to pm install. Stop
-            // the byte counter so the label keeps the "Installing..." text.
-            lv_timer_delete(progress_timer_);
-            progress_timer_ = nullptr;
-            lv_bar_set_value(progress_bar_, 100, LV_ANIM_OFF);
-            lv_label_set_text(progress_label_, "Installing...");
-            run_pm_install();
-        });
     });
-}
-
-void ADBAppManagerScreen::run_pm_install() {
-    app::adb_client()->exec(std::string("pm install -r ") + kRemoteApk,
-                            [self = shared_from_this(), this, job = job_](
-                                adb::Error err, const std::string &out) {
-        // Reader thread: marshal to LVGL.
-        auto box = std::make_shared<std::string>(out);
-        lv_async_call([self, this, job, err, box]() {
-            if (exited() || job != job_) return;
-            close_progress();
-            app::adb_client()->exec(std::string("rm -f ") + kRemoteApk,
-                                    [](adb::Error, const std::string &) {});
-            if (err == adb::Error::Ok && box->find("Success") != std::string::npos) {
-                refresh();
-                app::modal_message(root_, "Install", "Install complete.");
-            } else {
-                app::modal_message(root_, "Install failed",
-                                   trimmed(err == adb::Error::Ok ? *box : adb::to_string(err)).c_str());
-            }
-        });
-    });
-}
-
-void ADBAppManagerScreen::update_progress() {
-    if (!job_ || !progress_bar_) return;
-    size_t sent = job_->sent;
-    size_t total = job_->total;
-    if (total) lv_bar_set_value(progress_bar_, (int32_t)(sent * 100 / total), LV_ANIM_OFF);
-    char text[80];
-    snprintf(text, sizeof(text), "%s / %s",
-             fmt_size(sent).c_str(), fmt_size(total).c_str());
-    lv_label_set_text(progress_label_, text);
-}
-
-void ADBAppManagerScreen::close_progress() {
-    if (progress_timer_) {
-        lv_timer_delete(progress_timer_);
-        progress_timer_ = nullptr;
-    }
-    if (progress_card_) {
-        app::modal_close(progress_card_);
-        progress_card_ = nullptr;
-        progress_bar_ = nullptr;
-        progress_label_ = nullptr;
-    }
-    if (job_) {
-        if (job_->sync) job_->sync->close();
-        job_.reset();
-    }
 }

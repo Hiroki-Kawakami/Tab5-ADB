@@ -1,0 +1,25 @@
+# SD card -> Android copy: Connect -> File Manager -> SD Card -> test.txt
+# preview -> Copy to Android -> picker (Internal Storage) -> Copy Here at the
+# root -> done. Leaves /sdcard/test.txt on the phone — clean up with
+#   adb shell rm /sdcard/test.txt
+# Needs a real phone plugged into the PC.
+settle
+tap 360 640
+wait 9000
+settle
+tap 551 258
+settle
+tap 360 730
+settle
+tap 360 322
+settle
+capture simulator/verify/out/copy_sd_preview.jpg
+tap 360 600
+wait 2500
+settle
+capture simulator/verify/out/copy_adb_picker.jpg
+tap 510 60
+wait 3000
+settle
+capture simulator/verify/out/copy_push_result.jpg
+quit

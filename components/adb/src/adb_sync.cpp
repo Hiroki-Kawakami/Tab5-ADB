@@ -16,6 +16,7 @@ namespace adb {
 namespace {
 
 constexpr uint32_t kWorkerStack = 4096;  // framing + memcpy only, no crypto
+constexpr size_t kPullChunk = 16 * 1024;  // pull slice handed to the sink
 
 void put_le32(uint8_t* p, uint32_t v) {
     p[0] = static_cast<uint8_t>(v);
@@ -142,6 +143,15 @@ void Sync::push(const std::string& remote_path, uint32_t perm, uint32_t mtime,
     });
 }
 
+void Sync::pull(const std::string& remote_path, SyncSink sink,
+                std::function<void(Error)> cb) {
+    enqueue([this, remote_path, sink = std::move(sink),
+             cb = std::move(cb)](bool alive) {
+        if (alive) do_pull(remote_path, sink, cb);
+        else if (cb) cb(Error::Cancelled);
+    });
+}
+
 void Sync::do_stat(const std::string& path, std::function<void(Error, FileStat)> cb) {
     if (!write_request(sync::ID_STAT, path)) {
         if (cb) cb(Error::StreamClosed, FileStat{});
@@ -253,6 +263,56 @@ void Sync::do_push(const std::string& path, uint32_t perm, uint32_t mtime,
         if (cb) cb(Error::Rejected);
     } else {
         if (cb) cb(Error::Protocol);
+    }
+}
+
+void Sync::do_pull(const std::string& path, SyncSink sink,
+                   std::function<void(Error)> cb) {
+    if (!write_request(sync::ID_RECV, path)) {
+        if (cb) cb(Error::StreamClosed);
+        return;
+    }
+    // RECV v1 streams DATA + <size> + payload until DONE (or FAIL + message).
+    // Payload is consumed in pipe-sized slices — no whole-file buffer.
+    std::vector<uint8_t> buf(kPullChunk);
+    for (;;) {
+        uint8_t hdr[8];
+        if (!read_exact(hdr, sizeof(hdr))) {
+            if (cb) cb(Error::StreamClosed);
+            return;
+        }
+        uint32_t id = get_le32(hdr);
+        uint32_t len = get_le32(hdr + 4);
+        if (id == sync::ID_DONE) {
+            if (cb) cb(Error::Ok);
+            return;
+        }
+        if (id == sync::ID_FAIL) {
+            std::vector<uint8_t> drain(len);  // consume the message, keep the pipe aligned
+            if (len) read_exact(drain.data(), len);
+            if (cb) cb(Error::Rejected);
+            return;
+        }
+        if (id != sync::ID_DATA || len > sync::DATA_MAX) {
+            if (cb) cb(Error::Protocol);
+            return;
+        }
+        for (size_t left = len; left > 0;) {
+            size_t take = std::min(left, buf.size());
+            if (!read_exact(buf.data(), take)) {
+                if (cb) cb(Error::StreamClosed);
+                return;
+            }
+            left -= take;
+            if (sink && !sink(buf.data(), take)) {
+                // The wire has no RECV cancel: end the whole session. close()
+                // is worker-safe (no self-join); the worker loop then exits
+                // and fires on_sync_close.
+                if (cb) cb(Error::Cancelled);
+                close();
+                return;
+            }
+        }
     }
 }
 

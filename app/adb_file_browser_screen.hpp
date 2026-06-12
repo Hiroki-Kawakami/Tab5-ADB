@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -11,6 +12,14 @@
 // (pushing onto directory_stack_), and the nav Back button goes up a level —
 // or pops the screen when at the stack root.
 //
+// Two modes:
+//  - browse (path-only ctor): a plain file opens its preview screen.
+//  - pick-dir: construct with a PickDir config — files are inert/greyed, and a
+//    nav-bar button (`label`, e.g. "Copy Here") pops this screen and calls
+//    on_pick(absolute_dir) for the directory being shown, on the LVGL thread
+//    with the caller's screen on top again. Back at the root pops without the
+//    callback (= cancel).
+//
 // The screen IS the adb::SyncListener. Sync op completions fire on the Sync
 // worker thread, so every UI update is marshalled to the LVGL thread with
 // lv_async_call. Each marshalling lambda captures `self = shared_from_this()`
@@ -20,7 +29,13 @@
 // navigation drops stale list completions (fast taps / superseded loads).
 class ADBFileBrowserScreen : public Screen, public adb::SyncListener {
 public:
+    struct PickDir {
+        std::string label;  // the confirm button's text
+        std::function<void(const std::string &dir)> on_pick;
+    };
+
     ADBFileBrowserScreen(std::string path);
+    ADBFileBrowserScreen(std::string path, PickDir pick);
     ~ADBFileBrowserScreen() override;
 
     void build() override;
@@ -38,6 +53,8 @@ private:
     };
 
     std::shared_ptr<adb::Sync> sync_;
+    PickDir pick_dir_{};
+    bool picking_dir_ = false;
     std::vector<Directory> directory_stack_;
     uint32_t nav_gen_ = 0;  // bumped per navigation; stale completions are dropped
     lv_obj_t *title_label_{nullptr};

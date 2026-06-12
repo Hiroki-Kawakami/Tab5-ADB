@@ -6,6 +6,7 @@
 #include "adb_device_screen.hpp"
 #include "agent_client.hpp"
 #include "screen_manager.hpp"
+#include "sd_file_browser_screen.hpp"
 
 void HomeScreen::build() {
     lv_obj_set_size(root_, PANEL_W, PANEL_H);
@@ -32,6 +33,19 @@ void HomeScreen::build() {
 
     lv_obj_add_event_fn(connect_btn_, LV_EVENT_CLICKED,
                         [this](lv_event_t *) { start_connect(); });
+
+    // The Tab5 SD card is browsable without an adb connection.
+    lv_obj_t *sd_btn = lv_button_create(root_);
+    lv_obj_set_size(sd_btn, 260, 90);
+    lv_obj_align(sd_btn, LV_ALIGN_CENTER, 0, 200);
+    lv_obj_set_style_bg_color(sd_btn, lv_color_hex(0x37474f), 0);
+    lv_obj_t *sd_label = lv_label_create(sd_btn);
+    lv_label_set_text(sd_label, "SD Card");
+    lv_obj_set_style_text_font(sd_label, &lv_font_montserrat_20, 0);
+    lv_obj_center(sd_label);
+    lv_obj_add_event_fn(sd_btn, LV_EVENT_CLICKED, [](lv_event_t *) {
+        screen_manager.push(std::make_shared<SDFileBrowserScreen>());
+    });
 }
 
 void HomeScreen::start_connect() {

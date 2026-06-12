@@ -1,0 +1,10 @@
+# APK preview, offline path: Home -> SD Card -> testapp.apk shows the locally
+# parsed manifest (package/version/SDK) with Install greyed out (no adb
+# connection). No phone needed.
+settle
+tap 360 840
+settle
+tap 360 403
+settle
+capture simulator/verify/out/apk_preview_offline.jpg
+quit

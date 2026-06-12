@@ -19,9 +19,13 @@ static void event_fn_cb(lv_event_t *e) {
 lv_event_dsc_t *lv_obj_add_event_fn(lv_obj_t *obj, lv_event_code_t filter, std::function<void(lv_event_t*)> fn) {
     auto *fn_ptr = new std::function<void(lv_event_t*)>(std::move(fn));
 
+    // The handler itself first, the cleanup second: callbacks fire in
+    // registration order, so a DELETE-filtered fn runs before it is deleted.
+    auto *dsc = lv_obj_add_event_cb(obj, event_fn_cb, filter, fn_ptr);
+
     lv_obj_add_event_cb(obj, [](lv_event_t *e) {
         delete static_cast<std::function<void(lv_event_t*)>*>(lv_event_get_user_data(e));
     }, LV_EVENT_DELETE, fn_ptr);
 
-    return lv_obj_add_event_cb(obj, event_fn_cb, filter, fn_ptr);
+    return dsc;
 }

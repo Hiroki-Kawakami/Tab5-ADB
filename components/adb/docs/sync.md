@@ -21,7 +21,7 @@ Built direction-by-direction (each direction is its own UI later):
 | `push` (SEND) | **Tab5 → Android** | implemented |
 | `stat` (STAT) | metadata (verifier for push) | implemented |
 | `list` (LIST) | directory browse | implemented |
-| `pull` (RECV) | **Android → Tab5** | planned |
+| `pull` (RECV) | **Android → Tab5** | implemented |
 | preview | Android → memory | planned (built on `pull`) |
 
 ## API
@@ -55,6 +55,12 @@ public:
 // Called repeatedly on the Sync worker thread until it returns <= 0.
 using SyncSource = std::function<int(uint8_t* buf, size_t cap)>;
 
+// Push-style byte sink for pull(): consume `len` bytes (write to storage /
+// memory). Return false to abort the transfer — the wire has no graceful
+// mid-RECV cancel, so an abort closes the whole session (pull completes with
+// Error::Cancelled, then on_sync_close fires). Called on the worker thread.
+using SyncSink = std::function<bool(const uint8_t* data, size_t len)>;
+
 class Sync {
 public:
   // Metadata of one path (lstat semantics: a symlink is not followed).
@@ -71,6 +77,14 @@ public:
   // may block on slow storage without stalling the caller. Completion fires once.
   void push(const std::string& remote_path, uint32_t perm, uint32_t mtime,
             SyncSource source, std::function<void(Error)> cb);
+
+  // Android -> Tab5. Streams `remote_path`'s content into `sink` on the worker
+  // thread (so the sink may block on slow storage). Completion fires once:
+  // Ok after DONE, Rejected on FAIL (no such file / unreadable), Cancelled if
+  // the sink aborted (the session is closed in that case — open a fresh Sync
+  // for further ops). Progress is the sink's own byte count.
+  void pull(const std::string& remote_path, SyncSink sink,
+            std::function<void(Error)> cb);
 
   bool is_open() const;   // stream opened and not yet closed
 
@@ -106,6 +120,13 @@ is the `adb` `Sync` session (it owns a thread; the engine does not).
      to fit the device's 16 KiB CNXN maxdata — `send_write` does **not** split).
   3. send `DONE` + `<mtime>` (no payload).
   4. read the status: `OKAY` ⇒ `Error::Ok`; `FAIL` + message ⇒ `Error::Rejected`.
+- **`pull(path, sink)`** (RECV v1):
+  1. send `RECV` + path.
+  2. read headers: `DATA` + `<size>` ⇒ read `size` payload bytes (in pipe-sized
+     slices, handed to `sink` as they arrive — no whole-file buffer); `DONE` ⇒
+     `Error::Ok`; `FAIL` + message ⇒ `Error::Rejected`.
+  3. a `sink` returning false aborts: the wire has no RECV cancel, so the
+     session stream is closed (`Error::Cancelled`, then the close path runs).
 
 Classic ADB flow control still applies underneath (one `A_WRTE` per `A_OKAY`);
 `AdbStream::write()` blocks on it, which is exactly why the writes run on the
@@ -151,14 +172,17 @@ completion fires synchronously on the caller's thread with `Error::Cancelled`.
   `STAT_V2` fields await a v2 upgrade.
 - **`on_sync_close` reports `Error::Ok`** for every normal end (peer/our close);
   the cause is not distinguished yet — same deferral as `Shell`/`exec`.
-- **No compression** (`brotli`/`lz4`/`zstd` sync flags) — plain `SEND_V1`.
-- `pull` / preview are the next directions (see Status).
+- **No compression** (`brotli`/`lz4`/`zstd` sync flags) — plain `SEND_V1`/`RECV_V1`.
+- preview (pull into memory) is the next direction (see Status).
 
 ## Test
 
 `test/test_sync.cpp` is the host harness (libusb against a real, already
 authorized phone — same pattern as `test_shell.cpp`): `connect_usb()` → wait
 `Online` → `open_sync()` → `push()` a small in-memory buffer to a temp path under
-`/data/local/tmp` → `stat()` it back and assert `exists()` and matching `size`,
-then `close()` and confirm a single `on_sync_close`. Build/run in the file header.
+`/data/local/tmp` → `stat()` it back and assert `exists()` and matching `size` →
+`pull()` it back and assert the bytes round-trip, plus a `pull()` of a missing
+path (`Rejected`) and an aborting-sink `pull()` on a second session (`Cancelled`
++ that session closes), then `close()` and confirm a single `on_sync_close` per
+session. Build/run in the file header.
 </invoke>

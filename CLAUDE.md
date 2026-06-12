@@ -230,7 +230,7 @@ USB host). See `android-agent/README.md`.
 ```
 app/                         # SHARED  app logic / screens (a single component)
   terminal/                  #   ADBShellScreen's terminal widgets: term_view (cell-grid renderer) + term_keyboard
-  test/                      #   host unit tests (device_info parsers) + run.sh — no phone, no LVGL
+  test/                      #   host unit tests (device_info / apk_info parsers) + run.sh — no phone, no LVGL
 components/                  # SHARED  (both targets)
   m5stack-bsp/               #   board support (bsp_*) — device drivers + SDL sim backend
     inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_sd.h, bsp_types.h
@@ -239,7 +239,7 @@ components/                  # SHARED  (both targets)
     devices/                 #     DEVICE reusable chip drivers (ili9881c/st7123/gt911/es8388/pi4io)
     simulator/               #     SIM reusable SDL backend (sdl_backend.cpp) + sd_redirect.c (bsp_sd on host)
     boards/<model>/          #     per-model bring-up: <model>.c (device, + tab5_sd.c) + <model>_sim.cpp (sim)
-  lvgl++/                    #   C++ helpers (lv_async_call, lv_obj_add_event_fn)
+  lvgl++/                    #   C++ helpers (lv_async_call, lv_obj_add_event_fn — DELETE-filtered handlers run before cleanup)
   screen_manager/            #   Screen base + screen stack
   embedded_adb/              #   ADB host-side client (C++) — usb_host vs libusb split
     inc/                     #     public API (embedded_adb.hpp, adb_protocol.hpp)
@@ -658,7 +658,11 @@ verified by `test/test_shell.cpp` (libusb vs a real phone). **Slice 5** (done):
 the `Sync` session for the FileManager — `Client::open_sync(listener)`
 returns a `shared_ptr<Sync>` over the `sync:` service; built **direction by
 direction** (each is its own UI), starting with **Tab5→Android `push` (SEND)**
-plus `stat` (STAT) as its verifier, then `list` (LIST) for the browse UI. The
+plus `stat` (STAT) as its verifier, then `list` (LIST) for the browse UI, then
+**Android→Tab5 `pull` (RECV)** for the copy-to-SD flow — a push-style `SyncSink`
+consumes the DATA stream on the worker thread; a sink abort **closes the whole
+session** (`Error::Cancelled` — RECV has no wire-level cancel), which is why
+transfer jobs open their own `Sync` instead of borrowing a browser's. The
 `sync:` sub-protocol is request/response and **serial** (one
 request at a time on the one stream), so unlike `Shell`, `Sync` owns a private
 **worker task** that drives it synchronously: it writes requests and *blocks for
@@ -674,7 +678,9 @@ the impl: (1) `AdbConnection::send_write()` does **not** split, so each sync
 `DONE` whose length field carries the mtime. Sync sub-protocol ids are pure wire
 format in `embedded_adb/inc/adb_sync_protocol.hpp` (alongside `adb_protocol.hpp`,
 no I/O). See `docs/sync.md`; verified by `test/test_sync.cpp` (libusb vs a real
-phone: push a buffer → stat it back). Later slices add `screencap`.
+phone: push a buffer → stat it back → pull it back byte-identical, plus the
+FAIL (missing path → `Rejected`) and abort (→ `Cancelled` + session close)
+paths). Later slices add `screencap` and pull-into-memory preview.
 
 `adb` also exposes a **generic, service-agnostic raw stream** —
 `Client::open_stream(service, StreamListener) -> shared_ptr<adb::Stream>`
@@ -886,7 +892,10 @@ process; the device firmware never exits so nothing actually leaks.
 button; tapping it calls `app::adb_connect_async()`, then — on adb Online —
 chains `app::agent_client().ensure_connected()` ("Starting agent on the phone...")
 and pushes `ADBDeviceScreen` only once the agent mode settled (success and
-failure both proceed; Limited mode just hides the agent-backed features). The
+failure both proceed; Limited mode just hides the agent-backed features). Below
+Connect, an **SD Card** button pushes `SDFileBrowserScreen` directly — the local
+browser (and its previews / APK info) needs no adb connection
+(`simulator/verify/home_sd.txt`). The
 holder is a small app-global in
 `app/adb_app.cpp` that owns the single `std::shared_ptr<adb::Client>` (it must
 outlive the transient screens) and implements `adb::ClientListener`. The `Client`
@@ -1011,10 +1020,12 @@ swipe-scrollback, Ctrl+C (`^C` + exit code 130). Device-side flash-and-check
 (`app/adb_file_manager_screen.*`) — a virtual root that lists the available
 storages (Android `/sdcard`, `/`, and the Tab5 SD card) as cards. Tapping a
 storage pushes **`ADBFileBrowserScreen`** (`app/adb_file_browser_screen.*`), the
-read-only Android file browser over `Client::open_sync()` + `Sync::list()`. The
+Android file browser over `Client::open_sync()` + `Sync::list()`. The
 browser **is** the `adb::SyncListener`: it opens a `sync:` session, lists the
 directory (folders first, then case-insensitive by name; `.`/`..` filtered) and
-tapping a folder descends into it. A `directory_stack_` holds the path history —
+tapping a folder descends into it; **tapping a plain file pushes its preview
+screen** (`app::make_file_preview`, see the file-preview section below). A
+`directory_stack_` holds the path history —
 each level caches its entries — and the nav **Back** button goes up a level, or
 pops the screen at the stack root. Same two threading concerns as the shell
 screen, but note the Sync refinement: `list()` completions fire on the **Sync
@@ -1024,7 +1035,12 @@ as a `weak_ptr` — the screen passes a `shared_ptr` aliasing `shared_from_this(
 so no `detach()`); marshalled lambdas capture `self = shared_from_this()` and
 skip on `Screen::exited()`. One extra guard: a `nav_gen_` counter (LVGL-thread
 only) bumped on every navigation drops **stale list completions** when the user
-taps faster than the device responds.
+taps faster than the device responds. A second mode, **pick-dir**
+(`ADBFileBrowserScreen::PickDir{label, on_pick}` — the copy-destination picker):
+files are inert/greyed, and a nav-bar confirm button (e.g. "Copy Here") pops the
+screen then calls `on_pick(current dir)` (copy to locals before the pop — pop
+frees the lambda's storage); Back at the root pops without the callback (=
+cancel).
 
 The FileManager's **SD Card** card pushes **`SDFileBrowserScreen`**
 (`app/sd_file_browser_screen.*`) — the *local* (Tab5 SD card) counterpart of
@@ -1032,13 +1048,77 @@ the ADB browser: `bsp_sd_mount("/sd")` on demand at build, then synchronous
 POSIX `opendir`/`readdir` scans **on the LVGL thread** (local FS is fast; no
 listener/marshalling machinery), same list UI/sort, dotfiles skipped, errors
 ("SD card not found." / unreadable dir) shown in-list with Refresh re-mounting.
-Two modes: **browse** (default; plain files inert) and **pick**
+Three modes: **browse** (default; tapping a plain file pushes its preview
+screen), **pick**
 (`SDFileBrowserScreen::Pick{ext, on_pick}` — only files matching the
 case-insensitive extension are tappable, the rest are greyed; tapping one
 **pops the screen first**, then calls `on_pick(path)` on the LVGL thread with
 the caller's screen back on top — copy the callback/path to locals before the
-pop since pop frees the lambda's storage). Verified headless:
-`simulator/verify/sdcard.txt` (browse vs `simulator/sdcard/`).
+pop since pop frees the lambda's storage), and **pick-dir**
+(`SDFileBrowserScreen::PickDir{label, on_pick}` — same contract as the ADB
+browser's pick-dir mode above). Also reachable without adb from the
+HomeScreen's SD Card button. Verified headless:
+`simulator/verify/sdcard.txt` (browse vs `simulator/sdcard/`),
+`home_sd.txt` (the adb-less entry). On the host, `sd_redirect.c` forwards
+`open/fopen/opendir/stat` **plus `rename`/`unlink`** (the pull-to-SD `.part` →
+final rename needs them) to the redirected path.
+
+**File previews + Android⇄SD copy.** Tapping a plain file in either browser
+pushes a per-type **preview screen** from the extension-keyed registry in
+**`app/file_preview.{hpp,cpp}`**: `app::FileRef{where: SD|Android, path, size,
+mtime}` (the Android side passes the `DirEntry` metadata; the SD side stats
+locally) → `make_file_preview(ref)` — never null, unmatched extensions get the
+**generic preview** (info card: location/size/mtime/path + the copy actions).
+The same file also exports the shared preview building blocks
+(`preview_chrome`/`preview_header`/`preview_info_row`/`preview_action`) so
+per-type screens look alike. Copy lives in **`app/file_transfer.{hpp,cpp}`**,
+deliberately **screen-agnostic** (a later long-press context menu can drive the
+same calls from a `FileRef` without any preview screen): `pull_to_sd` /
+`push_to_android` / `install_apk` each return a `shared_ptr<TransferJob>`
+(caller stores it and calls `abort()` in `onExit()`). A job owns its **own
+`Sync` session** (a pull abort closes the session — RECV has no wire cancel —
+so it must never borrow the browser's), the overwrite-confirm step (local
+`stat()` for pull; `Sync::stat` for push, incl. an exists-but-directory error),
+and an install-flow-style progress modal (Cancel → atomic abort; 200 ms
+`lv_timer` renders an atomic byte counter). Pull writes worker-thread-side to
+`<name>.part` and renames on success (failure/abort unlinks). The job watches
+its parent root's and card's **`LV_EVENT_DELETE`** (weak self) so a screen
+teardown mid-transfer nulls the UI pointers and the transfer ends quietly —
+this is what required the `lvgl++` fix below. Flow: preview action ("Copy to SD
+Card" / "Copy to Android", the latter greyed when adb isn't Online) → the
+*other* browser in pick-dir mode → "Copy Here" → job. Verified E2E headless
+against a real Android device: `simulator/verify/copy_push.txt` (SD→Android; check the file
+on the phone, then `adb shell rm /sdcard/test.txt`) and `copy_pull.txt`
+(Android→SD into `simulator/sdcard/folder/`; needs the prep `adb push`
+documented in the script, delete the copied file after), `file_preview.txt`
+(generic preview, no phone).
+
+**`lvgl++` gotcha (cost the copy-flow bring-up):** `lv_obj_add_event_fn` also
+registers a cleanup callback that deletes the heap `std::function` on
+`LV_EVENT_DELETE`. It used to register the cleanup *first*, so an event handler
+*filtered on* `LV_EVENT_DELETE` ran after its function was deleted
+(`bad_function_call` at screen teardown). Callbacks fire in registration order,
+so the handler is now registered before the cleanup — DELETE-filtered handlers
+(the transfer-job watches) run exactly once, then are freed.
+
+**APK preview** — the first registry entry (`.apk` on the **SD** side; an
+Android-side .apk stays generic — the parser reads local files, copy it to SD
+first). **`ApkPreviewScreen`** (`app/apk_preview_screen.*`) shows the manifest
+metadata parsed **locally, no device needed** by **`app/apk_info.{hpp,cpp}`**
+(`app::apkinfo::parse`): zip EOCD → central directory → `AndroidManifest.xml`
+(stored or raw-deflate via zlib, already linked on both targets) → binary AXML
+(UTF-8/UTF-16 string pools, `manifest`/`uses-sdk`/`application` attributes →
+package / versionName / versionCode / minSdk / targetSdk / label). Pure parser
+(no LVGL/adb), `device_info`-style **host-tested**: `TEST=test_apk_info nix
+develop -c app/test/run.sh` (fixtures = `simulator/sdcard/testapp.apk` +
+`dummy.apk` rejected; the runner passes the repo root as argv[1] and links
+`-lz`). Parser contract as ever: a missing field is hidden, never an error; a
+literal `android:label` is shown (header title), a resource reference stays
+empty (resources.arsc is out of scope). The **Install** action (greyed
+"(not connected)" unless adb is Online) confirm-modals then runs the shared
+`app::install_apk`. Verified headless: `simulator/verify/apk_preview.txt`
+(offline parse, no phone) and `apk_preview_install.txt` (real install on the
+real Android device; `adb uninstall com.tab5adb.testapp` after).
 
 `ADBDeviceScreen`'s **Apps** button pushes **`ADBAppManagerScreen`**
 (`app/adb_app_manager_screen.*`) — the installed-app manager. Listing has two
@@ -1085,17 +1165,15 @@ dialogs die with the screen). All exec completions marshal with
 `lv_async_call` + `self`/`exited()` guards.
 
 The app manager's nav **Install** button runs the **APK install flow**:
-`SDFileBrowserScreen` in pick mode (`.apk`) → size-confirm modal →
-`Sync::push` to `/data/local/tmp/tab5adb_install.apk` with a progress dialog →
-`pm install -r` → `rm -f` the temp + result modal + re-list. The push
-`SyncSource` runs on the **Sync worker thread** and reads the file per the SD
-rule (16 KB `read()` chunks into a `MALLOC_CAP_CACHE_ALIGNED` buffer, sliced
-into the cap-sized wire chunks), bumping an atomic byte counter that a 200 ms
-`lv_timer` renders — no per-chunk marshalling. The job state lives in a
-`shared_ptr<InstallJob>` held by the source closure (never the screen), whose
-dtor releases fd/buffer whenever the last ref drops; Cancel sets an atomic
-`abort` the source turns into a push abort; `onExit()` aborts + closes the
-session and the `job != job_` guard ignores superseded completions. Verified
+`SDFileBrowserScreen` in pick mode (`.apk`) → size-confirm modal → the shared
+**`app::install_apk`** transfer job (file_transfer: `Sync::push` to
+`/data/local/tmp/tab5adb_install.apk` with the progress dialog → `pm install
+-r` → `rm -f` the temp + result modal; the push `SyncSource` runs on the
+**Sync worker thread** and reads the file per the SD rule — 16 KB `read()`
+chunks into a `MALLOC_CAP_CACHE_ALIGNED` buffer — bumping an atomic byte
+counter a 200 ms `lv_timer` renders). The screen holds the returned
+`TransferJob` and `abort()`s it in `onExit()`; `on_done(true)` re-lists. The
+same flow backs the APK preview's Install. Verified
 E2E headless against a real Android device (`simulator/verify/apps.txt`, `apps_scroll.txt`
 — the recycler under a long drag (note: `down`/`move` only write the touch
 snapshot, so drag scripts need `wait`s between steps to be sampled as a drag) —

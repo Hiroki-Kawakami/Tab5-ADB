@@ -158,8 +158,9 @@ Build artifacts go to `test/build/` (gitignored). The phone must be authorized
    → extend `docs/one-shots.md`.
 5. **`Sync`** — `sync:` filesystem session; methods one-shot style. Built
    direction-by-direction (each gets its own UI): **`push` (Tab5→Android) first**
-   with `stat` as its verifier, then `list` (the browse UI) — *done*; then `pull`
-   (Android→Tab5) and preview. `Client::open_sync(listener)` returns a
+   with `stat` as its verifier, then `list` (the browse UI), then `pull`
+   (Android→Tab5, the copy-to-SD flow) — all *done*; preview (pull into memory)
+   remains. `Client::open_sync(listener)` returns a
    `shared_ptr<Sync>`; the session owns a private worker thread that drives the
    synchronous `sync:` sub-protocol, so its completions fire on that worker
    thread (the one documented threading refinement — still never the UI thread).

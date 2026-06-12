@@ -1,0 +1,12 @@
+# Generic file preview from the SD browser (no adb needed).
+# Home -> SD Card -> tap test.txt -> info card -> back to the listing.
+settle
+tap 360 840
+settle
+tap 360 322
+settle
+capture simulator/verify/out/file_preview_generic.jpg
+tap 60 60
+settle
+capture simulator/verify/out/file_preview_back.jpg
+quit

@@ -73,6 +73,12 @@ public:
 // Called repeatedly on the worker thread until it returns <= 0.
 using SyncSource = std::function<int(uint8_t* buf, size_t cap)>;
 
+// Push-style byte sink for pull(): consume `len` bytes (write to storage /
+// memory). Return false to abort — the wire has no graceful mid-RECV cancel,
+// so an abort closes the whole session (pull completes with Error::Cancelled,
+// then on_sync_close fires). Called on the worker thread.
+using SyncSink = std::function<bool(const uint8_t* data, size_t len)>;
+
 class Sync {
 public:
     ~Sync();
@@ -93,6 +99,14 @@ public:
     // Non-blocking; the source is pumped on the worker thread. Completion once.
     void push(const std::string& remote_path, uint32_t perm, uint32_t mtime,
               SyncSource source, std::function<void(Error)> cb);
+
+    // Android -> Tab5: stream `remote_path`'s content into `sink` on the worker
+    // thread (so the sink may block on slow storage). Completion fires once: Ok
+    // after DONE, Rejected on FAIL, Cancelled if the sink aborted — the session
+    // is closed in that case (RECV has no mid-stream cancel on the wire), so
+    // open a fresh Sync for further ops.
+    void pull(const std::string& remote_path, SyncSink sink,
+              std::function<void(Error)> cb);
 
     bool is_open() const;
 
@@ -124,6 +138,8 @@ private:
                  std::function<void(Error, std::vector<DirEntry>)> cb);
     void do_push(const std::string& path, uint32_t perm, uint32_t mtime,
                  SyncSource source, std::function<void(Error)> cb);
+    void do_pull(const std::string& path, SyncSink sink,
+                 std::function<void(Error)> cb);
 
     // Wire helpers, all on the worker thread. Return false once the stream is
     // gone (or stop was requested), so a caller turns that into StreamClosed.

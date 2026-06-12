@@ -1,0 +1,25 @@
+# APK preview install E2E: Connect -> File Manager -> SD Card -> testapp.apk
+# preview (Install enabled) -> Install -> confirm -> push + pm install ->
+# "Install complete." Really installs com.tab5adb.testapp on the phone —
+# uninstall afterwards with
+#   adb uninstall com.tab5adb.testapp
+# Needs a real phone plugged into the PC.
+settle
+tap 360 640
+wait 9000
+settle
+tap 551 258
+settle
+tap 360 730
+settle
+tap 360 403
+settle
+capture simulator/verify/out/apk_preview_online.jpg
+tap 360 728
+settle
+capture simulator/verify/out/apk_preview_confirm.jpg
+tap 500 698
+wait 5000
+settle
+capture simulator/verify/out/apk_preview_result.jpg
+quit

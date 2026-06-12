@@ -60,8 +60,11 @@ The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
 
 - `app/` — application screens and logic (shared by device + simulator):
   device home (summary header + screen preview + tools), Device Info / Metrics,
-  Mirroring, Shell, File Manager, Apps, Logcat. `app/test/` holds host unit
-  tests for the pure parsers (`app/test/run.sh`, no phone).
+  Mirroring, Shell, File Manager, Apps, Logcat. The File Manager browses the
+  Android device and the Tab5 SD card (also reachable adb-less from the home
+  screen), with per-file-type preview screens, Android⇄SD file copy, and an APK
+  preview (manifest parsed locally) that installs directly. `app/test/` holds
+  host unit tests for the pure parsers (`app/test/run.sh`, no phone).
 - `components/` — shared components (both targets): `m5stack-bsp/` (board support
   behind the `bsp.h` API — device chip drivers in `devices/`, the SDL simulator
   backend in `simulator/`, and per-model bring-up in `boards/<model>/` with a

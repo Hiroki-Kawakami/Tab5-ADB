@@ -1,0 +1,32 @@
+# Android -> SD card copy: Connect -> File Manager -> Internal Storage ->
+# Download -> AAA_tab5_copy.txt preview -> Copy to SD Card -> pick folder/ ->
+# Copy Here -> done. Prepare the source first:
+#   adb push <file> /sdcard/Download/AAA_tab5_copy.txt && adb kill-server
+# Leaves simulator/sdcard/folder/AAA_tab5_copy.txt — delete it afterwards.
+# Needs a real phone plugged into the PC.
+settle
+tap 360 640
+wait 9000
+settle
+tap 551 258
+settle
+tap 360 250
+wait 3000
+settle
+tap 360 565
+wait 3000
+settle
+capture simulator/verify/out/copy_download.jpg
+tap 360 484
+settle
+capture simulator/verify/out/copy_remote_preview.jpg
+tap 360 600
+settle
+capture simulator/verify/out/copy_sd_picker.jpg
+tap 360 160
+settle
+tap 549 60
+wait 3000
+settle
+capture simulator/verify/out/copy_pull_result.jpg
+quit

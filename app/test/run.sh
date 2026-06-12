@@ -29,7 +29,10 @@ g++ -std=c++17 \
     -I"$app" \
     "$test_src" \
     "$app/device_info.cpp" \
+    "$app/apk_info.cpp" \
+    -lz \
     -o "$bin"
 
 echo "[run] $TEST"
-exec "$bin"
+# argv[1] = repo root, for tests with file fixtures (apk_info).
+exec "$bin" "$app/.."

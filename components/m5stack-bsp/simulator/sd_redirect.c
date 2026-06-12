@@ -104,3 +104,18 @@ int stat(const char *pathname, struct stat *st) {
     char buf[PATH_BUF_MAX];
     return real(redirect(pathname, buf, sizeof(buf)), st);
 }
+
+int rename(const char *oldpath, const char *newpath) {
+    static int (*real)(const char *, const char *) = NULL;
+    if (!real) real = (int (*)(const char *, const char *))dlsym(RTLD_NEXT, "rename");
+    char obuf[PATH_BUF_MAX], nbuf[PATH_BUF_MAX];
+    return real(redirect(oldpath, obuf, sizeof(obuf)),
+                redirect(newpath, nbuf, sizeof(nbuf)));
+}
+
+int unlink(const char *pathname) {
+    static int (*real)(const char *) = NULL;
+    if (!real) real = (int (*)(const char *))dlsym(RTLD_NEXT, "unlink");
+    char buf[PATH_BUF_MAX];
+    return real(redirect(pathname, buf, sizeof(buf)));
+}

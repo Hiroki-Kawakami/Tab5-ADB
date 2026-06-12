@@ -136,14 +136,69 @@ int main() {
     }
     bool listed = list_done && list_err.load() == adb::Error::Ok && list_count > 0;
 
+    // Pull the pushed file back (Android -> Tab5) and check the round trip.
+    std::atomic<bool> pull_done{false};
+    std::atomic<adb::Error> pull_err{adb::Error::Ok};
+    std::string pulled;
+    sync->pull(
+        remote,
+        [&](const uint8_t* d, size_t n) {
+            pulled.append(reinterpret_cast<const char*>(d), n);
+            return true;
+        },
+        [&](adb::Error err) {
+            pull_err = err;
+            pull_done = true;
+        });
+    for (int i = 0; i < 100 && !pull_done; ++i) sleep_ms(100);
+    bool roundtrip = pull_done && pull_err.load() == adb::Error::Ok &&
+                     pulled == payload;
+    std::printf("pull: err=%s got=%zu (want %zu) match=%d\n",
+                adb::to_string(pull_err.load()), pulled.size(), payload.size(),
+                pulled == payload);
+
+    // Pull of a missing path must come back Rejected (adbd FAILs the RECV).
+    std::atomic<bool> miss_done{false};
+    std::atomic<adb::Error> miss_err{adb::Error::Ok};
+    sync->pull(
+        "/data/local/tmp/tab5_sync_test_does_not_exist",
+        [&](const uint8_t*, size_t) { return true; },
+        [&](adb::Error err) {
+            miss_err = err;
+            miss_done = true;
+        });
+    for (int i = 0; i < 100 && !miss_done; ++i) sleep_ms(100);
+    bool rejected = miss_done && miss_err.load() == adb::Error::Rejected;
+    std::printf("pull missing: err=%s\n", adb::to_string(miss_err.load()));
+
     sync->close();
     sync.reset();   // drop the sync; the weak listener ref expires with it
+
+    // An aborting sink kills its whole session (no RECV cancel on the wire):
+    // run it on a fresh Sync and confirm Cancelled + that session's close.
+    auto sync2 = client->open_sync(listener);
+    std::atomic<bool> abort_done{false};
+    std::atomic<adb::Error> abort_err{adb::Error::Ok};
+    if (sync2) {
+        sync2->pull(
+            remote, [&](const uint8_t*, size_t) { return false; },  // abort at once
+            [&](adb::Error err) {
+                abort_err = err;
+                abort_done = true;
+            });
+        for (int i = 0; i < 100 && !abort_done; ++i) sleep_ms(100);
+    }
+    bool aborted = abort_done && abort_err.load() == adb::Error::Cancelled;
+    std::printf("pull abort: err=%s\n", adb::to_string(abort_err.load()));
+    sync2.reset();
     client->close();
 
-    bool one_close = listener->closes() == 1;
-    bool ok = pushed && landed && listed && one_close;
+    bool two_closes = listener->closes() == 2;  // one per session
+    bool ok = pushed && landed && listed && roundtrip && rejected && aborted &&
+              two_closes;
     std::printf("%s (closes=%d)\n",
-                ok ? "PASSED: push lands, list works, and sync closes once"
+                ok ? "PASSED: push/list/pull round-trip, FAIL + abort paths, "
+                     "one close per session"
                    : "FAILED",
                 listener->closes());
     return ok ? 0 : 1;

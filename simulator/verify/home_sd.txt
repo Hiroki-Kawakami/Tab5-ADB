@@ -1,0 +1,16 @@
+# SD card browser straight from the home screen — no adb connection needed.
+# Home -> SD Card -> folder -> back to root -> back pops to home.
+settle
+capture simulator/verify/out/home_sd_home.jpg
+tap 360 840
+settle
+capture simulator/verify/out/home_sd_root.jpg
+tap 360 160
+settle
+capture simulator/verify/out/home_sd_folder.jpg
+tap 60 60
+settle
+tap 60 60
+settle
+capture simulator/verify/out/home_sd_back.jpg
+quit

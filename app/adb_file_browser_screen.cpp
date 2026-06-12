@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "adb_app.hpp"
+#include "file_preview.hpp"
 #include "screen_manager.hpp"
 #include "resources/resources.h"
 
@@ -36,6 +37,12 @@ ADBFileBrowserScreen::ADBFileBrowserScreen(std::string path) {
         .loading = true,
         .error = {},
     }};
+}
+
+ADBFileBrowserScreen::ADBFileBrowserScreen(std::string path, PickDir pick)
+    : ADBFileBrowserScreen(std::move(path)) {
+    pick_dir_ = std::move(pick);
+    picking_dir_ = true;
 }
 
 ADBFileBrowserScreen::~ADBFileBrowserScreen() {
@@ -86,6 +93,24 @@ void ADBFileBrowserScreen::build() {
     auto pad = lv_obj_create(navigation);
     lv_obj_remove_style_all(pad);
     lv_obj_set_flex_grow(pad, 1);
+
+    if (picking_dir_) {
+        auto confirm = lv_button_create(navigation);
+        lv_obj_set_height(confirm, 72);
+        lv_obj_set_style_radius(confirm, 12, 0);
+        lv_obj_add_event_fn(confirm, LV_EVENT_CLICKED, [this](lv_event_t*){
+            // pop() destroys this screen (and this lambda's storage): copy to
+            // locals first, and touch nothing after the pop.
+            auto cb = pick_dir_.on_pick;
+            std::string dir = current_directory().path;
+            screen_manager.pop();
+            if (cb) cb(dir);
+        });
+        auto confirm_label = lv_label_create(confirm);
+        lv_label_set_text(confirm_label, pick_dir_.label.c_str());
+        lv_obj_set_style_text_font(confirm_label, &lv_font_montserrat_28, 0);
+        lv_obj_center(confirm_label);
+    }
 
     auto refresh_button = lv_button_create(navigation);
     lv_obj_remove_style_all(refresh_button);
@@ -257,6 +282,13 @@ void ADBFileBrowserScreen::rebuild() {
             });
             lv_obj_set_style_bg_color(button, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
             lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_STATE_PRESSED);
+        } else if (e.is_reg() && !picking_dir_) {
+            app::FileRef ref{app::FileRef::Where::Android, path, e.size, e.mtime};
+            lv_obj_add_event_fn(button, LV_EVENT_CLICKED, [ref](lv_event_t*){
+                screen_manager.push(app::make_file_preview(ref));
+            });
+            lv_obj_set_style_bg_color(button, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+            lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_STATE_PRESSED);
         }
 
         auto icon = lv_label_create(button);
@@ -267,6 +299,11 @@ void ADBFileBrowserScreen::rebuild() {
         lv_obj_set_style_text_align(icon, LV_TEXT_ALIGN_CENTER, 0);
         auto label = lv_label_create(button);
         lv_label_set_text(label, e.name.c_str());
+        if (picking_dir_ && !navigable(e)) {
+            // Non-actionable files stay listed for orientation but greyed out.
+            lv_obj_set_style_text_color(icon, lv_color_hex(0xb0b0b0), 0);
+            lv_obj_set_style_text_color(label, lv_color_hex(0xb0b0b0), 0);
+        }
 
         auto sep = lv_obj_create(list_);
         lv_obj_remove_style_all(sep);

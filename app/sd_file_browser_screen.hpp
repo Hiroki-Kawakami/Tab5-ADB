@@ -10,20 +10,29 @@
 // stays mounted across screens (no hot-plug detection — Refresh re-mounts
 // after a failure).
 //
-// Two modes:
-//  - browse (default ctor): read-only navigation, plain files are inert.
+// Three modes:
+//  - browse (default ctor): navigation; a plain file opens its preview screen.
 //  - pick: construct with a Pick config — files matching `ext` are tappable;
 //    tapping one pops this screen and then calls on_pick(absolute_path) on the
 //    LVGL thread, with the caller's screen on top again.
+//  - pick-dir: construct with a PickDir config — files are inert/greyed, and a
+//    nav-bar button (`label`, e.g. "Copy Here") pops this screen and calls
+//    on_pick(absolute_dir) for the directory being shown. Back at the root
+//    pops without the callback (= cancel).
 class SDFileBrowserScreen : public Screen {
 public:
     struct Pick {
         std::string ext;  // case-insensitive extension filter, e.g. ".apk"
         std::function<void(const std::string &path)> on_pick;
     };
+    struct PickDir {
+        std::string label;  // the confirm button's text
+        std::function<void(const std::string &dir)> on_pick;
+    };
 
     SDFileBrowserScreen() = default;
     explicit SDFileBrowserScreen(Pick pick);
+    explicit SDFileBrowserScreen(PickDir pick);
 
     void build() override;
 
@@ -35,6 +44,8 @@ private:
 
     Pick pick_{};
     bool picking_ = false;
+    PickDir pick_dir_{};
+    bool picking_dir_ = false;
     std::vector<std::string> path_stack_;  // directory names below the SD root
     std::vector<Entry> entries_;
     std::string error_;  // non-empty: show this instead of entries
