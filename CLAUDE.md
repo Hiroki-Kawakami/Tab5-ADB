@@ -888,15 +888,24 @@ process; the device firmware never exits so nothing actually leaks.
 
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 
-`app/` drives the connection from the LVGL UI: `HomeScreen` has a **Connect**
-button; tapping it calls `app::adb_connect_async()`, then — on adb Online —
-chains `app::agent_client().ensure_connected()` ("Starting agent on the phone...")
-and pushes `ADBDeviceScreen` only once the agent mode settled (success and
-failure both proceed; Limited mode just hides the agent-backed features). Below
-Connect, an **SD Card** button pushes `SDFileBrowserScreen` directly — the local
-browser (and its previews / APK info) needs no adb connection
-(`simulator/verify/home_sd.txt`). The
-holder is a small app-global in
+`app/` drives the connection from the LVGL UI. `HomeScreen` is a two-tone
+layout: a full-bleed dark hero (title + the manually-bumped version constant in
+`app/app_version.hpp`) over a light card body matching the rest of the app. The
+body is a **USB card** (big Connect button + a fixed two-line status slot so
+progress text never shifts the layout — the verify scripts tap by coordinate, so
+the Connect center stays at (360, 420)), a **Wireless (TCP/IP) card** that is a
+fully-built but `LV_STATE_DISABLED` placeholder ("Coming soon" — wireless adb
+lands later; the widgets exist now so tap coordinates are final), and a bottom
+row of three nav cards: **About** and **Settings** (placeholders, screens land
+later) and **Files** at (360, 1170), which pushes `SDFileBrowserScreen`
+directly — the local browser (and its previews / APK info) needs no adb
+connection (`simulator/verify/home_sd.txt`). The hero/status fonts pulled
+montserrat 18 + 48 into the device sdkconfig (the sim's `lv_conf.h` enables all
+sizes). Tapping Connect calls `app::adb_connect_async()`, then — on adb
+Online — chains `app::agent_client().ensure_connected()` ("Starting agent on
+the phone...") and pushes `ADBDeviceScreen` only once the agent mode settled
+(success and failure both proceed; Limited mode just hides the agent-backed
+features). The holder is a small app-global in
 `app/adb_app.cpp` that owns the single `std::shared_ptr<adb::Client>` (it must
 outlive the transient screens) and implements `adb::ClientListener`. The `Client`
 owns the connection lifecycle + reader task; the holder's only job is to marshal

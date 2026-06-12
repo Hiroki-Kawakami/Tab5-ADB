@@ -3,7 +3,7 @@
 # button set can be inspected: top->down it should be End(X), OpMode(pointer),
 # Power, ... with NO maximize/DispMode icon between End and OpMode.
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 tap 204 400          # tap the preview image -> Mirroring screen

@@ -2,7 +2,7 @@
 # connect -> open Mirroring -> the portrait control strip shows bottom-left;
 # tap Hide to dismiss it; swipe out of the bottom-left corner to reveal it again.
 settle
-tap 360 640        # Connect
+tap 360 420        # Connect
 wait 9000
 settle
 tap 204 400          # tap the preview image -> Mirroring screen

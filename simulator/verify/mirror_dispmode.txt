@@ -4,7 +4,7 @@
 # ~(40, 698). Each DispMode tap cycles Fit -> Fill -> Adapt -> Fit and reconfigures
 # the live mirror in place (Adapt also runs `wm size` on the source).
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 # Open the Mirroring tool (top-right tool button).

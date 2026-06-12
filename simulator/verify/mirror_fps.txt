@@ -2,7 +2,7 @@
 # per-second fps log on stdout reaches steady state. (Temp script for the
 # uncapped-fps measurement.)
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 # Open the Mirroring tool (top-right tool button).

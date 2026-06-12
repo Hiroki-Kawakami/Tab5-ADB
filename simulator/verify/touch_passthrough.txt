@@ -1,7 +1,7 @@
 # E2E touch passthrough on the connected device. OpMode is ON by default (blue
 # icon), so a tap on an app via passthrough should open it with no toggle needed.
 settle
-tap 360 640          # Connect on the home screen
+tap 360 420          # Connect on the home screen
 wait 9000
 settle
 tap 204 400          # tap the preview image -> Mirroring screen

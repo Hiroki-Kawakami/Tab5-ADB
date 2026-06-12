@@ -2,7 +2,7 @@
 # summary (device name / model • Android • storage / battery + Wi-Fi (+ cell)
 # icons) lands within a round trip of onAppear. Needs a real phone on the PC.
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 wait 2500

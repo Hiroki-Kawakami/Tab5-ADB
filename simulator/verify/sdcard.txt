@@ -2,7 +2,7 @@
 # Needs a real phone plugged into the PC (Connect gates the FileManager).
 # Connect -> device screen -> File Manager -> SD Card -> folder -> back.
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 tap 551 258

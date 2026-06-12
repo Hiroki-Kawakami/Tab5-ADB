@@ -1,6 +1,6 @@
 # End-to-end mirror: connect -> open Mirroring -> launch agent -> show the stream.
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 # Device screen is up; open the Mirroring tool (top-right tool button).

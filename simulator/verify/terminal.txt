@@ -4,7 +4,7 @@
 # tapping keys (R2 q..p y=972, R3 a..l y=1059, R4 z..' y=1146, R5 y=1232;
 # Enter=(674,1059), Ctrl=(46,1059), space=(340,1232)).
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 tap 551 162

@@ -1,8 +1,8 @@
-# APK preview, offline path: Home -> SD Card -> testapp.apk shows the locally
+# APK preview, offline path: Home -> Files -> testapp.apk shows the locally
 # parsed manifest (package/version/SDK) with Install greyed out (no adb
 # connection). No phone needed.
 settle
-tap 360 840
+tap 360 1170
 settle
 tap 360 403
 settle

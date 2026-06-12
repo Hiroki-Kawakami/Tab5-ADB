@@ -2,7 +2,7 @@
 # The 2nd open must REUSE the live agent (no pkill/push/launch) — AgentClient keeps
 # the link connected across the screen's onExit (stop_mirror only).
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 # Device screen up: open Mirroring (1st time -> full bring-up).

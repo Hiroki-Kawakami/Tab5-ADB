@@ -1,8 +1,8 @@
-# SD card browser straight from the home screen — no adb connection needed.
-# Home -> SD Card -> folder -> back to root -> back pops to home.
+# SD card browser straight from the home screen (the Files nav card) — no adb connection needed.
+# Home -> Files -> folder -> back to root -> back pops to home.
 settle
 capture simulator/verify/out/home_sd_home.jpg
-tap 360 840
+tap 360 1170
 settle
 capture simulator/verify/out/home_sd_root.jpg
 tap 360 160

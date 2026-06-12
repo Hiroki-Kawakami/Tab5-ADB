@@ -2,7 +2,7 @@
 # the Clear data confirm modal (Cancel — nothing is mutated on the phone).
 # Needs a real phone plugged into the PC.
 settle
-tap 360 640
+tap 360 420
 wait 9000
 settle
 tap 551 354
