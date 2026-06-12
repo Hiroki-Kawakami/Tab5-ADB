@@ -7,19 +7,20 @@
 # by target: ESP_PLATFORM is defined only under ESP-IDF (device); the
 # simulator consumes this file through the idf_component_register shim in
 # simulator/CMakeLists.txt, where ESP_PLATFORM is unset.
-# Model-agnostic display/touch dispatch — built for both targets. (audio_eq.c
-# is device-only for now: it pulls in FreeRTOS and there is no host audio path
-# yet — it moves into BSP_COMMON_SRCS once the simulator grows an audio board.)
+# Model-agnostic display/touch/audio dispatch + the shared audio_dsp chain —
+# built for both targets.
 set(BSP_COMMON_SRCS
     "src/bsp_display.c"
-    "src/bsp_touch.c")
+    "src/bsp_touch.c"
+    "src/bsp_audio.c"
+    "src/audio_dsp.c")
 
 if(ESP_PLATFORM)
     idf_component_register(
         SRCS
             ${BSP_COMMON_SRCS}
-            "src/audio_eq.c"
             "boards/tab5/tab5.c"
+            "boards/tab5/tab5_audio.c"
             "boards/tab5/tab5_sd.c"
             "devices/pi4io/pi4io.c"
             "devices/ili9881c/ili9881c.c"
@@ -43,6 +44,7 @@ else()
             ${BSP_COMMON_SRCS}
             "boards/tab5/tab5_sim.c"
             "simulator/sdl_backend.c"
+            "simulator/sdl_audio.c"
             "simulator/sd_redirect.c"
         INCLUDE_DIRS "inc"
         PRIV_INCLUDE_DIRS "inc_private" "simulator")

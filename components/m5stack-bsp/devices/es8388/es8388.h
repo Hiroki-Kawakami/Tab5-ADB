@@ -24,11 +24,11 @@ typedef struct {
     gpio_num_t ws_gpio;
     gpio_num_t dout_gpio;
     gpio_num_t din_gpio;       /*!< Set to GPIO_NUM_NC to disable RX */
-    uint32_t sample_rate;      /*!< 0 -> 48000 */
-    uint8_t bits_per_sample;   /*!< 0 -> 16 */
-    uint8_t channels;          /*!< 0 -> 2 */
 } es8388_config_t;
 
+/* init brings up the I2S channel and the codec control path but does NOT
+ * start the DAC — no signal is output until es8388_open() (which also picks
+ * the stream format). */
 esp_err_t es8388_init(const es8388_config_t *config, es8388_t *es8388);
 esp_err_t es8388_deinit(es8388_t es8388);
 

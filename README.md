@@ -67,9 +67,12 @@ The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
   host unit tests for the pure parsers (`app/test/run.sh`, no phone).
 - `components/` — shared components (both targets): `m5stack-bsp/` (board support
   behind the `bsp.h` API — device chip drivers in `devices/`, the SDL simulator
-  backend in `simulator/`, and per-model bring-up in `boards/<model>/` with a
-  device `.c` and a simulator `_sim.cpp`; SD card mount via `bsp_sd.h` — the
-  simulator maps it onto `simulator/sdcard/`), `lvgl++/` (C++ helpers over LVGL),
+  backends in `simulator/` (display/touch + audio, so the simulator plays sound),
+  and per-model bring-up in `boards/<model>/` with a
+  device `.c` and a simulator `_sim.cpp`; capability-based audio (`bsp_audio_*`)
+  with a shared software DSP chain (`audio_dsp.h`: EQ / fading gain / mono mix,
+  host-tested via `components/m5stack-bsp/test/run.sh`); SD card mount via
+  `bsp_sd.h` — the simulator maps it onto `simulator/sdcard/`), `lvgl++/` (C++ helpers over LVGL),
   `screen_manager/` (screen stack / navigation), `embedded_adb/` (ADB host-side
   client library in C++ — portable protocol/crypto/auth with a USB transport that
   splits esp-idf `usb_host` on device vs `libusb` in the simulator), and `adb/`

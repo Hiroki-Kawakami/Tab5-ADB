@@ -3,17 +3,19 @@
  * Copyright (c) 2026 Hiroki Kawakami
  *
  * M5Stack Tab5 simulator board: the host-side counterpart of tab5.c. It maps
- * the same public bsp_init()/bsp_restart() onto the reusable SDL backend
- * (simulator/sdl_backend), passing Tab5's geometry (720x1280 portrait) and
- * pixel format. The build selects tab5.c on device and tab5_sim.c on the
- * simulator (see ../../CMakeLists.txt). Audio/Wi-Fi/BT have no host backend
- * yet — they will be added here when the simulator needs them.
+ * the same public bsp_init()/bsp_restart() onto the reusable SDL backends
+ * (simulator/sdl_backend for display+touch, simulator/sdl_audio for audio),
+ * passing Tab5's geometry (720x1280 portrait) and pixel format. The build
+ * selects tab5.c on device and tab5_sim.c on the simulator (see
+ * ../../CMakeLists.txt). Wi-Fi/BT have no host backend yet.
  */
 
 #include "bsp.h"
+#include "bsp_audio.h"
 #include "bsp_display.h"
 #include "bsp_touch.h"
 #include "sdl_backend.h"
+#include "sdl_audio.h"
 
 #include <stdlib.h>
 
@@ -33,6 +35,14 @@ esp_err_t bsp_init(const bsp_config_t *config) {
 
     bsp_display_set_active(display);
     bsp_touch_set_active(touch);
+
+    bsp_audio_t *audio = NULL;
+    if (sdl_audio_create(&audio) == ESP_OK) {
+        bsp_audio_set_active(audio, &(bsp_audio_init_t){
+            .dsp_mode     = config->audio.dsp_mode,
+            .speaker_mode = config->audio.speaker_mode,
+        });
+    }
     return ESP_OK;
 }
 

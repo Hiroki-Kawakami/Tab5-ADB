@@ -4,8 +4,9 @@
  *
  * M5Stack Tab5 board: brings up the bus + IO expanders, resolves the panel
  * generation (ST7123 vs ILI9881C/GT911) by I2C probe, and wires the resulting
- * bsp_display / bsp_touch providers. Display/touch are accessed through the
- * provider vtables; audio stays Tab5-specific (bsp_tab5_audio_*).
+ * bsp_display / bsp_touch / bsp_audio providers. Everything is accessed
+ * through the provider vtables; policy (speaker route, volume curve, the
+ * click-free audio sequencing) lives in the shared dispatch layers.
  */
 
 #include "bsp_private.h"
@@ -13,7 +14,6 @@
 #include "bsp_audio.h"
 #include "bsp_display.h"
 #include "bsp_touch.h"
-#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -23,8 +23,7 @@
 #include "gt911/gt911.h"
 #include "st7123/st7123_lcd.h"
 #include "st7123/st7123_touch.h"
-#include "es8388/es8388.h"
-#include "audio_eq.h"
+#include "tab5_audio.h"
 #include "nvs_flash.h"
 #include "esp_system.h"
 #include "esp_hosted.h"
@@ -40,85 +39,6 @@ static const char *TAG = "BSP_TAB5";
 #define I2C0_PORT_NUM (0)
 static i2c_master_bus_handle_t i2c0;
 static pi4io_t pi4ioe1, pi4ioe2;
-
-static es8388_t es8388;
-static audio_eq_t audio_eq;
-/* User-facing volume tracked here; hardware codec volume stays at max after
- * boot and audio_eq applies the user value as a software gain (with fade). */
-static int s_user_volume = -1;
-#define BSP_VOLUME_FADE_MS 100
-#define BSP_VOLUME_DB_SPAN 40.0f   /* vol=1 → -40 dB, vol=100 → 0 dB */
-
-#define SPK_EN_PIN  1
-#define HP_DET_PIN  7
-static volatile bsp_speaker_mode_t s_speaker_mode = BSP_SPEAKER_MODE_ON;
-static TaskHandle_t s_speaker_task = NULL;
-static portMUX_TYPE s_hp_mux = portMUX_INITIALIZER_UNLOCKED;
-static bsp_headphone_cb_t s_hp_cb = NULL;
-static void *s_hp_cb_arg = NULL;
-static bool s_hp_last = false;
-static bool s_hp_last_valid = false;
-
-static bool hp_inserted_now(void) {
-    if (!pi4ioe1) return false;
-    bool hp = false;
-    /* HP_DET is pulled up externally; the jack's NC detect switch shorts the
-     * line to GND when no plug is inserted, so HP_DET=1 => headphones in. */
-    if (pi4io_get_input(pi4ioe1, HP_DET_PIN, &hp) != ESP_OK) return false;
-    return hp;
-}
-
-static void apply_speaker_pin_with_hp(bsp_speaker_mode_t mode, bool hp) {
-    if (!pi4ioe1) return;
-    bool desired;
-    switch (mode) {
-        case BSP_SPEAKER_MODE_ON:   desired = true; break;
-        case BSP_SPEAKER_MODE_AUTO: desired = !hp;  break;
-        case BSP_SPEAKER_MODE_OFF:
-        default:                    desired = false; break;
-    }
-    pi4io_set_output(pi4ioe1, SPK_EN_PIN, desired);
-}
-
-static void apply_speaker_pin(bsp_speaker_mode_t mode) {
-    apply_speaker_pin_with_hp(mode, hp_inserted_now());
-}
-
-static void speaker_task(void *arg) {
-    (void)arg;
-    while (1) {
-        bsp_speaker_mode_t mode = s_speaker_mode;
-        bool hp = hp_inserted_now();
-
-        /* Detect HP state change and dispatch callback (fired outside the
-         * critical section so user code can take its time / call into BSP). */
-        bsp_headphone_cb_t cb = NULL;
-        void *cb_arg = NULL;
-        bool fire = false;
-        portENTER_CRITICAL(&s_hp_mux);
-        if (s_hp_last_valid && hp != s_hp_last && s_hp_cb) {
-            cb = s_hp_cb;
-            cb_arg = s_hp_cb_arg;
-            fire = true;
-        }
-        s_hp_last = hp;
-        s_hp_last_valid = true;
-        portEXIT_CRITICAL(&s_hp_mux);
-        if (fire) cb(hp, cb_arg);
-
-        apply_speaker_pin_with_hp(mode, hp);
-
-        bool need_poll = (mode == BSP_SPEAKER_MODE_AUTO) || (s_hp_cb != NULL);
-        TickType_t wait = need_poll ? pdMS_TO_TICKS(200) : portMAX_DELAY;
-        ulTaskNotifyTake(pdTRUE, wait);
-    }
-}
-
-static esp_err_t start_speaker_task_once(void) {
-    if (s_speaker_task) return ESP_OK;
-    return xTaskCreate(speaker_task, "bsp_spk", 2048, NULL, 1, &s_speaker_task) == pdPASS
-        ? ESP_OK : ESP_ERR_NO_MEM;
-}
 
 esp_err_t bsp_init(const bsp_config_t *config) {
     esp_err_t err;
@@ -138,10 +58,14 @@ esp_err_t bsp_init(const bsp_config_t *config) {
     }, &i2c0);
     BSP_RETURN_ERR(err);
 
-    // Initialize PI4IOE1 (address 0x43)
+    // Initialize PI4IOE1 (address 0x43). SPK_EN starts LOW: the amp gate is
+    // only enabled by bsp_audio_set_active() once the codec is initialised,
+    // unmuted, and feeding stable silence (the click-free contract — enabling
+    // it earlier amplifies the codec's power-on/unmute transient into the
+    // audible "ブツッ" at boot).
     err = pi4io_init(i2c0, 0x43, (pi4io_pin_config_t[8]){
         [0] = { PI4IO_PIN_MODE_OUTPUT, .initial_value = false },  // RF_INT_EXT_SWITCH
-        [1] = { PI4IO_PIN_MODE_OUTPUT, .initial_value = false },  // SPK_EN — set by speaker_mode below
+        [1] = { PI4IO_PIN_MODE_OUTPUT, .initial_value = false },  // SPK_EN
         [2] = { PI4IO_PIN_MODE_OUTPUT, .initial_value = true },   // EXT5V_EN
         [4] = { PI4IO_PIN_MODE_OUTPUT, .initial_value = true },   // LCD_RST
         [5] = { PI4IO_PIN_MODE_OUTPUT, .initial_value = true },   // TP_RST
@@ -149,16 +73,6 @@ esp_err_t bsp_init(const bsp_config_t *config) {
         [7] = { PI4IO_PIN_MODE_INPUT },                           // HP_DET
     }, &pi4ioe1);
     BSP_RETURN_ERR(err);
-
-    // Speaker amp policy is captured here but the SPK_EN line stays LOW for
-    // now — we don't enable the amp until *after* the codec is initialised,
-    // unmuted, and feeding stable silence. Enabling the amp earlier causes:
-    //   (1) the amp's own power-on transient, and
-    //   (2) any DC offset / unmute click on the codec's analog output to be
-    //       amplified into the speaker.
-    // Both surface as the audible "ブツッ" at boot. Delaying SPK_EN until the
-    // DAC is settled removes (2) entirely and quietens (1).
-    s_speaker_mode = config->audio.speaker_mode;
 
     // Initialize PI4IOE2 (address 0x44)
     err = pi4io_init(i2c0, 0x44, (pi4io_pin_config_t[8]){
@@ -215,62 +129,23 @@ esp_err_t bsp_init(const bsp_config_t *config) {
     bsp_display_set_active(display);
     bsp_touch_set_active(touch);
 
-    // ES8388 audio codec (speaker output)
-    if (!config->audio.disable) {
-        err = es8388_init(&(es8388_config_t){
-            .i2c_bus         = i2c0,
-            .i2s_port        = I2S_NUM_0,
-            .mclk_gpio       = GPIO_NUM_30,
-            .bclk_gpio       = GPIO_NUM_27,
-            .ws_gpio         = GPIO_NUM_29,
-            .dout_gpio       = GPIO_NUM_26,
-            .din_gpio        = GPIO_NUM_28,
-            .sample_rate     = config->audio.sample_rate,
-            .bits_per_sample = config->audio.bits_per_sample,
-            .channels        = config->audio.channels,
-        }, &es8388);
+    // Audio: ES8388 codec + PI4IOE1 amp gate / HP detect as the bsp_audio
+    // provider. Registers closed — no signal (and no amp) until the app's
+    // first bsp_audio_open() runs the click-free bring-up.
+    {
+        bsp_audio_t *audio = NULL;
+        err = tab5_audio_create(&(tab5_audio_config_t){
+            .i2c_bus     = i2c0,
+            .io_expander = pi4ioe1,
+        }, &audio);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "ES8388 init failed: %d (continuing without audio)", err);
-            es8388 = NULL;
+            ESP_LOGW(TAG, "audio init failed: %d (continuing without audio)", err);
         } else {
-            uint32_t rate = config->audio.sample_rate    ? config->audio.sample_rate    : 48000;
-            uint8_t  bps  = config->audio.bits_per_sample ? config->audio.bits_per_sample : 16;
-            uint8_t  ch   = config->audio.channels        ? config->audio.channels        : 2;
-            audio_eq_config_t eq_cfg = {
-                .sample_rate        = rate,
-                .channels           = ch,
-                .bits_per_sample    = bps,
-                .max_stages         = config->audio.eq.max_stages,
-                .enabled            = config->audio.eq.enable,
-                .initial_biquads    = config->audio.eq.biquads,
-                .initial_num_stages = config->audio.eq.num_stages,
-            };
-            err = audio_eq_init(&eq_cfg, &audio_eq);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "audio_eq_init failed: %d (EQ disabled)", err);
-                audio_eq = NULL;
-            } else {
-                /* Start silent so the codec's unmute / volume jump below is
-                 * masked — there is no signal to click on while gain=0. */
-                audio_eq_set_gain(audio_eq, 0.0f, 0);
-                /* Pin codec to max once; user volume is delivered by the
-                 * software gain (with fade) from now on. SPK_EN is still LOW
-                 * at this point so the unmute click doesn't reach the speaker. */
-                es8388_set_volume(es8388, 100);
-            }
+            bsp_audio_set_active(audio, &(bsp_audio_init_t){
+                .dsp_mode     = config->audio.dsp_mode,
+                .speaker_mode = config->audio.speaker_mode,
+            });
         }
-    }
-
-    /* Now that the DAC output is steady silence, give the analog stage a
-     * moment to settle, then enable the speaker amp. The amp's own startup
-     * transient is unavoidable but is now the only remaining click source. */
-    if (es8388) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    apply_speaker_pin(s_speaker_mode);
-    if (s_speaker_mode == BSP_SPEAKER_MODE_AUTO || s_hp_cb) {
-        err = start_speaker_task_once();
-        BSP_RETURN_ERR(err);
     }
 
     if (config->wifi.mode || config->bluetooth.enable) {
@@ -325,132 +200,13 @@ esp_err_t bsp_init(const bsp_config_t *config) {
 }
 
 void bsp_restart(void) {
-    /* Codec runs pinned at vol=100 (SW gain delivers the user volume), so
-     * cutting the analog output through the codec's own mute register is the
-     * direct way to silence the DAC before the I2S clocks die. */
-    if (es8388) es8388_set_mute(es8388, true);
-    /* Drop SPK_EN directly rather than going through set_speaker_mode — the
-     * speaker_task may not get scheduled before esp_restart cuts everything,
-     * and the pi4io I2C write is what we actually need to land. */
-    if (pi4ioe1) pi4io_set_output(pi4ioe1, SPK_EN_PIN, false);
+    /* Silence the audio path (codec mute + amp gate off) before the I2S
+     * clocks die. */
+    bsp_audio_quiesce();
     /* Black out the panel so the brief reset window doesn't flash whatever
      * happens to be in the framebuffer. */
     bsp_display_set_brightness(0);
     /* Let the I2C writes complete and the DAC analog stage settle. */
     vTaskDelay(pdMS_TO_TICKS(50));
     esp_restart();
-}
-
-// MARK: Audio
-esp_err_t bsp_tab5_audio_open(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t channels) {
-    if (!es8388) return ESP_ERR_INVALID_STATE;
-    return es8388_open(es8388, sample_rate, bits_per_sample, channels);
-}
-esp_err_t bsp_tab5_audio_close(void) {
-    if (!es8388) return ESP_ERR_INVALID_STATE;
-    return es8388_close(es8388);
-}
-esp_err_t bsp_tab5_audio_reconfig(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t channels) {
-    if (!es8388) return ESP_ERR_INVALID_STATE;
-    esp_err_t err = es8388_reconfig_output(es8388, sample_rate, bits_per_sample, channels);
-    if (err == ESP_OK && audio_eq) {
-        audio_eq_reconfig(audio_eq, sample_rate, channels, bits_per_sample);
-    }
-    return err;
-}
-esp_err_t bsp_tab5_audio_write(void *data, size_t len) {
-    if (!es8388) return ESP_ERR_INVALID_STATE;
-    /* Always go through audio_eq even when biquads are disabled — the gain
-     * fader lives here too and skipping it would bypass the volume control. */
-    if (audio_eq) audio_eq_process(audio_eq, data, len);
-    return es8388_write(es8388, data, len);
-}
-esp_err_t bsp_tab5_audio_set_volume(int volume) {
-    if (!es8388) return ESP_ERR_INVALID_STATE;
-    if (volume < 0)   volume = 0;
-    if (volume > 100) volume = 100;
-    if (volume == s_user_volume) return ESP_OK;  /* drop slider duplicates */
-    s_user_volume = volume;
-    if (audio_eq) {
-        /* Linear-in-dB curve: vol=100 → 0 dB (gain 1.0), vol=1 → -40 dB.
-         * vol=0 is a hard zero so muting via volume=0 is true silence. */
-        float gain;
-        if (volume == 0) {
-            gain = 0.0f;
-        } else {
-            float db = (volume - 100) * (BSP_VOLUME_DB_SPAN / 100.0f);
-            gain = powf(10.0f, db / 20.0f);
-        }
-        return audio_eq_set_gain(audio_eq, gain, BSP_VOLUME_FADE_MS);
-    }
-    /* No EQ instance → fall back to direct hardware volume (clicky). */
-    return es8388_set_volume(es8388, volume);
-}
-esp_err_t bsp_tab5_audio_set_mute(bool mute) {
-    if (!es8388) return ESP_ERR_INVALID_STATE;
-    return es8388_set_mute(es8388, mute);
-}
-int bsp_tab5_audio_get_volume(void) {
-    if (s_user_volume >= 0) return s_user_volume;
-    return es8388 ? es8388_get_volume(es8388) : -1;
-}
-
-esp_err_t bsp_tab5_audio_eq_set_enabled(bool enabled) {
-    if (!audio_eq) return ESP_ERR_INVALID_STATE;
-    return audio_eq_set_enabled(audio_eq, enabled);
-}
-bool bsp_tab5_audio_eq_is_enabled(void) {
-    return audio_eq_is_enabled(audio_eq);
-}
-esp_err_t bsp_tab5_audio_eq_set_biquads(const audio_eq_biquad_t *biquads, size_t num_stages) {
-    if (!audio_eq) return ESP_ERR_INVALID_STATE;
-    return audio_eq_set_biquads(audio_eq, biquads, num_stages);
-}
-audio_eq_t bsp_tab5_audio_eq_handle(void) {
-    return audio_eq;
-}
-
-esp_err_t bsp_tab5_audio_set_speaker_mode(bsp_speaker_mode_t mode) {
-    if (mode != BSP_SPEAKER_MODE_ON && mode != BSP_SPEAKER_MODE_AUTO &&
-        mode != BSP_SPEAKER_MODE_OFF) return ESP_ERR_INVALID_ARG;
-    if (!pi4ioe1) return ESP_ERR_INVALID_STATE;
-    s_speaker_mode = mode;
-    if (mode == BSP_SPEAKER_MODE_AUTO) {
-        esp_err_t err = start_speaker_task_once();
-        if (err != ESP_OK) return err;
-    }
-    if (s_speaker_task) {
-        xTaskNotifyGive(s_speaker_task);  /* task re-evaluates + re-arms wait */
-    } else {
-        apply_speaker_pin(mode);
-    }
-    return ESP_OK;
-}
-bsp_speaker_mode_t bsp_tab5_audio_get_speaker_mode(void) {
-    return s_speaker_mode;
-}
-bool bsp_tab5_audio_headphone_inserted(void) {
-    return hp_inserted_now();
-}
-
-esp_err_t bsp_tab5_audio_set_mono_mix(bool enabled) {
-    if (!audio_eq) return ESP_ERR_INVALID_STATE;
-    return audio_eq_set_mono_mix(audio_eq, enabled);
-}
-bool bsp_tab5_audio_get_mono_mix(void) {
-    return audio_eq_get_mono_mix(audio_eq);
-}
-
-esp_err_t bsp_tab5_audio_set_headphone_callback(bsp_headphone_cb_t cb, void *user) {
-    if (!pi4ioe1) return ESP_ERR_INVALID_STATE;
-    portENTER_CRITICAL(&s_hp_mux);
-    s_hp_cb_arg = user;
-    s_hp_cb     = cb;
-    portEXIT_CRITICAL(&s_hp_mux);
-    if (cb) {
-        esp_err_t err = start_speaker_task_once();
-        if (err != ESP_OK) return err;
-        xTaskNotifyGive(s_speaker_task);  /* re-evaluate need_poll */
-    }
-    return ESP_OK;
 }

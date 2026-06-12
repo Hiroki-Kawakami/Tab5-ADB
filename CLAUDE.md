@@ -233,12 +233,13 @@ app/                         # SHARED  app logic / screens (a single component)
   test/                      #   host unit tests (device_info / apk_info parsers) + run.sh — no phone, no LVGL
 components/                  # SHARED  (both targets)
   m5stack-bsp/               #   board support (bsp_*) — device drivers + SDL sim backend
-    inc/                     #     model-agnostic public API (bsp.h) + bsp_audio.h, bsp_sd.h, bsp_types.h
-    inc_private/             #     internal driver interfaces (bsp_display.h / bsp_touch.h vtables)
-    src/                     #     shared dispatch: bsp_display.c/bsp_touch.c (+ audio_eq.c, device)
+    inc/                     #     model-agnostic public API (bsp.h incl. bsp_audio_*) + audio_dsp.h, bsp_sd.h, bsp_types.h
+    inc_private/             #     internal driver interfaces (bsp_display.h / bsp_touch.h / bsp_audio.h vtables)
+    src/                     #     shared dispatch: bsp_display.c/bsp_touch.c/bsp_audio.c + audio_dsp.c
     devices/                 #     DEVICE reusable chip drivers (ili9881c/st7123/gt911/es8388/pi4io)
-    simulator/               #     SIM reusable SDL backend (sdl_backend.cpp) + sd_redirect.c (bsp_sd on host)
-    boards/<model>/          #     per-model bring-up: <model>.c (device, + tab5_sd.c) + <model>_sim.cpp (sim)
+    simulator/               #     SIM reusable SDL backends (sdl_backend.c display/touch, sdl_audio.c) + sd_redirect.c
+    boards/<model>/          #     per-model bring-up: <model>.c (device, + tab5_audio.c, tab5_sd.c) + <model>_sim.cpp (sim)
+    test/                    #     host unit tests (audio_dsp math, sdl_audio pacing) + run.sh — no device
   lvgl++/                    #   C++ helpers (lv_async_call, lv_obj_add_event_fn — DELETE-filtered handlers run before cleanup)
   screen_manager/            #   Screen base + screen stack
   embedded_adb/              #   ADB host-side client (C++) — usb_host vs libusb split
@@ -388,10 +389,62 @@ Everything in the BSP is **C** (both targets, like the device drivers). In the
 vtable header `inc_private/bsp_touch.h`, `bsp_touch_config_t` (device bus/GPIO
 wiring) is `#ifdef ESP_PLATFORM` so the host build never pulls in `driver/*`.
 
-Audio (`bsp_tab5_audio_*` in `inc/bsp_audio.h`) is Tab5-specific with no
-cross-model contract yet, so it keeps its name and lives in the tab5 board.
-`audio_eq.c` is device-only for now (the host has no audio path); it moves into
-the shared sources once a simulator audio board exists.
+**Audio (`bsp_audio_*` in `bsp.h`)** follows the same three layers and is
+**capability-based** so every M5Stack audio variant (no audio / buzzer-only /
+speaker-only / speaker+HP) fits one API: `bsp_audio_get_caps()` returns
+`BSP_AUDIO_CAP_{PCM,TONE,SPEAKER,HEADPHONE}` bits and unsupported calls return
+`ESP_ERR_NOT_SUPPORTED` (no provider = caps 0). **`bsp_init` outputs no
+signal**: providers register *closed* (DAC down, amp gate off; `bsp_config_t`
+carries only `audio.dsp_mode` + `audio.speaker_mode` — the stream format is
+`bsp_audio_open()`'s argument, and write/reconfig/close before open are
+`ESP_ERR_INVALID_STATE`). The shared dispatch (`src/bsp_audio.c`) owns all
+**policy**: the user volume curve (linear-in-dB, -40 dB span, delivered as a
+fading software gain; settable before open, applied by the open fade-in), mute
+(a SW fade, never a HW step), the speaker route ON/AUTO/OFF policy + the
+generic headphone poll task (200 ms, notify-woken; AUTO needs CAP_HEADPHONE) +
+insert callback, the **DSP voicing mode**, and the **click-free sequencing
+contract** (stated in `inc_private/bsp_audio.h`): amp state changes only while
+the DAC is settled silence, audible amplitude changes only via the SW fade —
+the **first open arms the amp** (silent gain → codec unmute @ max HW volume →
+~50 ms analog settle → amp on per mode); open/reconfig fade the stream in from
+0; close HW-mutes before the clocks stop but **keeps the amp** (so the amp
+transient isn't re-paid per open); `bsp_audio_quiesce()` (mute + amp off) is
+the `bsp_restart()` path. **DSP modes** (`bsp_audio_dsp_mode_t`, zero-init =
+**Auto**): *Auto* = the board's voicing, pulled from the provider's
+`get_dsp_profile(headphone, sample_rate)` vtable hook (coefficients designed
+at the live rate) and **re-applied on HP insert/remove** by the route task —
+app edits get overwritten; *Manual* = DSP initialised flat, app drives it via
+`bsp_audio_dsp()`; *Disable* = no DSP (`bsp_audio_dsp()` NULL, volume falls
+back to the HW codec, clicky). Tab5's voicing (`tab5_audio.c`): speaker = HP80
++ low-shelf 300/+7 dB + peak 150/+3 dB + mono mix (only L is wired); headphone
+= HP50 + low-shelf 150/+10 dB + peaks 1 k/-4 dB, 2.5 k/-3 dB, stereo.
+Providers implement only low-level vtable ops (open/close/write/set_hw_volume/
+set_hw_mute/set_speaker_enabled/headphone_inserted/get_dsp_profile/tone,
+optional = NULL): Tab5 = `boards/tab5/tab5_audio.c` (ES8388 + PI4IOE1 SPK_EN
+pin 1 / HP_DET pin 7, caps PCM|SPEAKER|HEADPHONE; `es8388_init` no longer
+opens the codec dev — `es8388_open` does); simulator = `simulator/sdl_audio.c`
+(SDL queue-audio, caps PCM|SPEAKER) whose `write()` **backpressures at ~100 ms
+queued** to mimic the blocking I2S DMA write — under `SIMULATOR_HEADLESS` (or
+no host audio device) it degrades to a silent **null sink with the same
+real-time pacing**, so verify runs exercise producer timing.
+EQ/post-processing is **`audio_dsp`** (`inc/audio_dsp.h` + `src/audio_dsp.c`,
+both targets, board-independent): a fixed chain EQ (cascaded RBJ biquads) →
+gain (per-frame fade — the click-free volume primitive; fades continue
+seamlessly across `process()` chunk boundaries) → stereo→mono mix, each stage
+independently toggleable, whole-chain bypass fast path; stage capacity
+defaults to 5 and **`set_biquads` auto-grows it** (beyond 8 stages `process()`
+holds the lock instead of stack-snapshotting — the grow realloc would dangle
+the direct pointer). The dispatch owns one instance per PCM provider (created
+at boot at a nominal 48 k so the handle is valid pre-open, reconfigured per
+open; 16-bit streams only — other widths bypass to HW volume); `set_gain`
+belongs to the volume/mute plumbing. Host tests: `nix develop -c
+components/m5stack-bsp/test/run.sh` (`TEST=test_audio_dsp` default — pure DSP
+math; `TEST=test_bsp_audio` — dispatch policy vs a stub provider: voicing
+modes, amp arming, HP re-voicing; `TEST=test_sdl_audio` plays an audible sine
+through dispatch+provider and asserts the pacing, null-sink clean). Device
+pop-noise behavior (boot/open/close/volume/HP-plug), the close-path settle
+delays, and esp_codec_dev's deferred-open path still need a **real-HW flash
+check**.
 
 **SD card (`inc/bsp_sd.h`)** — mount/unmount only; once mounted, app code uses
 plain POSIX file I/O under the mount point on both targets (no further BSP

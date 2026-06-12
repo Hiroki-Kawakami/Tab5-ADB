@@ -43,9 +43,11 @@ esp_err_t es8388_init(const es8388_config_t *config, es8388_t *es8388) {
     if (!state) return ESP_ERR_NO_MEM;
     state->volume = -1;
 
-    uint32_t rate = config->sample_rate ? config->sample_rate : 48000;
-    uint8_t  bps  = config->bits_per_sample ? config->bits_per_sample : 16;
-    uint8_t  ch   = config->channels ? config->channels : 2;
+    /* Nominal format for the I2S bring-up only; the real stream format is
+     * applied by es8388_open() (esp_codec_dev's I2S data_if reconfigures the
+     * channel on open). */
+    const uint32_t rate = 48000;
+    const uint8_t  bps  = 16;
 
     esp_err_t ret;
 
@@ -133,26 +135,13 @@ esp_err_t es8388_init(const es8388_config_t *config, es8388_t *es8388) {
         goto err_data;
     }
 
-    esp_codec_dev_sample_info_t info = {
-        .sample_rate     = rate,
-        .channel         = ch,
-        .bits_per_sample = bps,
-    };
-    ret = esp_codec_dev_open(state->output_device, &info);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp_codec_dev_open failed: %d", ret);
-        goto err_dev;
-    }
-
-    // Start muted — caller picks a volume.
-    esp_codec_dev_set_out_mute(state->output_device, true);
+    /* The codec device is created but NOT opened — the DAC stays down (no
+     * signal output) until es8388_open() starts the stream. */
     state->volume = 0;
 
     *es8388 = state;
     return ESP_OK;
 
-err_dev:
-    esp_codec_dev_delete(state->output_device);
 err_data:
     audio_codec_delete_data_if(state->data_if);
 err_codec:
