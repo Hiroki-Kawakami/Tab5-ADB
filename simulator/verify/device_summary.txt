@@ -3,7 +3,7 @@
 # icons) lands within a round trip of onAppear. Needs a real phone on the PC.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
 wait 2500
 capture simulator/verify/out/device_summary.jpg

@@ -3,9 +3,9 @@
 # Connect -> device screen -> File Manager -> SD Card -> folder -> back.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
-tap 551 354
+tap 551 258
 settle
 capture simulator/verify/out/sd_filemanager.jpg
 tap 360 730

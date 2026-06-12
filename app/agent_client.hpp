@@ -60,6 +60,16 @@ class AgentClient : public agent_link::LinkLifecycleListener,
 public:
     enum class State { Disconnected, Connecting, Ready };
 
+    // Whether this adb session runs with the agent (Normal) or without it
+    // (Limited) — the app's feature gate: Normal offers the agent-backed features
+    // (mirroring, the mirror-based preview, app icons), Limited only the plain-adb
+    // ones. Determined by the EAGER bring-up the connect flow runs right after the
+    // adb link comes Online (HomeScreen waits for it before pushing the device
+    // screen), then refined by any later bring-up result; reset to Unknown when
+    // the adb link drops. Distinct from State: a Normal-mode agent can be
+    // momentarily Disconnected (the link dropped, ensure_connected re-launches).
+    enum class Mode { Unknown, Normal, Limited };
+
     AgentClient() = default;
     ~AgentClient() override = default;
 
@@ -75,6 +85,13 @@ public:
 
     State state() const { return state_.load(); }
     bool ready() const { return state_.load() == State::Ready; }
+    Mode mode() const { return mode_.load(); }
+
+    // The agent's HELLO capability bits (agent_link::Cap, §4.6) from the current
+    // link; 0 until Ready. The embedded jar always matches the firmware, so a
+    // missing bit means the agent dropped the feature at runtime (e.g. no
+    // PackageManager) — gate optional features (kCapAppInfo) on this.
+    uint16_t agent_caps() const { return agent_caps_.load(); }
 
     // The established link, or nullptr unless Ready. Drive the protocol on it
     // directly (start_mirror/stop_mirror/set_video_listener). Do NOT close() it —
@@ -93,7 +110,7 @@ public:
     // --- adb::SyncListener / ShellListener (jar push + agent stdout) ---
     void on_sync_close(adb::Sync*, adb::Error) override {}
     void on_shell_data(adb::Shell*, const uint8_t* d, size_t n) override;
-    void on_shell_close(adb::Shell*, adb::Error) override {}
+    void on_shell_close(adb::Shell*, adb::Error) override;
 
 private:
     static void trampoline(void* arg);
@@ -104,11 +121,14 @@ private:
 
     void reset_worker_flags_locked();
     bool stopping();
+    bool shell_dead();
     void sleep_ms(int ms);
     template <class Pred>
     void wait_for(Pred pred, int ms);
 
     std::atomic<State> state_{State::Disconnected};
+    std::atomic<Mode> mode_{Mode::Unknown};
+    std::atomic<uint16_t> agent_caps_{0};
 
     std::mutex mtx_;
     std::condition_variable cv_;
@@ -121,6 +141,7 @@ private:
     adb::Error push_err_ = adb::Error::Transport;
     bool hello_ = false;
     bool link_closed_ = false;
+    bool shell_closed_ = false;  // the agent's app_process exited (launch failure)
 
     // Session objects (guarded by mtx_). Kept alive while Ready.
     std::shared_ptr<adb::Client> client_;

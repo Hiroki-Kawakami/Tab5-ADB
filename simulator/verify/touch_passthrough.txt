@@ -2,9 +2,9 @@
 # icon), so a tap on an app via passthrough should open it with no toggle needed.
 settle
 tap 360 640          # Connect on the home screen
-wait 6000
+wait 9000
 settle
-tap 552 162          # Mirroring tool on the device screen
+tap 204 400          # tap the preview image -> Mirroring screen
 wait 11000           # agent launch (pkill + push + app_process + link) + first frames
 capture simulator/verify/out/tp_before.jpg
 tap 577 324          # passthrough tap on the Settings icon (outside the strip)

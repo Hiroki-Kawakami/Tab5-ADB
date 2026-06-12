@@ -5,7 +5,7 @@
 # Needs a real phone plugged into the PC.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
 tap 360 90
 wait 3000

@@ -58,6 +58,10 @@ adb::Error Link::start_mirror(const MirrorConfig& cfg) {
     a[4] = cfg.scale_mode;
     a[5] = cfg.streams;
     wr_u16(a + 6, 0);  // reserved
+    a[8] = cfg.max_fps;
+    a[9] = cfg.jpeg_quality;
+    a[10] = cfg.split_count;
+    a[11] = 0;  // reserved
 
     uint8_t frame[kFrameHeaderSize + sizeof(payload)];
     write_header(frame, kTypeControlRequest, /*flags=*/0,
@@ -80,6 +84,83 @@ adb::Error Link::stop_mirror() {
                  tx_seq_.fetch_add(1), static_cast<uint32_t>(sizeof(payload)));
     std::memcpy(frame + kFrameHeaderSize, payload, sizeof(payload));
     return stream_->write(frame, sizeof(frame));
+}
+
+adb::Error Link::request(uint8_t cmd, const uint8_t* args, size_t args_len,
+                         RequestCallback cb, uint32_t timeout_ms) {
+    if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+    sweep_expired_requests();
+
+    // Register the pending entry first (under req_mtx_), so a fast response on
+    // the reader thread can't race past it; roll back if the send fails.
+    uint8_t req_id;
+    {
+        std::lock_guard<std::mutex> lk(req_mtx_);
+        // Allocate a free req_id from the 0x10.. cycle (the fixed mirror ids
+        // 0x02/0x03 stay clear). With 240 ids an exhausted table means the peer
+        // stopped answering — fail fast rather than alias an in-flight id.
+        uint8_t id = 0;
+        for (int i = 0; i < 240 && !id; ++i) {
+            uint8_t cand = next_req_id_;
+            next_req_id_ = next_req_id_ >= 0xFF ? 0x10 : next_req_id_ + 1;
+            bool used = false;
+            for (auto& p : pending_) used |= (p.first == cand);
+            if (!used) id = cand;
+        }
+        if (!id) return adb::Error::QueueFull;
+        PendingRequest pr;
+        pr.cmd = cmd;
+        pr.cb = std::move(cb);
+        pr.deadline = std::chrono::steady_clock::now() +
+                      std::chrono::milliseconds(timeout_ms);
+        pending_.emplace_back(id, std::move(pr));
+        req_id = id;
+    }
+
+    // CONTROL_REQUEST payload (§4.1): cmd, req_id, then the cmd's args.
+    std::vector<uint8_t> frame(kFrameHeaderSize + 2 + args_len);
+    write_header(frame.data(), kTypeControlRequest, /*flags=*/0,
+                 tx_seq_.fetch_add(1), static_cast<uint32_t>(2 + args_len));
+    frame[kFrameHeaderSize + 0] = cmd;
+    frame[kFrameHeaderSize + 1] = req_id;
+    if (args_len) std::memcpy(frame.data() + kFrameHeaderSize + 2, args, args_len);
+    adb::Error e = stream_->write(frame.data(), frame.size());
+    if (e != adb::Error::Ok) {
+        std::lock_guard<std::mutex> lk(req_mtx_);
+        for (auto it = pending_.begin(); it != pending_.end(); ++it) {
+            if (it->first == req_id) { pending_.erase(it); break; }
+        }
+    }
+    return e;
+}
+
+void Link::sweep_expired_requests() {
+    std::vector<RequestCallback> expired;
+    {
+        std::lock_guard<std::mutex> lk(req_mtx_);
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = pending_.begin(); it != pending_.end();) {
+            if (now >= it->second.deadline) {
+                expired.push_back(std::move(it->second.cb));
+                it = pending_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (auto& cb : expired)
+        if (cb) cb(adb::Error::Timeout, kStatusEfail, nullptr, 0);
+}
+
+void Link::fail_all_requests(adb::Error err) {
+    std::vector<RequestCallback> cbs;
+    {
+        std::lock_guard<std::mutex> lk(req_mtx_);
+        for (auto& p : pending_) cbs.push_back(std::move(p.second.cb));
+        pending_.clear();
+    }
+    for (auto& cb : cbs)
+        if (cb) cb(err, kStatusEfail, nullptr, 0);
 }
 
 adb::Error Link::inject_key(uint32_t keycode, uint8_t action, uint32_t repeat,
@@ -217,14 +298,15 @@ void Link::handle_control_request(const uint8_t* p, size_t len) {
     if (auto l = listener_.lock()) l->on_link_hello(this, info);
 }
 
-// CONTROL_RESPONSE (§4.2): replies to a Tab5-initiated request — MIRROR_START or
-// MIRROR_STOP.
+// CONTROL_RESPONSE (§4.2): replies to a Tab5-initiated request — MIRROR_START /
+// MIRROR_STOP (the typed built-ins, fixed req_ids) or a generic request().
 void Link::handle_control_response(const uint8_t* p, size_t len) {
     if (len < 3) {
         fail(adb::Error::Protocol);
         return;
     }
     const uint8_t cmd = p[0];
+    const uint8_t req_id = p[1];
     const uint8_t status = p[2];
 
     // MIRROR_STOP ack: the agent is back in READY. The feature has already (or is
@@ -233,13 +315,31 @@ void Link::handle_control_response(const uint8_t* p, size_t len) {
     // stays usable). Just consume it.
     if (cmd == kCmdMirrorStop) return;
 
-    if (cmd != kCmdMirrorStart) return;  // unknown cmd: ignore (forward compat)
+    if (cmd != kCmdMirrorStart) {
+        // A generic request()'s response: match by req_id, dispatch its one-shot
+        // completion (outside req_mtx_). Unmatched = expired or unknown: ignore
+        // (forward compat). Traffic also drives the lazy timeout sweep.
+        RequestCallback cb;
+        {
+            std::lock_guard<std::mutex> lk(req_mtx_);
+            for (auto it = pending_.begin(); it != pending_.end(); ++it) {
+                if (it->first == req_id && it->second.cmd == cmd) {
+                    cb = std::move(it->second.cb);
+                    pending_.erase(it);
+                    break;
+                }
+            }
+        }
+        if (cb) cb(adb::Error::Ok, status, p + 3, len - 3);
+        sweep_expired_requests();
+        return;
+    }
 
     if (status != kStatusOk) {  // agent refused MIRROR_START
         fail(adb::Error::Protocol);
         return;
     }
-    if (len < 3 + kMirrorStartResultLen) {
+    if (len < 3 + kMirrorStartResultBaseLen) {
         fail(adb::Error::Protocol);
         return;
     }
@@ -249,6 +349,10 @@ void Link::handle_control_response(const uint8_t* p, size_t len) {
     info.source_height = rd_u16(r + 2);
     info.video_codec = r[4];
     // r[5..7] reserved.
+    if (len >= 3 + kMirrorStartResultLen) {  // appended tail: the output frame size
+        info.out_width = rd_u16(r + 8);
+        info.out_height = rd_u16(r + 10);
+    }
     std::shared_ptr<VideoListener> v;
     { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
     if (v) v->on_mirror_started(this, info);
@@ -331,6 +435,9 @@ void Link::fail(adb::Error err) {
 
 void Link::fire_close_once(adb::Error err) {
     if (close_notified_.exchange(true)) return;
+    // Pending generic requests can never complete now — fail them promptly (the
+    // one-shot contract: every callback fires exactly once).
+    fail_all_requests(adb::Error::StreamClosed);
     if (auto l = listener_.lock()) l->on_link_close(this, err);
 }
 

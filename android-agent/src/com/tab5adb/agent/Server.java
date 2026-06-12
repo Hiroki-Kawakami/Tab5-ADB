@@ -53,14 +53,20 @@ public final class Server {
     private static final int CMD_HELLO = 0x01;
     private static final int CMD_MIRROR_START = 0x10;
     private static final int CMD_MIRROR_STOP = 0x11;
+    private static final int CMD_GET_APP_LIST = 0x20;
+    private static final int CMD_GET_APP_ICON = 0x21;
     private static final int STATUS_OK = 0x00;
+    private static final int STATUS_EINVAL = 0x01;
     private static final int STATUS_ENOTSUP = 0x02;
+    private static final int STATUS_EFAIL = 0xFF;
     private static final int PROTO_VERSION = 1;
     private static final int CAP_VIDEO = 0x0001;
+    private static final int CAP_APPINFO = 0x0004;
     private static final int VIDEO_CODEC_JPEG = 0x01;
+    private static final int SCALE_ASPECT = 2;  // scale_mode (§5.3)
 
     private static final int AGENT_VER_MAJOR = 0;
-    private static final int AGENT_VER_MINOR = 3;
+    private static final int AGENT_VER_MINOR = 4;
     private static final int AGENT_VER_PATCH = 0;
 
     // Mirror stream defaults (§5.1).
@@ -81,6 +87,12 @@ public final class Server {
     // reader thread starts, then read by the reader thread. Null = injection
     // unavailable (setup failed), so INPUT frames are silently dropped.
     private Input input;
+
+    // App metadata service (§4.4 GET_APP_LIST / GET_APP_ICON), built once on the
+    // main thread like `input` (SystemContext needs the main Looper). Null = the
+    // PackageManager is unreachable; the HELLO then drops the APPINFO capability
+    // and the commands answer ENOTSUP.
+    private AppInfo appInfo;
 
     private Server(boolean testPattern, int testW, int testH) {
         this.testPattern = testPattern;
@@ -118,6 +130,7 @@ public final class Server {
         // ActivityThread is a process singleton, so the reader thread then just
         // reuses the injector for a pure binder injectInputEvent (no Looper needed).
         server.initInput();
+        server.initAppInfo();
         LocalServerSocket sock = new LocalServerSocket(SOCKET_NAME);
         while (true) {
             LocalSocket client = sock.accept();
@@ -143,15 +156,16 @@ public final class Server {
                 new DataInputStream(client.getInputStream()));
 
         // Agent-initiated HELLO request (§4.4); its response is read by the reader.
+        int caps = CAP_VIDEO | (appInfo != null ? CAP_APPINFO : 0);
         byte[] args = new byte[8];
         args[0] = (byte) PROTO_VERSION;
         args[1] = (byte) AGENT_VER_MAJOR;
         args[2] = (byte) AGENT_VER_MINOR;
         args[3] = (byte) AGENT_VER_PATCH;
-        writeU16(args, 4, CAP_VIDEO);  // capabilities
-        writeU16(args, 6, 0);          // reserved
+        writeU16(args, 4, caps);  // capabilities
+        writeU16(args, 6, 0);     // reserved
         conn.sendControlRequest(CMD_HELLO, 0x01, args);
-        System.out.println("tab5adb-agent: sent HELLO (caps=video)");
+        System.out.println("tab5adb-agent: sent HELLO (caps=0x" + Integer.toHexString(caps) + ")");
 
         Thread reader = new Thread(() -> readLoop(conn), "tab5adb-control-reader");
         reader.setDaemon(true);
@@ -204,6 +218,8 @@ public final class Server {
             int cmd = p[0] & 0xFF, reqId = p[1] & 0xFF;
             if (cmd == CMD_MIRROR_START) handleMirrorStart(conn, p, reqId);
             else if (cmd == CMD_MIRROR_STOP) handleMirrorStop(conn, reqId);
+            else if (cmd == CMD_GET_APP_LIST) handleGetAppList(conn, reqId);
+            else if (cmd == CMD_GET_APP_ICON) handleGetAppIcon(conn, p, reqId);
             // unknown cmd: ignore (forward compat, §4.4)
         } else if (f.type == TYPE_INPUT) {
             handleInput(conn, f.payload);
@@ -281,6 +297,62 @@ public final class Server {
         }
     }
 
+    /**
+     * Build the app-metadata service once on the MAIN thread (the caller), like
+     * {@link #initInput} — SystemContext needs this thread's Looper. Best-effort:
+     * on failure the HELLO simply doesn't advertise APPINFO.
+     */
+    void initAppInfo() {
+        try {
+            appInfo = AppInfo.create();
+        } catch (Throwable t) {
+            System.err.println("tab5adb-agent: app info unavailable: " + t);
+        }
+    }
+
+    // --- GET_APP_LIST / GET_APP_ICON (§4.4) — answered on the reader thread ---
+
+    private void handleGetAppList(Conn conn, int reqId) throws IOException {
+        if (appInfo == null) {
+            conn.sendControlResponse(CMD_GET_APP_LIST, reqId, STATUS_ENOTSUP, null);
+            return;
+        }
+        try {
+            byte[] result = appInfo.appListPayload();
+            conn.sendControlResponse(CMD_GET_APP_LIST, reqId, STATUS_OK, result);
+            System.out.println("tab5adb-agent: GET_APP_LIST -> " + result.length + "B");
+        } catch (Throwable t) {
+            System.err.println("tab5adb-agent: GET_APP_LIST failed: " + t);
+            conn.sendControlResponse(CMD_GET_APP_LIST, reqId, STATUS_EFAIL, null);
+        }
+    }
+
+    private void handleGetAppIcon(Conn conn, byte[] p, int reqId) throws IOException {
+        if (appInfo == null) {
+            conn.sendControlResponse(CMD_GET_APP_ICON, reqId, STATUS_ENOTSUP, null);
+            return;
+        }
+        // args (§4.4): size_px(u16) + reserved(u16) + package (rest of payload).
+        if (p.length < 2 + 4 + 1) {
+            conn.sendControlResponse(CMD_GET_APP_ICON, reqId, STATUS_EINVAL, null);
+            return;
+        }
+        int size = readU16(p, 2);
+        String pkg = new String(p, 6, p.length - 6, java.nio.charset.StandardCharsets.UTF_8);
+        if (size < 16 || size > 256) {
+            conn.sendControlResponse(CMD_GET_APP_ICON, reqId, STATUS_EINVAL, null);
+            return;
+        }
+        try {
+            byte[] result = appInfo.appIconPayload(pkg, size);
+            conn.sendControlResponse(CMD_GET_APP_ICON, reqId, STATUS_OK, result);
+        } catch (Throwable t) {
+            // Unknown package / drawing failure (§4.4).
+            System.err.println("tab5adb-agent: GET_APP_ICON " + pkg + " failed: " + t);
+            conn.sendControlResponse(CMD_GET_APP_ICON, reqId, STATUS_EINVAL, null);
+        }
+    }
+
     // --- HELLO response (§4.4) ---
 
     private void handleHelloResponse(Conn conn, Frame resp) {
@@ -310,7 +382,7 @@ public final class Server {
     // --- MIRROR_START / MIRROR_STOP (§4.4) ---
 
     private static final class MirrorParams {
-        int targetW, targetH, scaleMode, streams;
+        int targetW, targetH, scaleMode, streams, maxFps, quality, split;
     }
 
     /** Parse + answer MIRROR_START; hand the params to the session loop. */
@@ -321,13 +393,32 @@ public final class Server {
         mp.targetH = readU16(p, 4);
         mp.scaleMode = p[6] & 0xFF;
         mp.streams = p[7] & 0xFF;
+        // Appended tail (§4.4, append-only): max_fps / jpeg_quality / split_count
+        // at +8..+10; absent or 0 = the defaults.
+        mp.maxFps = p.length >= 2 + 9 ? (p[10] & 0xFF) : 0;
+        mp.quality = p.length >= 2 + 10 ? (p[11] & 0xFF) : 0;
+        mp.split = p.length >= 2 + 11 ? (p[12] & 0xFF) : 0;
+        System.out.println("tab5adb-agent: MIRROR_START target=" + mp.targetW + "x" + mp.targetH
+                + " scale=" + mp.scaleMode + " streams=0x" + Integer.toHexString(mp.streams)
+                + " max_fps=" + mp.maxFps + " q=" + mp.quality + " split=" + mp.split);
+
+        // Aspect mode (§5.3): size the output to the source's natural aspect within
+        // the requested box, then stream a plain fit into that box — a full-bleed
+        // frame whose size the response's out_width/out_height carries.
+        if (mp.scaleMode == SCALE_ASPECT) {
+            int[] nat = naturalSourceSize();
+            int[] out = Projection.aspectOutput(nat[0], nat[1], mp.targetW, mp.targetH);
+            mp.targetW = out[0];
+            mp.targetH = out[1];
+            mp.scaleMode = 0;
+            System.out.println("tab5adb-agent: aspect output " + out[0] + "x" + out[1]
+                    + " (source " + nat[0] + "x" + nat[1] + ")");
+        }
         // Publish the panel geometry for touch passthrough (§4.7); the rotation /
         // natural source dims follow once streamVideo builds the capture.
         conn.curTargetW = mp.targetW;
         conn.curTargetH = mp.targetH;
         conn.curScaleMode = mp.scaleMode;
-        System.out.println("tab5adb-agent: MIRROR_START target=" + mp.targetW + "x" + mp.targetH
-                + " scale=" + mp.scaleMode + " streams=0x" + Integer.toHexString(mp.streams));
 
         if ((mp.streams & CAP_VIDEO) == 0) {  // we only offer video today
             conn.sendControlResponse(CMD_MIRROR_START, reqId, STATUS_ENOTSUP, null);
@@ -335,12 +426,14 @@ public final class Server {
         }
 
         int[] src = sourceSize();
-        byte[] result = new byte[8];
+        byte[] result = new byte[12];
         writeU16(result, 0, src[0]);          // source_width
         writeU16(result, 2, src[1]);          // source_height
         result[4] = (byte) VIDEO_CODEC_JPEG;  // video_codec
         result[5] = 0;                        // reserved
         writeU16(result, 6, 0);               // reserved
+        writeU16(result, 8, mp.targetW);      // out_width (== target after the remap)
+        writeU16(result, 10, mp.targetH);     // out_height
         conn.sendControlResponse(CMD_MIRROR_START, reqId, STATUS_OK, result);
 
         // Hand off to the session loop; clear any stale stop from a prior session.
@@ -364,12 +457,17 @@ public final class Server {
     // --- video stream (§5) ---
 
     private void streamVideo(Conn conn, MirrorParams mp) throws Exception {
+        int split = mp.split > 0 ? mp.split : SPLIT_COUNT;
+        int quality = mp.quality > 0 ? Math.min(mp.quality, 100) : JPEG_QUALITY;
         FramePipeline pipeline = new FramePipeline(
-                mp.targetW, mp.targetH, mp.scaleMode, SPLIT_COUNT, JPEG_QUALITY);
-        System.out.println("tab5adb-agent: streaming video (split=" + SPLIT_COUNT
-                + " q=" + JPEG_QUALITY + (testPattern ? ", test-pattern)" : ", screen)"));
+                mp.targetW, mp.targetH, mp.scaleMode, split, quality);
+        System.out.println("tab5adb-agent: streaming video (split=" + split
+                + " q=" + quality + (testPattern ? ", test-pattern)" : ", screen)"));
 
-        long frameNs = TARGET_FPS > 0 ? 1_000_000_000L / TARGET_FPS : 0;
+        // Wall-clock pacing: the Tab5's requested max_fps (a preview asks for ~10)
+        // bounded by our own panel-rate cap.
+        int fps = mp.maxFps > 0 ? Math.min(mp.maxFps, TARGET_FPS) : TARGET_FPS;
+        long frameNs = fps > 0 ? 1_000_000_000L / fps : 0;
         int frame = 0;
         ScreenCapture capture = null;
         int captureRotation = -1;  // device rotation the current capture was built for
@@ -621,6 +719,20 @@ public final class Server {
         } catch (Throwable t) {
             throw new RuntimeException("displaySize failed: " + t, t);
         }
+    }
+
+    /**
+     * The source's dimensions as the pipeline will display them, for the aspect
+     * scale mode's output sizing. Real capture shows the natural-orientation
+     * framebuffer (§5.1), so un-rotate the logical size; the test-pattern CPU
+     * pipeline rotates landscape sources to portrait, so portrait-ize those.
+     */
+    private int[] naturalSourceSize() {
+        if (testPattern) {
+            return testW > testH ? new int[]{testH, testW} : new int[]{testW, testH};
+        }
+        int[] src = sourceSize();
+        return Projection.naturalSize(src[0], src[1], deviceRotation());
     }
 
     /**

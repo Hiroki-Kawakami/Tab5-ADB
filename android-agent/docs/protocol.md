@@ -63,8 +63,12 @@ USB bulk のリンク層 CRC/再送 + ADB のメッセージ整合の上に、Wi
    フレームを流し始める（§5）。
 
 切断（ストリーム CLSE / agent 終了 / USB 抜け / WiFi 途絶）で `IDLE` に戻り、必要なら本シーケンスで
-再接続する。今は mirror がリンクを張る唯一の用途なので 1 と 6 は連続するが、HELLO（リンク確立）と
-`MIRROR_START`（機能開始）は別ステップとして分離している。
+再接続する。HELLO（リンク確立）と `MIRROR_START`（機能開始）は別ステップとして分離している。
+
+> **Tab5 側の運用ノート（ワイヤ契約外）**: Tab5 は adb 接続の確立直後に 1〜5 を実行してリンクを
+> eager に確立し、成功なら**通常モード**（mirror / 高速 preview / アプリ情報など agent 依存機能を
+> 提供）、失敗なら**機能制限モード**（agent 非依存の機能のみ）で動作する。§2.2 の起点が
+> 「ユーザ操作（mirror 開始）」から「adb 接続確立」に変わるだけで、シーケンス自体は同じ。
 
 ---
 
@@ -158,8 +162,10 @@ v1 で実際に使うのは agent 発の `HELLO`（リンク確立）と Tab5 �
 | `0x10` | `MIRROR_START`     | T→A | **mirror 開始**（映像＋音声。v1 は映像のみ）。パネル寸法/スケールモード/開始ストリームを運ぶ | 下記 |
 | `0x11` | `MIRROR_STOP`      | T→A | **mirror 停止**（映像＋音声）。`STREAMING`→`READY`（リンクは維持） | 下記 |
 | `0x12` | `MIRROR_SET_PARAM` | T→A | **予約**: スケールモード/品質/分割数等のライブ変更 | 未定 |
+| `0x20` | `GET_APP_LIST`     | T→A | インストール済みアプリ一覧（pkg / ラベル / flags）。AppManager 用 | 下記 |
+| `0x21` | `GET_APP_ICON`     | T→A | 1 アプリのアイコン（raw ARGB8888） | 下記 |
 
-予約: `0x02..0x0F` 制御一般 / `0x13..0x1F` mirror 制御 / `0x20..` 拡張。
+予約: `0x02..0x0F` 制御一般 / `0x13..0x1F` mirror 制御 / `0x22..` 拡張。
 
 > v1 のフロー: **HELLO でリンクを確立 → Tab5 の `MIRROR_START` で mirror 開始 → agent が JPEG
 > ストリームを流す**。`MIRROR_START` は映像と音声の **両方**を開始するメッセージ（運ぶストリームは
@@ -219,13 +225,23 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
 **要求 (CONTROL_REQUEST) args**（Tab5 → agent）:
 
 ```
- +0   u16     target_width        Tab5 パネル幅 [px] (LE)。= 720
- +2   u16     target_height       Tab5 パネル高さ [px] (LE)。= 1280
- +4   u8      scale_mode          スケールモード。0=fit（既定） / 1=fill（§5.3）
+ +0   u16     target_width        ビューア面の幅 [px] (LE)。全画面 mirror = 720
+ +2   u16     target_height       ビューア面の高さ [px] (LE)。全画面 mirror = 1280
+ +4   u8      scale_mode          スケールモード。0=fit（既定） / 1=fill / 2=aspect（§5.3）
  +5   u8      streams             開始するストリームのビットマスク（§4.6 と同じ bit 割当）。v1 = 0x01（VIDEO のみ）
  +6   u16     reserved            0
- (= 8 bytes。将来は末尾に append-only)
+ +8   u8      max_fps             フレームレート上限。0 = 無制限（agent 既定の上限のみ）。低レート用途
+                                  （DeviceScreen の preview 等）で帯域とエンコード負荷をソースで絞る
+ +9   u8      jpeg_quality        JPEG 品質 (1..100)。0 = agent 既定（現行 80）。preview は 60
+ +10  u8      split_count         ストリップ分割数（§5.3）。0 = agent 既定（現行 4）。preview は 1
+                                  （= フレーム全体を 1 JPEG で送る。転送前の分割をしない）
+ +11  u8      reserved            0
+ (= 12 bytes。将来は末尾に append-only。+8 以降を欠く旧要求は 0 = 既定とみなす)
 ```
+
+- `target_width`/`target_height` は **Tab5 パネルとは限らないビューア面のサイズ**（mirror 画面は
+  パネル全面 720×1280、DeviceScreen の preview は 360×860 ボックス）。**`split_count` > 1 で使う
+  ときは 16 の倍数**で指定する（ストリップの 16px 整列。§5.2）。`split_count` = 1 なら偶数で良い。
 
 **応答 (CONTROL_RESPONSE) result**（agent → Tab5, `status = OK`）:
 
@@ -235,7 +251,10 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
  +4   u8      video_codec         0x01=JPEG(YUV420)（現行）。以降は予約
  +5   u8      reserved            0
  +6   u16     reserved            0
- (= 8 bytes。将来は末尾に append-only)
+ +8   u16     out_width           実際に流すフレームの幅 [px] (LE)。fit/fill = target_width、
+                                  aspect = agent が決めたサイズ（§5.3）。受信側はこれでバッファを確保する
+ +10  u16     out_height          実際に流すフレームの高さ [px] (LE)
+ (= 12 bytes。将来は末尾に append-only。+8 以降を欠く旧応答は out = target とみなす)
 ```
 
 - `streams` に立っているが agent が提供できない（HELLO の `capabilities` に無い）ビットがあれば、agent は
@@ -264,6 +283,62 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
 - Tab5 は MIRROR_STOP の応答を待たずにローカルの受信を止めてよい（応答は確認用）。
 - 映像と並行して制御を処理するため、agent は **送出ループと別に制御フレームを read** し、MIRROR_STOP
   を JPEG の流量にブロックされず受け取る（§4.4 のノート）。
+
+#### GET_APP_LIST (cmd = 0x20) — アプリ一覧
+
+**Tab5 が CONTROL_REQUEST として送る**。agent は `PackageManager` からインストール済みアプリの
+一覧（パッケージ名・人間可読ラベル・属性）を返す。HELLO capability の `APPINFO`（§4.6）を
+広告した agent のみ対応。状態（§7）は変えない。mirror の映像と同じリンクに乗るが、
+要求/応答とも小さい（一覧全体で数十 KB）ので帯域への影響は無視できる。
+
+**要求 (CONTROL_REQUEST) args**: **なし**（`cmd` + `req_id` のみ）。
+
+**応答 (CONTROL_RESPONSE) result**（agent → Tab5, `status = OK`）:
+
+```
+ +0   u16     count               エントリ数 (LE)
+ +2   ...     count 個の可変長エントリ（連続配置、各エントリは下記）:
+   +0  u8     flags               bit0 = system アプリ / bit1 = disabled（ユーザー無効化）
+   +1  u8     reserved            0
+   +2  u8     pkg_len             パッケージ名のバイト長
+   +3  u8     label_len           ラベルのバイト長（0 = ラベル不明、pkg を表示）
+   +4  ...    pkg                 パッケージ名 (UTF-8, pkg_len bytes)
+   +4+pkg_len ... label           ラベル (UTF-8, label_len bytes。255 バイトに収まるよう切り詰め)
+```
+
+- agent は**ラベルの大文字小文字無視順でソートして返す**（Tab5 側のソート省略）。
+- 応答 payload 全体は `max_payload` 以下に収まること（数百アプリ × 数十 B で余裕）。
+- この要求の応答待ちは §8 の既定 1000 ms ではなく **3000 ms**（数百アプリのラベル解決に時間がかかる）。
+
+#### GET_APP_ICON (cmd = 0x21) — アプリアイコン
+
+**Tab5 が CONTROL_REQUEST として送る**。agent は指定パッケージのランチャーアイコンを
+`size_px`×`size_px` に描画し、**raw ARGB8888** で返す（Tab5 側に PNG デコーダを増やさない選択。
+帯域が問題になったら圧縮形式を append する）。`APPINFO` capability が前提。
+
+**要求 (CONTROL_REQUEST) args**（Tab5 → agent）:
+
+```
+ +0   u16     size_px             要求アイコン辺長 [px] (LE)。推奨 56〜96
+ +2   u16     reserved            0
+ +4   ...     package             パッケージ名 (UTF-8, payload の残り全部)
+```
+
+**応答 (CONTROL_RESPONSE) result**（agent → Tab5, `status = OK`）:
+
+```
+ +0   u16     width               実際の幅 [px] (LE)。= size_px
+ +2   u16     height              実際の高さ [px] (LE)
+ +4   u8      format              0x01 = ARGB8888（現行唯一）
+ +5   u8      reserved            0
+ +6   u16     reserved            0
+ +8   ...     pixels              width*height 個の u32 (LE) = 0xAARRGGBB
+                                  （メモリ順 B,G,R,A。Android の Color int / LVGL の
+                                  ARGB8888 ネイティブ順と同一なので両端とも無変換）
+```
+
+- 不明パッケージ／描画失敗は `status = EINVAL`。
+- 応答待ちは **3000 ms**（GET_APP_LIST と同じ理由）。
 
 #### ORIENTATION (event = 0x03) — ソース端末の向き通知
 
@@ -296,10 +371,11 @@ mirror 中、**agent が EVENT として送る**。ソース端末（ディス�
 |---|---|---|
 | 0 | `VIDEO` | 映像 mirror（JPEG ストリップ。§5） |
 | 1 | `AUDIO` | 音声 mirror（§6。**予約**） |
-| 2-15 | 予約 | 0 |
+| 2 | `APPINFO` | アプリ情報（`GET_APP_LIST` / `GET_APP_ICON`。§4.4） |
+| 3-15 | 予約 | 0 |
 
-v1 は agent・Tab5 とも `VIDEO` を立てる（`AUDIO` は将来）。両者の `capabilities` の **AND** が利用可能な
-機能集合。
+agent・Tab5 とも `VIDEO` と `APPINFO` を立てる（agent は PackageManager に届かない環境では
+`APPINFO` を落とす。`AUDIO` は将来）。両者の `capabilities` の **AND** が利用可能な機能集合。
 
 ### 4.5 ステータスコード（共通の基準値・拡張可）
 
@@ -395,23 +471,25 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
    - **縦長**（`source_height ≥ source_width`）: 回転しない。
    - **横長**（`source_width > source_height`）: **270° 回転**して表示する。
    - 回転後の画像は **常に縦長**になる（Tab5 の縦長パネルにできるだけ大きく表示する向き）。
-2. **スケール（§5.3 のモード）**: 回転後の画像を Tab5 パネル（`target_width`×`target_height` =
-   720×1280）へスケールする。**スケールは agent 側で行う。** 出力寸法は 16 の倍数に丸める。
-3. **ストリップ分割**: スケール後の（必ず縦長の）画像を **`SPLIT_COUNT` 本の水平バンド**に分割する。
-   **各ストリップの高さは 16 の倍数**。
-4. **JPEG 符号化**: 各ストリップを **YUV420（4:2:0）・品質 60 固定**で JPEG 圧縮し、1 フレーム（§3）
-   として順に送る（先頭 `FRAME_START`、末尾 `FRAME_END`）。
+2. **スケール（§5.3 のモード）**: 回転後の画像をビューア面（`target_width`×`target_height`。
+   全画面 mirror = 720×1280）へスケールする。**スケールは agent 側で行う。**
+   `max_fps` > 0 のときは送出をその FPS 以下に壁時計ペーシングする（静止画面はそもそも
+   新フレームが出ないので送られない）。
+3. **ストリップ分割**: スケール後の（必ず縦長の）画像を **`split_count` 本の水平バンド**に分割する
+   （`MIRROR_START` の `split_count`。0 = 既定 4）。分割時（>1）は**各ストリップの高さ・出力寸法とも
+   16 の倍数**。`split_count` = 1 はフレーム全体が 1 JPEG（preview 用 — 分割しない）。
+4. **JPEG 符号化**: 各ストリップを **YUV420（4:2:0）**で JPEG 圧縮し、1 フレーム（§3）
+   として順に送る（先頭 `FRAME_START`、末尾 `FRAME_END`）。品質は `MIRROR_START` の
+   `jpeg_quality`（0 = 既定 80。preview は 60）。
 
-- **`SPLIT_COUNT` = 4**（既定。調整可能。§5.3）。
-- **JPEG 品質 = 60 固定**（当面）。
 - **色形式 = YUV420（4:2:0）**。
 
 > **実装メモ（ワイヤ契約は不変）**: 上の 1〜2（回転・スケール・レターボックス）は**実画面キャプチャでは
 > GPU にオフロード**する。`SurfaceControl.setDisplayProjection`（回転コード + パネルサイズ
 > `ImageReader` 内の中央寄せ矩形）で SurfaceFlinger が回転・スケール・**黒レターボックス**まで一括で
 > コンポジットするので、agent は CPU でフルフレームの読み戻し/回転/スケール/合成コピーを行わない
-> （`Projection`/`ScreenCapture`）。よって出力は常に **720×1280 フル**で、各ストリップは `x=0, w=720`
-> （§5.2 のとおり）。`--test-pattern` だけは SurfaceFlinger が無いので 1〜4 を CPU（`FramePipeline`）
+> （`Projection`/`ScreenCapture`）。よって出力は常に **`out_width`×`out_height` フル**（全画面
+> mirror = 720×1280）で、各ストリップは `x=0, w=out_width`（§5.2 のとおり）。`--test-pattern` だけは SurfaceFlinger が無いので 1〜4 を CPU（`FramePipeline`）
 > で行う。生成手段の差であり、送出されるフレーム/ストリップの形は同じ。
 >
 > **物理向き固定の実装メモ**: §5.1 の「物理向き基準・論理回転は考慮しない」は、**端末の自然
@@ -434,16 +512,22 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 ### 5.2 JPEG payload
 
 ```
- +0   u16   x        ブロック左上 X [px] (LE)。16 の倍数
- +2   u16   y        ブロック左上 Y [px] (LE)。16 の倍数
- +4   u16   w        ブロック幅 [px] (LE)。16 の倍数
- +6   u16   h        ブロック高さ [px] (LE)。16 の倍数
- +8   ...   jpeg     この w×h 領域を JPEG 圧縮（YUV420, 品質 60）したデータ
+ +0   u16   x        ブロック左上 X [px] (LE)。分割時は 16 の倍数
+ +2   u16   y        ブロック左上 Y [px] (LE)。分割時は 16 の倍数
+ +4   u16   w        ブロック幅 [px] (LE)。分割時は 16 の倍数（split_count=1 は偶数で可）
+ +6   u16   h        ブロック高さ [px] (LE)。分割時は 16 の倍数（split_count=1 は偶数で可）
+ +8   ...   jpeg     この w×h 領域を JPEG 圧縮（YUV420, jpeg_quality）したデータ
 ```
 
-- 座標は Tab5 パネル（720×1280）上のデバイス座標。横ストリップなので 1 フレーム内で `x`・`w` は一定、
-  `y`/`h` がバンド位置（fit モードでは画像が中央寄せされ `x`>0・`w`<720 になり得る。§5.3）。
-- **座標・サイズは 16px の倍数**（YUV420 の MCU 整列、かつ HW JPEG デコード/AXI バーストの都合）。
+- 座標はビューア面（`target_width`×`target_height`。全画面 mirror = Tab5 パネル 720×1280）上の
+  デバイス座標。横ストリップなので 1 フレーム内で `x`・`w` は一定、`y`/`h` がバンド位置（fit モード
+  では画像が中央寄せされ `x`>0・`w`<target_width になり得る。§5.3）。
+- **分割時（`split_count` > 1）は座標・サイズとも 16px の倍数**（YUV420 の MCU 整列 — 受信側は各
+  バンドを行帯へタイトデコードで「配置」するため、バンド境界が MCU 行境界に乗る必要がある）。
+  **`split_count` = 1（フレーム全体が 1 JPEG）なら任意の偶数サイズで良い** — JPEG 内部の MCU
+  パディングはデコーダが処理する。ただし P4 HW デコーダの出力ラスタは **MCU パディング幅
+  （ceil16(w)）で連続格納**されるので、受信側は出力バッファをパディング寸法で確保し、表示は
+  実寸 w × ストライド ceil16(w) で行う（`jpeg_enh_frame_info_t.pic_w` がストライドの真値）。
 - 1 ブロックの **payload 全体（8B サブヘッダ + jpeg）は `max_payload` 以下**（§3, §4.4）。
 - **末尾ブロックは FLAGS の `FRAME_END`、先頭ブロックは `FRAME_START`**（最終フラグはフレーム層に一元化）。
 
@@ -451,17 +535,28 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 
 - **分割の主目的 = HW JPEG コーデック負荷の時間分散**: 大きな JPEG を 1 回で HW JPEG コーデックに
   かけると **AXI バスを長時間占有**し、音声処理など一部のリアルタイム処理に影響が出る。これを避ける
-  ため、1 フレームを複数ストリップに分けて **デコードを時間方向に分散**させる。`SPLIT_COUNT` はこの
-  分散粒度のノブで、**既定 4・調整可能**。負荷分散と転送効率（`max_payload`）の兼ね合いで実機調整する。
-  Tab5 はバンド数を事前に知る必要はない（各ブロックの座標とフレーム層の `FRAME_END` で境界が決まる）。
-  当面は agent 側の設定値。将来 Tab5 主導で変えるなら `MIRROR_SET_PARAM`（§4.4 予約）。
+  ため、1 フレームを複数ストリップに分けて **デコードを時間方向に分散**させる。`split_count`
+  （`MIRROR_START` +10。0 = 既定 4）はこの分散粒度のノブで、負荷分散と転送効率（`max_payload`）の
+  兼ね合いで実機調整する。**小フレームの preview は 1**（全画面 mirror と違い分散の必要がなく、
+  分割しない方が単純）。Tab5 はバンド数を事前に知る必要はない（各ブロックの座標とフレーム層の
+  `FRAME_END` で境界が決まる）。
 - **スケールモード**（初期値は `MIRROR_START` の `scale_mode`。将来 `MIRROR_SET_PARAM` でライブ切替）:
-  - **fit（既定）**: 画面全体が収まるよう **アスペクト比を保って** 720×1280 に内接させる。縦横比が
-    パネルと異なると上下または左右に余白（レターボックス）が出る＝**送られる画像は 720×1280 より
-    小さくなり得る**。中央寄せの分だけ `x`/`y` にオフセットが乗る。余白は静的な黒で、Tab5 が初期化時
-    /モード変更時に塗る（毎フレーム画像領域は全面書き換わるのでダブルバッファのまま整合する）。
-  - **fill**: 縦横で同じ倍率を保ったまま **パネル全体を埋める**ようスケールし、はみ出しはクロップする。
-    **fill モードの画像は必ず 720×1280**（余白なし）。
+  - **fit（既定）**: 画面全体が収まるよう **アスペクト比を保って** `target_width`×`target_height` に
+    内接させる。縦横比がターゲットと異なると上下または左右に余白（レターボックス）が出る＝**送られる
+    画像はターゲットより小さくなり得る**。中央寄せの分だけ `x`/`y` にオフセットが乗る。余白は静的な
+    黒で、Tab5 が初期化時/モード変更時に塗る（毎フレーム画像領域は全面書き換わるのでダブルバッファの
+    まま整合する）。
+  - **fill**: 縦横で同じ倍率を保ったまま **ターゲット全体を埋める**ようスケールし、はみ出しは
+    クロップする。**fill モードの画像は必ず `target_width`×`target_height`**（余白なし）。
+  - **aspect**: agent が**出力サイズ自体をソースのアスペクト比に合わせて決める** — 自然向きソースを
+    `target_width`×`target_height` のボックスに fit したサイズ（**偶数へ丸め**、ボックス以下。
+    幅律速のソースなら幅 = `target_width` ちょうど）を出力フレームとし、レターボックスもクロップも
+    なく全画面を流す。決めたサイズは `MIRROR_START` 応答の `out_width`/`out_height` が運ぶ。
+    受信側がフレームをそのまま表示する小窓ビューア（DeviceScreen preview の
+    「幅 360 固定・高さはソース比率に追従」）向けで、**`split_count` = 1 と組で使う**
+    （16px 整列が不要になるので任意の偶数サイズが許される。§5.2）。実装上は
+    「アスペクト一致ボックスへの fit」と等価なので、agent はサイズ決定後は fit と同じ経路で流す
+    （偶数丸めの誤差 ≤ 1px は許容）。
 - **更新モデル = 毎フレーム全画面**: 画像領域は毎フレーム全面が書き換わるので **前フレームの
   front→back コピーは不要**。**ブロック単位のレンダリング（領域指定デコード）は実装する**。
 - **部分更新（dirty-rect）= 今後**: 変化バンドだけ送れば帯域削減できるが、ダブルバッファだと swap 後の

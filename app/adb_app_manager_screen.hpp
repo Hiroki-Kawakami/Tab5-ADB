@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -8,11 +9,15 @@
 #include "adb.hpp"  // adb::Sync, adb::SyncListener
 #include "screen.hpp"
 
-// Installed-app manager. Lists the device's packages via one `pm list
-// packages` exec round trip (user/system/disabled sections in a single shell
-// command), with a User/System filter toggle. Tapping a row opens the app
-// detail screen; the nav bar's Install button picks a .apk off the Tab5 SD
-// card (SDFileBrowserScreen pick mode) and installs it: Sync::push to
+// Installed-app manager. In Normal mode the listing is one agent GET_APP_LIST
+// request (human-readable labels, label-sorted, system/disabled flags) and the
+// visible rows lazily fetch their launcher icons via GET_APP_ICON (raw
+// ARGB8888, cached in PSRAM for the screen's lifetime); in Limited mode — or
+// when the agent path fails — it falls back to the original one-exec `pm list
+// packages` round trip (package names only, no icons). A User/System filter
+// toggle picks the rendered set. Tapping a row opens the app detail screen;
+// the nav bar's Install button picks a .apk off the Tab5 SD card
+// (SDFileBrowserScreen pick mode) and installs it: Sync::push to
 // /data/local/tmp with a progress dialog, then `pm install -r`.
 //
 // The list is **recycled**, not built per package: a fixed pool of row widgets
@@ -29,6 +34,8 @@
 // stale completions when Refresh is tapped faster than the device responds.
 class ADBAppManagerScreen : public Screen, public adb::SyncListener {
 public:
+    ~ADBAppManagerScreen() override;  // frees the PSRAM icon cache
+
     void build() override;
     void onAppear() override;  // re-list after returning from detail/install
     void onExit() override;    // abort + tear down an in-flight install
@@ -40,15 +47,32 @@ public:
 private:
     enum class Filter { User, System };
 
+    // One listed app: the package plus, on the agent path, its human label
+    // (empty on the pm fallback / when unknown — the row shows pkg then).
+    struct AppEntry {
+        std::string pkg;
+        std::string label;
+        const std::string &display() const { return label.empty() ? pkg : label; }
+    };
+
     // One recycled list row. The widgets are created once (ensure_pool) and
     // rebound while scrolling; data_idx is the bound index into filtered()
     // (-1 = hidden), read by the row's click handler.
     struct Row {
         lv_obj_t *btn;
-        lv_obj_t *icon;
+        lv_obj_t *img;   // fetched launcher icon (shown when cached)
+        lv_obj_t *icon;  // placeholder glyph (shown until the icon lands)
         lv_obj_t *name;
         lv_obj_t *tag;  // "disabled" badge, hidden unless bound pkg is disabled
         int data_idx = -1;
+    };
+
+    // One cached launcher icon: an lv_image_dsc_t over a PSRAM ARGB8888 buffer.
+    // LVGL-thread only; std::map nodes are address-stable, so a bound lv_image
+    // can keep pointing at the dsc while the cache grows.
+    struct IconEntry {
+        lv_image_dsc_t dsc{};
+        uint8_t *buf = nullptr;
     };
 
     // One APK install in flight. The Sync push source holds the shared_ptr
@@ -68,11 +92,19 @@ private:
     Filter filter_ = Filter::User;
     bool loading_ = false;
     std::string error_;  // non-empty: show this instead of the list
-    std::vector<std::string> user_pkgs_, system_pkgs_;
+    std::vector<AppEntry> user_pkgs_, system_pkgs_;
     std::set<std::string> disabled_;
     uint32_t load_gen_ = 0;
     lv_obj_t *list_{nullptr};
     lv_obj_t *user_btn_{nullptr}, *system_btn_{nullptr};
+
+    // Icon cache + in-flight set (LVGL thread only). Bounded: past the cap new
+    // rows just keep the glyph (a per-pkg ~12 KB ARGB8888 in PSRAM).
+    static constexpr int kIconPx = 56;
+    static constexpr size_t kMaxIconCache = 256;
+    static constexpr size_t kMaxIconInflight = 4;
+    std::map<std::string, IconEntry> icons_;
+    std::set<std::string> icon_pending_;
 
     // Recycler state.
     std::vector<Row> pool_;
@@ -86,15 +118,18 @@ private:
     lv_obj_t *progress_label_{nullptr};
     lv_timer_t *progress_timer_{nullptr};
 
-    std::vector<std::string> &filtered() {
+    std::vector<AppEntry> &filtered() {
         return filter_ == Filter::User ? user_pkgs_ : system_pkgs_;
     }
     void set_filter(Filter f);
-    void refresh();  // run pm list via exec, then rebuild
+    void refresh();                   // list via the agent or the pm fallback
+    void refresh_via_pm(uint32_t gen);  // the Limited-mode / fallback exec path
     void rebuild();  // render filter state + status + rebind the row pool
     void ensure_pool();              // create the row widgets once (lazy)
     void bind_row(Row &r, int idx);  // bind one pool row to filtered()[idx]
     void update_rows(bool force);    // rebind the pool to the scroll window
+    void pump_icons();               // fetch missing icons for the bound rows
+    void fetch_icon(const std::string &pkg);
 
     // ---- APK install flow (all LVGL thread unless noted) ----
     void pick_apk();                              // push the SD picker

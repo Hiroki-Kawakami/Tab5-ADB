@@ -10,6 +10,7 @@
 
 #include "adb_app.hpp"          // app::adb_client_shared()
 #include "agent/agent_jar.h"    // agent_jar, agent_jar_len
+#include "esp_timer.h"          // esp_timer_get_time (the retry deadline clock)
 #include "lvgl.hpp"             // lv_async_call(std::function<void()>)
 
 namespace app {
@@ -89,6 +90,7 @@ std::shared_ptr<agent_link::Link> AgentClient::link() {
 
 void AgentClient::on_adb_disconnected() {
     bool reset = false;
+    mode_.store(Mode::Unknown);  // the next adb connect re-determines the mode
     {
         std::lock_guard<std::mutex> lk(mtx_);
         stop_ = true;  // signal any running worker to bail
@@ -110,7 +112,8 @@ void AgentClient::on_adb_disconnected() {
 // agent_link::LinkLifecycleListener (adb reader thread)
 // ---------------------------------------------------------------------------
 
-void AgentClient::on_link_hello(agent_link::Link*, const agent_link::AgentInfo&) {
+void AgentClient::on_link_hello(agent_link::Link*, const agent_link::AgentInfo& info) {
+    agent_caps_.store(info.capabilities);
     {
         std::lock_guard<std::mutex> lk(mtx_);
         hello_ = true;
@@ -150,6 +153,21 @@ void AgentClient::on_shell_data(adb::Shell*, const uint8_t* d, size_t n) {
     std::fflush(stdout);
 }
 
+void AgentClient::on_shell_close(adb::Shell* sh, adb::Error) {
+    // The agent's app_process shell ended. During bring-up that means the launch
+    // failed (bad device, blocked app_process, crash on start) — flag it so the
+    // worker's HELLO retry loop fails fast instead of running out its deadline.
+    // Only the CURRENT shell counts: a previous session's shell delivers its
+    // terminal close on the reader thread when we drop it, possibly while the next
+    // bring-up is already running, and must not fail that one.
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (sh != shell_.get()) return;
+        shell_closed_ = true;
+    }
+    cv_.notify_all();
+}
+
 // ---------------------------------------------------------------------------
 // Worker task — the bring-up sequence (protocol.md §2.2)
 // ---------------------------------------------------------------------------
@@ -187,14 +205,21 @@ void AgentClient::run() {
     }
 
     // 4. Open the link, retrying until the agent answers HELLO (protocol.md §2.2).
+    // Bounded: the connect flow runs this eagerly to pick Normal vs Limited mode,
+    // so a device that will never answer must fail in seconds, not retries-times-
+    // timeout. Two fail-fast signals: an overall deadline, and the agent's shell
+    // closing (app_process exited = the launch failed, no point retrying).
     std::printf("agent: connecting localabstract...\n");
+    constexpr int64_t kHelloDeadlineUs = 8 * 1000 * 1000;
+    const int64_t t0 = esp_timer_get_time();
     std::shared_ptr<agent_link::Link> link;
-    for (int attempt = 0; attempt < 40 && !hello_ && !stopping(); ++attempt) {
+    while (!hello_ && !stopping() && !shell_dead() &&
+           esp_timer_get_time() - t0 < kHelloDeadlineUs) {
         { std::lock_guard<std::mutex> lk(mtx_); link_closed_ = false; }
         link = agent_link::Link::open(client_, weak_from_this());
         if (!link) { sleep_ms(200); continue; }
         { std::lock_guard<std::mutex> lk(mtx_); link_ = link; }
-        wait_for([this] { return hello_ || link_closed_; }, 1500);
+        wait_for([this] { return hello_ || link_closed_ || shell_closed_; }, 1500);
         if (hello_) break;
         { std::lock_guard<std::mutex> lk(mtx_); link_.reset(); }  // detach this attempt
         link->close();
@@ -250,6 +275,12 @@ bool AgentClient::push_jar() {
 
 void AgentClient::finish_result(bool ok) {
     std::vector<std::function<void(bool)>> waiters;
+    // Every bring-up result refines the mode (the eager one at adb connect sets
+    // it; a later lazy re-launch keeps it honest). A stop_-aborted worker (adb
+    // died mid-bring-up) reports failure, but the mode is already Unknown then —
+    // don't stamp Limited over it.
+    if (!stopping()) mode_.store(ok ? Mode::Normal : Mode::Limited);
+    if (!ok) agent_caps_.store(0);
     {
         std::lock_guard<std::mutex> lk(mtx_);
         state_.store(ok ? State::Ready : State::Disconnected);
@@ -265,6 +296,7 @@ void AgentClient::finish_result(bool ok) {
 }
 
 void AgentClient::reset_session() {
+    agent_caps_.store(0);
     std::shared_ptr<agent_link::Link> link;
     std::shared_ptr<adb::Shell> shell;
     std::shared_ptr<adb::Sync> sync;
@@ -288,6 +320,7 @@ void AgentClient::reset_worker_flags_locked() {
     stop_ = false;
     hello_ = false;
     link_closed_ = false;
+    shell_closed_ = false;
     kill_done_ = false;
     push_done_ = false;
     push_err_ = adb::Error::Transport;
@@ -296,6 +329,11 @@ void AgentClient::reset_worker_flags_locked() {
 bool AgentClient::stopping() {
     std::lock_guard<std::mutex> lk(mtx_);
     return stop_;
+}
+
+bool AgentClient::shell_dead() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return shell_closed_;
 }
 
 void AgentClient::sleep_ms(int ms) { wait_for([] { return false; }, ms); }

@@ -3,19 +3,19 @@
 # the link connected across the screen's onExit (stop_mirror only).
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
 # Device screen up: open Mirroring (1st time -> full bring-up).
-tap 552 162
+tap 204 400          # tap the preview image -> Mirroring screen
 wait 10000
 capture simulator/verify/out/reentry_1.jpg
 # End (mirroring終了 = top icon of the bottom-left control strip) -> pops the
 # screen: stop_mirror, keep the agent connected.
-tap 44 558
+tap 40 634
 wait 3000
 settle
 # Open Mirroring again (2nd time -> should resume instantly, no re-launch).
-tap 552 162
+tap 204 400          # tap the preview image -> Mirroring screen
 wait 6000
 capture simulator/verify/out/reentry_2.jpg
 quit

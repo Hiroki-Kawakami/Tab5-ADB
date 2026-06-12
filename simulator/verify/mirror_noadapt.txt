@@ -4,9 +4,9 @@
 # override must remain 1080x2000 after the test.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
-tap 552 162
+tap 204 400          # tap the preview image -> Mirroring screen
 wait 9000
 tap 40 698
 wait 2500

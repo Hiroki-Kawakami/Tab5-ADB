@@ -5,9 +5,9 @@
 # Enter=(674,1059), Ctrl=(46,1059), space=(340,1232)).
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
-tap 551 258
+tap 551 162
 wait 3000
 settle
 # stty/TERM bootstrap done; prompt up

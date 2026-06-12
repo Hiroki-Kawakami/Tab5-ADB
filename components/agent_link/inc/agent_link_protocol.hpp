@@ -40,7 +40,19 @@ enum Cmd : uint8_t {
     kCmdMirrorStart = 0x10,   // T->A: start mirror (video + future audio)
     kCmdMirrorStop = 0x11,    // T->A: stop mirror -> READY (link kept), §4.4
     kCmdMirrorSetParam = 0x12,  // T->A: live param change (reserved)
+    kCmdGetAppList = 0x20,    // T->A: installed apps (pkg/label/flags), §4.4
+    kCmdGetAppIcon = 0x21,    // T->A: one app icon as raw ARGB8888, §4.4
 };
+
+// GET_APP_LIST entry flags (§4.4).
+enum AppFlag : uint8_t {
+    kAppFlagSystem = 0x01,
+    kAppFlagDisabled = 0x02,
+};
+
+// GET_APP_ICON result: fixed fields before the pixels (§4.4).
+constexpr size_t kAppIconHeaderLen = 8;
+constexpr uint8_t kAppIconFormatArgb8888 = 0x01;
 
 // EVENT types (§4.4 event registry). Agent->Tab5 async notifications (TYPE=EVENT).
 enum Event : uint8_t {
@@ -64,12 +76,16 @@ inline bool rotation_is_landscape(uint8_t rotation) { return (rotation & 1) != 0
 enum Cap : uint16_t {
     kCapVideo = 0x0001,
     kCapAudio = 0x0002,
+    kCapAppInfo = 0x0004,  // GET_APP_LIST / GET_APP_ICON (§4.4)
 };
 
 // scale_mode (MIRROR_START args, §5.3).
 enum ScaleMode : uint8_t {
-    kScaleFit = 0,   // aspect-preserve inscribe, letterbox (default)
-    kScaleFill = 1,  // aspect-preserve cover, crop (always 720x1280)
+    kScaleFit = 0,     // aspect-preserve inscribe, letterbox (default)
+    kScaleFill = 1,    // aspect-preserve cover, crop (always target-sized)
+    kScaleAspect = 2,  // agent sizes the output to the source aspect within the
+                       // target box (16-aligned, no letterbox/crop); the chosen
+                       // size comes back as out_width/out_height
 };
 
 // Status codes (§4.5).
@@ -144,9 +160,13 @@ enum Keycode : uint16_t {
 constexpr size_t kHelloArgsLen = 8;    // after cmd+req_id
 constexpr size_t kHelloResultLen = 8;  // after cmd+req_id+status
 
-// MIRROR_START request args / response result lengths (§4.4).
-constexpr size_t kMirrorStartArgsLen = 8;    // after cmd+req_id
-constexpr size_t kMirrorStartResultLen = 8;  // after cmd+req_id+status
+// MIRROR_START request args / response result lengths (§4.4). The args carry
+// max_fps at +8 and the result carries out_width/out_height at +8; both tails
+// are append-only, so a peer may omit them (max_fps=0 / out=target assumed) —
+// the *Base lengths are the minimum a parser requires.
+constexpr size_t kMirrorStartArgsLen = 12;       // after cmd+req_id (what we send)
+constexpr size_t kMirrorStartResultBaseLen = 8;  // after cmd+req_id+status (minimum)
+constexpr size_t kMirrorStartResultLen = 12;     // with out_width/out_height
 
 // JPEG block subheader (§5.2): x, y, w, h (all u16), then the JPEG bytes.
 constexpr size_t kJpegSubheaderSize = 8;

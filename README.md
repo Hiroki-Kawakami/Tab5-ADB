@@ -86,5 +86,8 @@ The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
 - `android-agent/` — `tab5adb-agent`, the Android-side companion (screen
   mirroring + offload). A scrcpy-style Java program launched via `app_process`
   (no APK); built with the Android SDK from the flake. See its `README.md`. The
-  app's **Mirroring** screen (`ADBMirroringScreen`) pushes the embedded jar
-  (`app/agent/agent_jar.*`), launches it, and renders its live JPEG stream.
+  embedded jar (`app/agent/agent_jar.*`) is pushed + launched right after the
+  adb connection comes up: success = **normal mode** (live mirror preview on the
+  device screen — tap it for the full Mirroring screen — plus app labels/icons
+  in Apps), failure = **limited mode** (screencap preview, package names only,
+  no mirroring).

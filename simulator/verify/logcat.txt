@@ -7,9 +7,9 @@
 # Needs a real phone plugged into the PC.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
-tap 551 546
+tap 551 450
 wait 4000
 settle
 capture simulator/verify/out/logcat_live.jpg

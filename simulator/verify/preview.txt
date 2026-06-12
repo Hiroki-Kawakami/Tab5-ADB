@@ -4,7 +4,7 @@
 # couple of intervals and grab frames.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
 # Device screen is up; first preview lands within ~2 s of the screencap returning.
 wait 3000

@@ -4,9 +4,9 @@
 # Power, ... with NO maximize/DispMode icon between End and OpMode.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
-tap 552 162
+tap 204 400          # tap the preview image -> Mirroring screen
 wait 9000
 capture simulator/verify/out/hidden_overlay.jpg
 quit

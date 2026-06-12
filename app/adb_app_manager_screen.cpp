@@ -13,6 +13,8 @@
 
 #include "adb_app.hpp"
 #include "adb_app_detail_screen.hpp"
+#include "agent_client.hpp"
+#include "agent_link_protocol.hpp"  // kCmdGetApp*, kAppFlag*, rd_u16/wr_u16
 #include "modal.hpp"
 #include "sd_file_browser_screen.hpp"
 #include "screen_manager.hpp"
@@ -20,9 +22,9 @@
 
 namespace {
 
-// One round trip for everything the screen shows: third-party + system +
-// disabled package names, separated so one exec output parses into the three
-// sets. `pm list packages` emits "package:<name>" lines.
+// The pm fallback: one round trip for everything the screen shows — third-party
+// + system + disabled package names, separated so one exec output parses into
+// the three sets. `pm list packages` emits "package:<name>" lines.
 constexpr const char *kListCmd =
     "pm list packages -3 2>/dev/null; echo ---SEP---; "
     "pm list packages -s 2>/dev/null; echo ---SEP---; "
@@ -242,6 +244,75 @@ void ADBAppManagerScreen::refresh() {
     error_.clear();
     rebuild();
     uint32_t gen = ++load_gen_;
+
+    // Normal mode with an APPINFO-capable agent: one GET_APP_LIST request gives
+    // labels + flags in agent-sorted order. Anything short of that — Limited
+    // mode, a dropped link, a refused request — falls back to the pm exec path
+    // (same gen, so the stale guard covers both).
+    auto link = app::agent_client().link();
+    if (!link || !(app::agent_client().agent_caps() & agent_link::kCapAppInfo)) {
+        refresh_via_pm(gen);
+        return;
+    }
+    auto cb = [self = std::static_pointer_cast<ADBAppManagerScreen>(shared_from_this()),
+               gen](adb::Error err, uint8_t status, const uint8_t *result, size_t len) {
+        // Reader thread: parse here so the LVGL thread only swaps vectors in.
+        struct Parsed {
+            std::vector<AppEntry> user, system;
+            std::set<std::string> disabled;
+            bool ok = false;
+        };
+        auto box = std::make_shared<Parsed>();
+        if (err == adb::Error::Ok && status == agent_link::kStatusOk && len >= 2) {
+            size_t off = 2;
+            uint16_t count = agent_link::rd_u16(result);
+            box->ok = true;
+            for (uint16_t i = 0; i < count && box->ok; ++i) {
+                if (off + 4 > len) { box->ok = false; break; }
+                uint8_t flags = result[off];
+                uint8_t pkg_len = result[off + 2];
+                uint8_t label_len = result[off + 3];
+                off += 4;
+                if (off + pkg_len + label_len > len) { box->ok = false; break; }
+                AppEntry e;
+                e.pkg.assign(reinterpret_cast<const char *>(result + off), pkg_len);
+                e.label.assign(reinterpret_cast<const char *>(result + off + pkg_len),
+                               label_len);
+                off += pkg_len + label_len;
+                if (e.pkg.empty()) continue;
+                if (flags & agent_link::kAppFlagDisabled) box->disabled.insert(e.pkg);
+                if (flags & agent_link::kAppFlagSystem) box->system.push_back(std::move(e));
+                else box->user.push_back(std::move(e));
+            }
+        }
+        lv_async_call([self, gen, box]() {
+            if (self->exited() || gen != self->load_gen_) return;
+            if (!box->ok) {
+                // Agent path failed: degrade to the pm listing (names only).
+                self->refresh_via_pm(gen);
+                return;
+            }
+            self->loading_ = false;
+            self->user_pkgs_ = std::move(box->user);
+            self->system_pkgs_ = std::move(box->system);
+            self->disabled_ = std::move(box->disabled);
+            self->rebuild();
+        });
+    };
+    if (link->request(agent_link::kCmdGetAppList, nullptr, 0, std::move(cb)) !=
+        adb::Error::Ok) {
+        refresh_via_pm(gen);
+    }
+}
+
+void ADBAppManagerScreen::refresh_via_pm(uint32_t gen) {
+    adb::Client *client = app::adb_client();
+    if (!client) {
+        loading_ = false;
+        error_ = "Not connected.";
+        rebuild();
+        return;
+    }
     client->exec(kListCmd, [self = shared_from_this(), this, gen](
                                adb::Error err, const std::string &out) {
         // Reader thread: parse + sort here so the LVGL thread only swaps the
@@ -262,8 +333,14 @@ void ADBAppManagerScreen::refresh() {
                 rebuild();
                 return;
             }
-            user_pkgs_ = std::move(box->user);
-            system_pkgs_ = std::move(box->system);
+            auto to_entries = [](std::vector<std::string> &pkgs) {
+                std::vector<AppEntry> v;
+                v.reserve(pkgs.size());
+                for (auto &p : pkgs) v.push_back({std::move(p), ""});
+                return v;
+            };
+            user_pkgs_ = to_entries(box->user);
+            system_pkgs_ = to_entries(box->system);
             disabled_ = std::move(box->disabled);
             rebuild();
         });
@@ -344,11 +421,17 @@ void ADBAppManagerScreen::ensure_pool() {
         lv_obj_add_event_fn(r.btn, LV_EVENT_CLICKED, [this, slot](lv_event_t*){
             int idx = pool_[slot].data_idx;
             if (idx < 0 || idx >= (int)filtered().size()) return;
-            const std::string &pkg = filtered()[idx];
+            const std::string &pkg = filtered()[idx].pkg;
             screen_manager.push(std::make_shared<ADBAppDetailScreen>(
                 pkg, filter_ == Filter::System, disabled_.count(pkg) != 0));
         });
 
+        // Two icon widgets per row: the fetched launcher icon (lv_image) when
+        // cached, the package glyph until then — bind_row toggles their HIDDEN
+        // flags (flex skips hidden children, so they share the slot).
+        r.img = lv_image_create(r.btn);
+        lv_obj_set_size(r.img, kIconPx, kIconPx);
+        lv_obj_add_flag(r.img, LV_OBJ_FLAG_HIDDEN);
         r.icon = lv_label_create(r.btn);
         lv_label_set_text(r.icon, LUCIDE_PACKAGE);
         lv_obj_set_style_text_font(r.icon, R.font.lucide_40, 0);
@@ -372,12 +455,22 @@ void ADBAppManagerScreen::bind_row(Row &r, int idx) {
     r.data_idx = idx;
     lv_obj_remove_flag(r.btn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_pos(r.btn, 0, idx * kRowH);
-    const std::string &pkg = filtered()[idx];
-    bool disabled = disabled_.count(pkg) != 0;
-    lv_label_set_text(r.name, pkg.c_str());
+    const AppEntry &app = filtered()[idx];
+    bool disabled = disabled_.count(app.pkg) != 0;
+    lv_label_set_text(r.name, app.display().c_str());
     lv_color_t color = disabled ? lv_color_hex(0xb0b0b0) : lv_color_black();
     lv_obj_set_style_text_color(r.icon, color, 0);
     lv_obj_set_style_text_color(r.name, color, 0);
+    auto it = icons_.find(app.pkg);
+    if (it != icons_.end() && it->second.buf) {
+        lv_image_set_src(r.img, &it->second.dsc);
+        lv_obj_set_style_image_opa(r.img, disabled ? LV_OPA_50 : LV_OPA_COVER, 0);
+        lv_obj_remove_flag(r.img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(r.icon, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(r.img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(r.icon, LV_OBJ_FLAG_HIDDEN);
+    }
     if (disabled) {
         lv_obj_remove_flag(r.tag, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -395,6 +488,90 @@ void ADBAppManagerScreen::update_rows(bool force) {
     for (size_t i = 0; i < pool_.size(); ++i) {
         bind_row(pool_[i], first + (int)i);
     }
+    pump_icons();
+}
+
+void ADBAppManagerScreen::pump_icons() {
+    // Fetch launcher icons for the rows on screen, a few at a time (scrolling
+    // rebinds constantly — the inflight cap keeps a fast fling from queueing
+    // every row it passed). Gated on the agent's APPINFO capability, so the
+    // Limited-mode / pm-fallback list keeps its glyphs without ever requesting.
+    if (!(app::agent_client().agent_caps() & agent_link::kCapAppInfo)) return;
+    for (const Row &r : pool_) {
+        if (icon_pending_.size() >= kMaxIconInflight) break;
+        if (icons_.size() + icon_pending_.size() >= kMaxIconCache) break;
+        if (r.data_idx < 0 || r.data_idx >= (int)filtered().size()) continue;
+        const std::string &pkg = filtered()[r.data_idx].pkg;
+        if (icons_.count(pkg) || icon_pending_.count(pkg)) continue;
+        fetch_icon(pkg);
+    }
+}
+
+void ADBAppManagerScreen::fetch_icon(const std::string &pkg) {
+    auto link = app::agent_client().link();
+    if (!link || pkg.size() > 255) return;
+    // GET_APP_ICON args (§4.4): size_px + reserved + the package name.
+    uint8_t args[4 + 255];
+    agent_link::wr_u16(args, kIconPx);
+    agent_link::wr_u16(args + 2, 0);
+    memcpy(args + 4, pkg.data(), pkg.size());
+    auto cb = [self = std::static_pointer_cast<ADBAppManagerScreen>(shared_from_this()),
+               pkg](adb::Error err, uint8_t status, const uint8_t *result, size_t len) {
+        // Reader thread: validate + copy the pixels to PSRAM, then marshal.
+        uint8_t *buf = nullptr;
+        uint16_t w = 0, h = 0;
+        if (err == adb::Error::Ok && status == agent_link::kStatusOk &&
+            len >= agent_link::kAppIconHeaderLen) {
+            w = agent_link::rd_u16(result);
+            h = agent_link::rd_u16(result + 2);
+            size_t pixels = (size_t)w * h * 4;
+            if (w && h && result[4] == agent_link::kAppIconFormatArgb8888 &&
+                len >= agent_link::kAppIconHeaderLen + pixels) {
+                buf = static_cast<uint8_t *>(heap_caps_malloc(pixels, MALLOC_CAP_SPIRAM));
+                if (buf) memcpy(buf, result + agent_link::kAppIconHeaderLen, pixels);
+            }
+        }
+        // A definitive agent refusal (unknown pkg / drawing failure) must cache a
+        // "no icon" marker, or pump_icons would re-request the same package
+        // forever; transport failures (timeout / link drop) stay retryable.
+        const bool refused = err == adb::Error::Ok && status != agent_link::kStatusOk;
+        lv_async_call([self, pkg, buf, w, h, refused]() {
+            if (self->exited()) {
+                if (buf) heap_caps_free(buf);
+                return;
+            }
+            self->icon_pending_.erase(pkg);
+            if (refused && !buf) self->icons_[pkg] = IconEntry{};  // glyph stays
+            if (buf) {
+                IconEntry e;
+                e.buf = buf;
+                e.dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+                e.dsc.header.cf = LV_COLOR_FORMAT_ARGB8888;
+                e.dsc.header.w = w;
+                e.dsc.header.h = h;
+                e.dsc.header.stride = w * 4;
+                e.dsc.data = buf;
+                e.dsc.data_size = (size_t)w * h * 4;
+                self->icons_[pkg] = e;
+                // Refresh whichever row currently shows this package.
+                for (Row &r : self->pool_) {
+                    if (r.data_idx >= 0 && r.data_idx < (int)self->filtered().size() &&
+                        self->filtered()[r.data_idx].pkg == pkg) {
+                        self->bind_row(r, r.data_idx);
+                    }
+                }
+            }
+            self->pump_icons();  // a slot freed up — keep the visible rows coming
+        });
+    };
+    if (link->request(agent_link::kCmdGetAppIcon, args, 4 + pkg.size(),
+                      std::move(cb)) == adb::Error::Ok) {
+        icon_pending_.insert(pkg);
+    }
+}
+
+ADBAppManagerScreen::~ADBAppManagerScreen() {
+    for (auto &it : icons_) heap_caps_free(it.second.buf);
 }
 
 // ---- APK install flow ----

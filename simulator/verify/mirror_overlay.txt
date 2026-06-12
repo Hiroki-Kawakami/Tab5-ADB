@@ -3,9 +3,9 @@
 # tap Hide to dismiss it; swipe out of the bottom-left corner to reveal it again.
 settle
 tap 360 640        # Connect
-wait 6000
+wait 9000
 settle
-tap 552 162        # Mirroring tool (top-right)
+tap 204 400          # tap the preview image -> Mirroring screen
 # Agent launch + first frames take a few seconds.
 wait 9000
 capture simulator/verify/out/overlay_shown.jpg      # vertical strip, bottom-left

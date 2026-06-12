@@ -13,8 +13,10 @@
 #include "adb_logcat_screen.hpp"
 #include "adb_mirroring_screen.hpp"
 #include "adb_shell_screen.hpp"
+#include "agent_client.hpp"
 #include "device_icons.hpp"
 #include "device_info.hpp"
+#include "modal.hpp"
 #include "screen_manager.hpp"
 #include "resources/resources.h"
 
@@ -90,15 +92,11 @@ void ADBDeviceScreen::build() {
 }
 
 void ADBDeviceScreen::onAppear() {
-    // Low-rate, agent-free screen preview via `exec:screencap -p`. 360x860 is the
-    // bounding box each frame aspect-fits into (860 keeps sources up to ~9:21.5
-    // at the full 360 width; the lv_image resizes to hug each frame, so the
-    // device's real aspect — and rotation — shows with no stretch or letterbox).
-    // Created/torn down on appear/disappear (not enter/exit) so the capture+decode
-    // loop and its PSRAM buffers don't keep running behind a pushed sub-screen
+    visible_ = true;
+    // The preview is created/torn down on appear/disappear (not enter/exit) so its
+    // stream and PSRAM buffers don't keep running behind a pushed sub-screen
     // (Mirroring/Shell/...).
-    preview_ = ScreencapPreview::create(preview_image_, 360, 860);
-    preview_->start();
+    startPreview();
 
     // Live summary fields: fetch now, then every 10 s while the screen shows
     // (battery and signal move; returning from a sub-screen refreshes too).
@@ -111,13 +109,67 @@ void ADBDeviceScreen::onAppear() {
 }
 
 void ADBDeviceScreen::onDisappear() {
+    visible_ = false;
+    stopPreview();
+    if (summary_timer_) {
+        lv_timer_delete(summary_timer_);
+        summary_timer_ = nullptr;
+    }
+}
+
+void ADBDeviceScreen::startPreview() {
+    if (app::agent_client().mode() == app::AgentClient::Mode::Normal) {
+        // Normal mode: the mirror-stream preview over the agent link, in the same
+        // 360x860 box as the screencap fallback: fixed 360 width, height following
+        // the phone's aspect (the agent sizes the stream via scale_mode=aspect +
+        // split_count=1, so nothing needs 16px alignment). The agent link usually
+        // outlives the screens; if it dropped, re-establish it first (callback on
+        // the LVGL thread).
+        if (app::agent_client().ready()) {
+            agent_preview_ = AgentPreview::create(preview_image_, 360, 860);
+            agent_preview_->start();
+            return;
+        }
+        app::agent_client().ensure_connected(
+            [self = std::static_pointer_cast<ADBDeviceScreen>(shared_from_this())](bool ok) {
+                if (self->exited() || !self->visible_ || self->agent_preview_) return;
+                if (ok) {
+                    self->agent_preview_ = AgentPreview::create(self->preview_image_, 360, 860);
+                    self->agent_preview_->start();
+                } else if (self->visible_ && !self->preview_) {
+                    // Bring-up failed (mode flipped to Limited): degrade in place.
+                    self->preview_ = ScreencapPreview::create(self->preview_image_, 360, 860);
+                    self->preview_->start();
+                }
+            });
+        return;
+    }
+    // Limited mode: the low-rate, agent-free `exec:screencap -p` preview. 360x860
+    // is the bounding box each frame aspect-fits into (860 keeps sources up to
+    // ~9:21.5 at the full 360 width; the lv_image resizes to hug each frame, so
+    // the device's real aspect — and rotation — shows with no stretch or letterbox).
+    preview_ = ScreencapPreview::create(preview_image_, 360, 860);
+    preview_->start();
+}
+
+void ADBDeviceScreen::stopPreview() {
     if (preview_) {
         preview_->stop();
         preview_.reset();
     }
-    if (summary_timer_) {
-        lv_timer_delete(summary_timer_);
-        summary_timer_ = nullptr;
+    if (agent_preview_) {
+        agent_preview_->stop();
+        agent_preview_.reset();
+    }
+}
+
+void ADBDeviceScreen::onPreviewTapped() {
+    if (app::agent_client().mode() == app::AgentClient::Mode::Normal) {
+        screen_manager.push(std::make_shared<ADBMirroringScreen>());
+    } else {
+        app::modal_message(root_, "Mirroring unavailable",
+                           "The tab5adb-agent could not be started on this device, "
+                           "so screen mirroring is disabled.");
     }
 }
 
@@ -253,15 +305,21 @@ void ADBDeviceScreen::createPreviewContainer() {
     lv_obj_remove_style_all(preview_container_);
     lv_obj_set_size(preview_container_, width, LV_SIZE_CONTENT);
     preview_image_ = lv_image_create(preview_container_);
-    // 9:20 placeholder until the first capture lands; ScreencapPreview then
-    // resizes the image to each frame's aspect-fitted size. Top-centered so a
-    // narrower-than-360 frame (very tall source hitting the height cap, or a
-    // landscape-rotated device) stays centered in the 360-wide column.
+    // 9:20 placeholder until the first frame lands; the preview then resizes the
+    // image to each frame's aspect-fitted size. Top-centered so a narrower frame
+    // (very tall source hitting the height cap, or a landscape-rotated device)
+    // stays centered in the 360-wide column.
     lv_obj_set_size(preview_image_, width, width / 9 * 20);
     lv_obj_set_align(preview_image_, LV_ALIGN_TOP_MID);
     lv_obj_set_style_bg_color(preview_image_, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(preview_image_, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(preview_image_, 12, 0);
+    // The preview doubles as the entry to the mirroring screen (Normal mode) /
+    // the "why not" explainer (Limited mode). lv_image isn't clickable by default.
+    lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_fn(preview_image_, LV_EVENT_CLICKED, [this](lv_event_t *) {
+        onPreviewTapped();
+    });
 }
 
 void ADBDeviceScreen::createToolsContainer() {
@@ -289,9 +347,6 @@ void ADBDeviceScreen::createToolsContainer() {
         lv_label_set_text(title_label, title);
         lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
     };
-    tool_button(LUCIDE_SMARTPHONE, "Mirroring", [](lv_event_t*){
-        screen_manager.push(std::make_shared<ADBMirroringScreen>());
-    });
     tool_button(LUCIDE_SQUARE_TERMINAL, "Shell", [](lv_event_t*){
         screen_manager.push(std::make_shared<ADBShellScreen>());
     });

@@ -74,6 +74,27 @@ final class Projection {
         return new int[]{coverW, coverH, cropX, cropY};
     }
 
+    /**
+     * Aspect scale mode (protocol.md §5.3 {@code aspect}): the output frame size for
+     * a {@code natW×natH} natural-orientation source viewed in a {@code boxW×boxH}
+     * box — the aspect-fit of the source into the box, each dimension rounded to the
+     * nearest even px and clamped to the box. The bound dimension lands on the box
+     * edge exactly (a portrait phone in the 360-wide preview box streams at width
+     * 360); aspect mode pairs with split_count=1, so no 16-alignment is needed
+     * (§5.2). The agent then streams a plain <em>fit</em> into this box, which fills
+     * it edge to edge up to the ≤1px rounding slack. Android-free pure arithmetic
+     * (host-testable).
+     */
+    static int[] aspectOutput(int natW, int natH, int boxW, int boxH) {
+        double s = Math.min((double) boxW / natW, (double) boxH / natH);
+        return new int[]{evenClamped(natW * s, boxW), evenClamped(natH * s, boxH)};
+    }
+
+    private static int evenClamped(double v, int max) {
+        int r = (int) Math.round(v / 2.0) * 2;
+        return Math.max(2, Math.min(r, (max / 2) * 2));
+    }
+
     // --- inverse mapping for touch passthrough (protocol.md §4.7) -------------
     //
     // The Tab5 sends touches in PANEL coordinates; the agent owns the mirror

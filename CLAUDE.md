@@ -162,9 +162,44 @@ place a narrower picture into a wider buffer; see the JPEG decode seam).
 is no SurfaceFlinger to offload to in the headless test), so the GPU-projection
 arithmetic is covered instead by the host-JVM `android-agent/test/ProjectionTest`
 (`nix develop -c android-agent/test/run.sh`) and its visual result by simverify on
-a device. The agent has **no artificial FPS cap** (`Server.TARGET_FPS = 0` =
-encoder/capture-rate driven; a static screen yields no new `ImageReader` frame, so
-nothing is sent and the Tab5 keeps the last frame). The Tab5-side
+a device. The agent paces at `Server.TARGET_FPS = 60` (panel rate), further
+bounded by the Tab5-requested **`max_fps`** (`MIRROR_START` args +8, append-only;
+0 = uncapped — the DeviceScreen preview asks for 10); a static screen yields no
+new `ImageReader` frame, so nothing is sent and the Tab5 keeps the last frame.
+**`MIRROR_START`'s `target_w/h` is the viewer surface** (not necessarily the
+panel; 16-aligned only when split), and the appended args also carry
+**`jpeg_quality`/`split_count`** (0 = agent defaults 80/4; the preview asks for
+60/1 — `split_count=1` streams each frame as ONE whole JPEG, no strip banding,
+which drops the 16px alignment requirement). **`scale_mode=2 aspect`** makes the
+agent size the output itself: the source's natural aspect fitted into that box
+(`Projection.aspectOutput`, even-rounded — the bound dimension lands on the box
+edge exactly, so a portrait phone streams at the full 360 preview width), then
+streamed as a plain fit into the resized box — full-bleed, with the chosen size
+returned in the response's
+appended `out_width`/`out_height` (the wire basis of the agent-based device
+preview, see `AgentPreview`). The agent also serves **GET_APP_LIST /
+GET_APP_ICON** (cmd 0x20/0x21, HELLO caps bit 2 = `APPINFO`): `AppInfo.java` over
+the `PackageManager` reached via `SystemContext.java` (the scrcpy system-context
+workaround, extracted out of `Input`; both services are built once on the **main**
+thread at startup — `new ActivityThread()` needs its Looper — and HELLO drops
+APPINFO if the PackageManager is unreachable). Labels come back agent-sorted
+(case-insensitive, NBSP→space — Tab5 fonts lack the glyph); icons are drawn onto
+a Canvas at size×size (no text → no
+Typeface pitfall) and returned **raw ARGB8888** — Android Color ints written LE
+are exactly LVGL's native ARGB8888 byte order (B,G,R,A), so neither side
+converts. **Two icon gotchas (cost a debug session, verified on the real Android device):**
+(1) for **split-APK installs** the launcher icon bitmaps live in
+`split_config.<dpi>.apk` and `getApplicationIcon` under the synthetic context
+falls back to the framework default icon, which *also* fails to load — `AppInfo`
+builds its own `Resources` over base + all splits via the hidden
+**`ApkAssets.loadFromPath` + `AssetManager.setApkAssets`** (which merges
+same-package-id tables across splits; the legacy `addAssetPath` does NOT — each
+split stays a separate package and density values never resolve) and reads
+`getDrawableForDensity(icon, DENSITY_XXHIGH)`; (2) inflating those icon XMLs hits
+framework code calling `ActivityThread.currentApplication().getResources()`,
+which NPEs while `mInitialApplication` is null — `SystemContext` installs
+scrcpy's **fillAppContext** (a bare `Application` wrapping the system context).
+The Tab5-side
 `agent_link::Link` parses frames and hands each
 strip to a decode+framebuffer seam (`VideoListener::on_video_strip`). The headless
 harness `components/agent_link/test/test_mirror.cpp` drives the whole bring-up
@@ -682,9 +717,20 @@ landscape — the video itself is unchanged (natural-orientation lock). Future A
 channels add the same kind of `set_*` setter.
 `Link::start_mirror(MirrorConfig)` sends the Tab5-initiated `MIRROR_START`
 (non-blocking; call after `on_link_hello` once the video listener is registered);
+`MirrorConfig` carries the viewer-surface size (16-aligned, not necessarily the
+panel), `scale_mode` (incl. `kScaleAspect` — the agent picks the output size to
+the source aspect) and `max_fps`; the response's `MirrorInfo` carries the
+agent-chosen `out_width/out_height` (size receive buffers from these).
 `Link::stop_mirror()` sends **`MIRROR_STOP`** (§4.4) — the agent stops the JPEG
 stream and returns to READY but the **link stays open**, so a later `start_mirror()`
 resumes (this is what lets a feature stop without dropping the agent).
+**Generic one-shot control**: `Link::request(cmd, args, args_len, cb, timeout_ms)`
+sends any registry CONTROL_REQUEST (GET_APP_LIST / GET_APP_ICON / future cmds)
+with req_id correlation handled inside (ids 0x10.. cycle, clear of the fixed
+mirror ids); the completion fires exactly once on the reader thread — on the
+response (err=Ok + wire status), on link close (StreamClosed, all pending fail),
+or on a lazily-swept timeout (sweeps run on link traffic / the next request, so
+a fully idle link defers expiry until the close).
 **Input injection (§4.7):** `Link::inject_key(keycode, action)` + the convenience
 `Link::tap_key(keycode)` (down→up), and `Link::inject_touch(action, pointer_id, x, y)`,
 send a **`TYPE=INPUT`** frame (Tab5→agent, **fire-and-forget — no req_id / no
@@ -788,14 +834,28 @@ Where `agent_link::Link` is the per-stream protocol engine, `AgentClient` owns t
 directly, so `AgentClient` never grows per-feature methods (the design choice that
 keeps it from becoming a thin `Link` wrapper).
 
-- **Lazy bring-up.** `ensure_connected(cb)` runs the §2.2 sequence on a private
+- **Bring-up.** `ensure_connected(cb)` runs the §2.2 sequence on a private
   worker task — `exec` pkill stale agent → `Sync::push` the **embedded jar**
   (`app/agent/agent_jar.{h,c}`) → `open_shell` `app_process` → retry `Link::open`
   until the agent answers HELLO. It is the `SyncListener`/`ShellListener` for the
-  push + agent stdout and the `LinkLifecycleListener` for the link. Nothing happens
-  until the first `ensure_connected` (a feature's first use), not at adb connect.
+  push + agent stdout and the `LinkLifecycleListener` for the link.
   `cb` fires on the **LVGL thread** (like `adb_connect_async`): true once Ready,
   false on failure; already-Ready posts immediately; concurrent calls coalesce.
+  The bring-up is **fail-fast** (it gates the connect UX): the HELLO retry loop
+  has an overall ~8 s deadline and bails immediately when the agent's launch
+  shell closes early (`on_shell_close`, app_process died — matched against the
+  *current* shell_, since dropping a previous session's shell delivers a stale
+  terminal close that must not fail the next bring-up).
+- **Mode (the app's feature gate).** The connect flow (HomeScreen) runs
+  `ensure_connected` EAGERLY right after adb Online and only then pushes the
+  device screen, so every screen reads a settled `mode()`:
+  `Mode::Normal` (agent up → mirror, AgentPreview, app icons) vs `Mode::Limited`
+  (agent-independent features only: screencap preview, pm-list apps, no
+  mirroring). Every bring-up result refines the mode (a stop_-aborted worker
+  doesn't stamp Limited); adb disconnect resets it to Unknown. A mid-session
+  link drop keeps the mode Normal — features lazily `ensure_connected` again on
+  next use, exactly the old behavior. `agent_caps()` exposes the HELLO
+  capability bits (gate `kCapAppInfo` features on it).
 - **Persistence.** Holds the agent `Shell` (its stdout) + the `Link` alive across
   the transient screens. `state()`/`ready()`/`link()` are callable from any thread;
   `link()` returns a `shared_ptr<agent_link::Link>` (held across the call even if the
@@ -823,7 +883,11 @@ process; the device firmware never exits so nothing actually leaks.
 ### The provisional UI (HomeScreen → ADBDeviceScreen → ADBShellScreen)
 
 `app/` drives the connection from the LVGL UI: `HomeScreen` has a **Connect**
-button; tapping it calls `app::adb_connect_async()` — a small app-global holder in
+button; tapping it calls `app::adb_connect_async()`, then — on adb Online —
+chains `app::agent_client().ensure_connected()` ("Starting agent on the phone...")
+and pushes `ADBDeviceScreen` only once the agent mode settled (success and
+failure both proceed; Limited mode just hides the agent-backed features). The
+holder is a small app-global in
 `app/adb_app.cpp` that owns the single `std::shared_ptr<adb::Client>` (it must
 outlive the transient screens) and implements `adb::ClientListener`. The `Client`
 owns the connection lifecycle + reader task; the holder's only job is to marshal
@@ -977,17 +1041,26 @@ pop since pop frees the lambda's storage). Verified headless:
 `simulator/verify/sdcard.txt` (browse vs `simulator/sdcard/`).
 
 `ADBDeviceScreen`'s **Apps** button pushes **`ADBAppManagerScreen`**
-(`app/adb_app_manager_screen.*`) — the installed-app manager. Listing is **one
-exec round trip**: `pm list packages -3; echo ---SEP---; pm list packages -s;
-echo ---SEP---; pm list packages -d`, **parsed + sorted on the adb reader
-thread** into user/system/disabled sets (the LVGL thread just swaps the
-vectors in; package names only — human labels/icons aren't reachable via
-shell; an agent-side `GET_APP_LIST` over the CONTROL_REQUEST channel is the
-future enrichment path). The list is **recycled, RecyclerView-style** (a
+(`app/adb_app_manager_screen.*`) — the installed-app manager. Listing has two
+paths picked per refresh: in **Normal mode** (an APPINFO-capable agent link) one
+`Link::request(GET_APP_LIST)` returns label-sorted `AppEntry{pkg, label}` +
+system/disabled flags, **parsed on the adb reader thread** (the LVGL thread just
+swaps the vectors in); otherwise — Limited mode, a dropped link, or a refused
+request — the original **one exec round trip** fallback runs (`pm list packages
+-3/-s/-d` with `---SEP---`, package names only, same `load_gen_`). In Normal
+mode the visible rows also **lazily fetch launcher icons** (`GET_APP_ICON`, raw
+ARGB8888 at 56px straight into an `lv_image_dsc_t` over a PSRAM buffer): each
+`update_rows` pass runs `pump_icons()` — at most 4 requests in flight (a fast
+fling doesn't queue every row it passed), a per-screen `icons_` cache (std::map,
+node-stable dsc addresses; capped at 256, beyond which rows keep the package
+glyph) and an `icon_pending_` set, all LVGL-thread-only (the request completion
+copies the pixels on the reader thread, then marshals). The list is **recycled,
+RecyclerView-style** (a
 per-package LVGL build was visibly slow on device even for the User set): a
 fixed pool of row widgets (`ensure_pool`, viewport/81px + 3, created once) is
 **rebound** to the visible index window on `LV_EVENT_SCROLL`
-(`update_rows`/`bind_row` — set y/labels/disabled-tag, no object churn), an
+(`update_rows`/`bind_row` — set y/labels/icon-vs-glyph/disabled-tag, no object
+churn), an
 invisible `extent_` child spans `count*81` to define the scroll range, the
 row's click handler reads its bound `data_idx` at tap time, and the separator
 is the row's own bottom border. While a listing is in flight the list shows a
@@ -996,7 +1069,7 @@ re-list (clamped if the list shrank) and resets on filter switch. A **User /
 System** filter toggle picks the rendered set (User default; disabled packages
 grey with a "disabled" tag); rows push **`ADBAppDetailScreen`**. `onAppear()`
 re-lists (so returning from detail/install refreshes); a `load_gen_` counter
-drops stale exec completions.
+drops stale completions on both paths.
 **`ADBAppDetailScreen`** (`app/adb_app_detail_screen.*`) shows
 version/installed/updated/path/status parsed out of one `dumpsys package
 <pkg>` (`<key>=` to end-of-line; install times contain spaces) and the
@@ -1066,7 +1139,38 @@ style). Verified E2E headless against a real Android device
 on-screen-keyboard taps, pause/resume backfill, scrollback + jump, modal, and a
 real save into `simulator/sdcard/`; delete the `logcat_*.txt` it leaves there).
 
-`ADBDeviceScreen`'s **Mirroring** button pushes **`ADBMirroringScreen`**
+`ADBDeviceScreen`'s **screen preview** (the tappable image column next to the
+tools) is mode-switched in `startPreview()`: **Normal mode** uses
+**`AgentPreview`** (`app/agent_preview.*`) — a small live mirror over the agent
+link: `start_mirror(360×860 box, scale=kScaleAspect, max_fps=10, jpeg_quality=60,
+split_count=1)`, so the **agent** sizes the stream to the source's natural
+aspect (fixed 360 width, height follows the phone — the ScreencapPreview
+behavior) and sends each frame as ONE whole JPEG (`split_count=1` — no strip
+banding for a small frame, which is what frees the size from 16px alignment);
+the `MirrorInfo.out_*` dims size the frames. It
+is the mirror screen's receive/decode split scaled down to LVGL: reader thread
+copies the frame JPEG into slots (3, latest-frame-wins), a low-prio Core-1
+decode task runs a `jpeg_decode_enhanced` whole-frame decode into a
+double-buffered RGB565 `lv_image`, one `lv_async_call` flips per frame
+(`present_pending_` keeps the decoder off a buffer whose flip is still queued).
+Two decoder rules baked in (the P4 HW constraints, §5.2): the buffers are
+**64-byte aligned** (`heap_caps_aligned_alloc` — heap_caps_calloc tripped the
+device's cache-line check) and sized for the **MCU-padded** box, and the
+decoded raster is read at the padded stride (`jpeg_enh_frame_info_t.pic_w`,
+368 on device vs 360 on the host's libjpeg shim) via the lv_image dsc stride
+while showing the real 360×h frame.
+Natural-orientation lock means a rotated phone keeps its portrait frame here
+(screencap followed the logical rotation — accepted difference). **Limited
+mode** keeps the old **`ScreencapPreview`** (`exec:screencap -p`, 360×860 box);
+a Normal-mode `ensure_connected` failure degrades to it in place. `stop()`
+sends MIRROR_STOP but keeps the link; previews are created/stopped on
+appear/disappear, so pushing the mirroring screen stops the preview stream
+first (and the agent tolerates the reconfigure either way). **Tapping the
+preview** is the mirroring entry: Normal → push `ADBMirroringScreen`; Limited →
+a `modal_message` explaining the agent couldn't be started (the old Mirroring
+tool button is gone).
+
+Tapping the preview (Normal mode) pushes **`ADBMirroringScreen`**
 (`app/adb_mirroring_screen.*`) — the live screen-mirror viewer over `agent_link`.
 The screen **is** the `agent_link::VideoListener`; the agent lifecycle (jar push +
 `app_process` launch + HELLO) is **not** the screen's job — it belongs to the

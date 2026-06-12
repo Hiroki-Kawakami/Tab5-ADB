@@ -59,6 +59,21 @@ public final class ProjectionTest {
         eq("fillCover exact", "720,1280,0,0",
                 arr(Projection.fillCover(1080, 1920, 720, 1280)));
 
+        // --- aspect scale mode output sizing (§5.3 aspect) ---
+
+        // 1080x2340 into the 360x860 preview box: width-bound,
+        // s = 1/3 exactly → 360x780. The fixed preview width lands on the box edge.
+        eq("aspectOutput tall", "360,780", arr(Projection.aspectOutput(1080, 2340, 360, 860)));
+        // 16:9 1080x1920: s = 1/3 → 360x640.
+        eq("aspectOutput 16:9", "360,640", arr(Projection.aspectOutput(1080, 1920, 360, 860)));
+        // Very tall 1080x2700: height-bound, s = .31852 → 344x860 (width rounds even,
+        // height hits the box).
+        eq("aspectOutput heightbound", "344,860", arr(Projection.aspectOutput(1080, 2700, 360, 860)));
+        // Landscape-natural source (tablet): width-bound, short output (225 -> even 226).
+        eq("aspectOutput landscape", "360,226", arr(Projection.aspectOutput(2560, 1600, 360, 860)));
+        // A box-aspect source fills the box exactly (identity at scale 1).
+        eq("aspectOutput exact", "360,860", arr(Projection.aspectOutput(360, 860, 360, 860)));
+
         // --- touch passthrough inverse mapping (§4.7) ---
 
         // naturalSize un-rotates the current-rotation source size to portrait.

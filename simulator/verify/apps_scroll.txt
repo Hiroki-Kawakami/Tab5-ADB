@@ -5,9 +5,9 @@
 # frames to be sampled as a drag.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
-tap 551 450
+tap 551 354
 wait 3000
 settle
 capture simulator/verify/out/apps_user2.jpg

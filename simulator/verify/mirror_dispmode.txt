@@ -5,10 +5,10 @@
 # the live mirror in place (Adapt also runs `wm size` on the source).
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
 # Open the Mirroring tool (top-right tool button).
-tap 552 162
+tap 204 400          # tap the preview image -> Mirroring screen
 # Agent bring-up (pkill + push + app_process + link + MIRROR_START) + first frames.
 wait 9000
 capture simulator/verify/out/dispmode_fit.jpg

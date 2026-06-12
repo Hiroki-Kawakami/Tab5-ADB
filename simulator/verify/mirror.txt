@@ -1,10 +1,10 @@
 # End-to-end mirror: connect -> open Mirroring -> launch agent -> show the stream.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
 # Device screen is up; open the Mirroring tool (top-right tool button).
-tap 552 162
+tap 204 400          # tap the preview image -> Mirroring screen
 # Launching the agent (pkill + push jar + app_process + link + MIRROR_START) and
 # the first frames take several seconds; capture progressively.
 wait 8000

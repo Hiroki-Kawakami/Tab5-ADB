@@ -3,7 +3,7 @@
 # everything). Scroll down for the misc list. Needs a real phone on the PC.
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
 tap 360 90
 wait 3000

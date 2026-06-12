@@ -30,8 +30,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -59,27 +61,37 @@ struct AgentInfo {
 
 // Tab5's HELLO response params (protocol.md §4.4 response result). Defaults: the
 // simulator/libusb max_payload (device advertises 16 KiB, so the app overrides
-// this) and a video-capable sink. Link-only — no mirror params here.
+// this) and the features Tab5 can accept. Link-only — no mirror params here.
 struct HelloConfig {
     uint32_t max_payload = 256 * 1024;
-    uint16_t capabilities = kCapVideo;  // features Tab5 can accept (§4.6)
+    uint16_t capabilities = kCapVideo | kCapAppInfo;  // §4.6
 };
 
 // Mirror parameters Tab5 hands the agent in MIRROR_START (protocol.md §4.4 args).
-// Defaults match the Tab5 panel + fit mode, video only.
+// Defaults match the Tab5 panel + fit mode, video only. target_* is the viewer
+// surface (not necessarily the panel — e.g. the DeviceScreen preview box); it
+// must be 16-aligned when split_count > 1 (§5.2 strip alignment), even is
+// enough for a single-strip stream.
 struct MirrorConfig {
     uint16_t target_width = 720;
     uint16_t target_height = 1280;
     uint8_t scale_mode = kScaleFit;
-    uint8_t streams = kCapVideo;  // which streams to start (§4.6 bit assignment)
+    uint8_t streams = kCapVideo;   // which streams to start (§4.6 bit assignment)
+    uint8_t max_fps = 0;           // frame-rate cap; 0 = the agent's own cap only
+    uint8_t jpeg_quality = 0;      // 1..100; 0 = the agent's default (80)
+    uint8_t split_count = 0;       // strips per frame; 0 = the agent's default (4),
+                                   // 1 = whole frame as one JPEG (the preview)
 };
 
 // The agent's MIRROR_START response (protocol.md §4.4 result): the source it is
-// actually streaming.
+// actually streaming and the output frame size it chose (== target for fit/fill;
+// the aspect-derived size for kScaleAspect — size receive buffers from this).
 struct MirrorInfo {
     uint16_t source_width = 0;   // physical source width [px] (informational)
     uint16_t source_height = 0;  // physical source height [px] (informational)
     uint8_t video_codec = 0;     // 0x01 = JPEG(YUV420)
+    uint16_t out_width = 0;      // streamed frame width [px]
+    uint16_t out_height = 0;     // streamed frame height [px]
 };
 
 // The source device's logical orientation (§4.4 ORIENTATION event). The Tab5
@@ -192,6 +204,27 @@ public:
     // strips still in flight. Returns StreamClosed if the link is down, Ok otherwise.
     adb::Error stop_mirror();
 
+    // One-shot control request completion (the `adb` one-shot archetype). Fires
+    // exactly once on the reader thread. err == Ok means a response arrived:
+    // `status` is the wire status (§4.5) and result/len its result bytes (valid
+    // only for the duration of the call — copy what you keep). err != Ok is a
+    // transport-level failure: StreamClosed (the link dropped, also fired for
+    // every pending request on close) or Timeout. Marshalling to LVGL is the
+    // caller's job, as with every agent_link callback.
+    using RequestCallback = std::function<void(adb::Error err, uint8_t status,
+                                               const uint8_t* result, size_t len)>;
+
+    // Send a generic CONTROL_REQUEST (§4.1) — the typed siblings of
+    // start_mirror() for the registry's one-shot commands (GET_APP_LIST,
+    // GET_APP_ICON, ...). req_id correlation is handled here; concurrent
+    // requests are fine. Non-blocking, callable from any thread. Timeouts are
+    // swept lazily (on link traffic / the next request), so an expired callback
+    // can fire later than deadline + idle time; the link close fails everything
+    // promptly. Returns StreamClosed/QueueFull like the other senders — on a
+    // non-Ok return `cb` is NOT kept (it never fires).
+    adb::Error request(uint8_t cmd, const uint8_t* args, size_t args_len,
+                       RequestCallback cb, uint32_t timeout_ms = 3000);
+
     // Inject one key event on the source device (TYPE=INPUT, §4.7). The agent
     // forwards `keycode` (an Android KeyEvent.KEYCODE_* value, e.g. kKeyBack) to
     // the hidden InputManager.injectInputEvent. Fire-and-forget: non-blocking, no
@@ -236,6 +269,17 @@ private:
     void fail(adb::Error err);          // protocol error: close + notify
     void fire_close_once(adb::Error err);
 
+    // Generic request bookkeeping: take the pending entry for req_id (empty cmd
+    // if none), expire stale entries, fail everything on close. Callbacks always
+    // run outside req_mtx_.
+    struct PendingRequest {
+        uint8_t cmd = 0;
+        RequestCallback cb;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    void sweep_expired_requests();  // reader thread / request() callers
+    void fail_all_requests(adb::Error err);
+
     std::shared_ptr<adb::Client> client_;  // kept alive for the link's lifetime
     std::shared_ptr<adb::Stream> stream_;
     std::weak_ptr<LinkLifecycleListener> listener_;  // owner: HELLO + close
@@ -253,6 +297,12 @@ private:
     std::atomic<uint8_t> tx_seq_{0};
     bool hello_done_ = false;
     std::atomic<bool> close_notified_{false};  // on_link_close fires once
+
+    // In-flight generic requests, keyed by req_id (guarded by req_mtx_; ids
+    // 0x10.. cycle, clear of the fixed mirror ids 0x02/0x03).
+    std::mutex req_mtx_;
+    std::vector<std::pair<uint8_t, PendingRequest>> pending_;
+    uint8_t next_req_id_ = 0x10;
 };
 
 }  // namespace agent_link

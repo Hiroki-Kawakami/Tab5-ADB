@@ -4,6 +4,7 @@
 
 #include "adb_app.hpp"
 #include "adb_device_screen.hpp"
+#include "agent_client.hpp"
 #include "screen_manager.hpp"
 
 void HomeScreen::build() {
@@ -37,12 +38,20 @@ void HomeScreen::start_connect() {
     lv_obj_add_state(connect_btn_, LV_STATE_DISABLED);
     lv_label_set_text(status_label_, "Connecting... allow USB debugging on the phone");
 
+    // Two stages, both completing on the LVGL thread: the adb link, then the eager
+    // tab5adb-agent bring-up that decides Normal vs Limited mode (AgentClient
+    // records the mode). The device screen is pushed once the mode is known —
+    // success or failure both proceed; Limited just hides the agent-backed
+    // features — so every screen can read a settled mode at build time.
     app::adb_connect_async([this](bool ok) {
-        if (ok) {
-            screen_manager.push(std::make_shared<ADBDeviceScreen>());
-        } else {
+        if (!ok) {
             lv_obj_remove_state(connect_btn_, LV_STATE_DISABLED);
             lv_label_set_text(status_label_, "Connection failed. Tap Connect to retry.");
+            return;
         }
+        lv_label_set_text(status_label_, "Starting agent on the phone...");
+        app::agent_client().ensure_connected([this](bool /*agent_ok*/) {
+            screen_manager.push(std::make_shared<ADBDeviceScreen>());
+        });
     });
 }

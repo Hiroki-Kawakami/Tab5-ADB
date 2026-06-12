@@ -3,10 +3,10 @@
 # uncapped-fps measurement.)
 settle
 tap 360 640
-wait 6000
+wait 9000
 settle
 # Open the Mirroring tool (top-right tool button).
-tap 552 162
+tap 204 400          # tap the preview image -> Mirroring screen
 # Let the agent launch (~8s) then stream long enough for a clean steady read.
 wait 30000
 capture simulator/verify/out/mirror_fps.jpg
