@@ -9,6 +9,7 @@
 #include "lvgl.hpp"
 #include "screen_manager.hpp"
 #include "home_screen.hpp"
+#include "settings.hpp"
 
 namespace app {
 namespace {
@@ -73,11 +74,14 @@ void adb_app() {
     // mirror rotates all three as a triple buffer so its decode task never has to
     // wait on the panel scan-out/vsync sync before reusing a buffer.
     config.display.fb_num = 3;
-    // Panel pixel format is fixed for the boot (changing it needs a restart). RGB888
-    // avoids the 565 banding on the mirror's gradients; the DisplayManager, the
-    // overlay compositor and the mirror decode all honour bsp_display_get_pixel_format(),
-    // so switching back to BSP_PIXEL_FORMAT_RGB565 here is the only change required.
-    config.display.pixel_format = BSP_PIXEL_FORMAT_RGB888;
+    // Panel pixel format is fixed for the boot (changing it needs a restart). The
+    // Settings screen persists the user's choice (default RGB888 — avoids the 565
+    // banding on the mirror's gradients); the DisplayManager, the overlay compositor
+    // and the mirror decode all honour bsp_display_get_pixel_format().
+    config.display.pixel_format =
+        (app::display_color_depth() == app::ColorDepth::Color16)
+            ? BSP_PIXEL_FORMAT_RGB565
+            : BSP_PIXEL_FORMAT_RGB888;
     config.usb.usb5v_en = true;
     // Enable the touch controller INT so the DisplayManager touch task can block on
     // it (interrupt-driven wake) and idle when untouched instead of polling forever.
@@ -91,5 +95,5 @@ void adb_app() {
     lv_async_call([](){
         screen_manager.push(std::make_shared<HomeScreen>());
     });
-    bsp_display_set_brightness(80);
+    bsp_display_set_brightness(app::display_brightness());
 }

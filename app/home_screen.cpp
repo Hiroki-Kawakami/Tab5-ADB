@@ -10,6 +10,7 @@
 #include "resources/resources.h"
 #include "screen_manager.hpp"
 #include "sd_file_browser_screen.hpp"
+#include "settings_screen.hpp"
 
 namespace {
 
@@ -199,7 +200,9 @@ void HomeScreen::build_body() {
         // The Tab5 SD card is browsable without an adb connection.
         screen_manager.push(std::make_shared<SDFileBrowserScreen>());
     });
-    nav_card(LUCIDE_SETTINGS, "Settings", [](lv_event_t *) {});  // SettingsScreen lands later
+    nav_card(LUCIDE_SETTINGS, "Settings", [](lv_event_t *) {
+        screen_manager.push(std::make_shared<SettingsScreen>());
+    });
 }
 
 void HomeScreen::start_connect() {

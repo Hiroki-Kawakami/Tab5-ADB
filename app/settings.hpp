@@ -21,4 +21,20 @@ AudioOutputMode audio_output_mode();
 // Persist the audio output mode (the settings screen / future UI).
 void set_audio_output_mode(AudioOutputMode mode);
 
+// Display backlight brightness, 0..100. Default 80. Applied live via
+// bsp_display_set_brightness() and re-applied at boot from this stored value.
+int  display_brightness();
+void set_display_brightness(int level);
+
+// Panel color depth. The framebuffer pixel format is fixed for the boot (the BSP
+// allocates it at bsp_init), so changing this needs a restart to take effect; the
+// stored value is read in adb_app() to pick the boot pixel format. Default Color24
+// (the zero / unset key, matching the boot default RGB888).
+enum class ColorDepth : uint8_t {
+    Color24 = 0,  // RGB888 (24-bit) — default
+    Color16 = 1,  // RGB565 (16-bit)
+};
+ColorDepth display_color_depth();
+void set_display_color_depth(ColorDepth depth);
+
 }  // namespace app
