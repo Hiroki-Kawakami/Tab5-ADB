@@ -101,10 +101,24 @@ static void test_gain_fade_chunk_invariance(void) {
 
 static void test_gain_clamp(void) {
     audio_dsp_t dsp = make_dsp(48000, 1);
-    audio_dsp_set_gain(dsp, 2.5f, 0);
-    CHECK(fabsf(audio_dsp_get_gain(dsp) - 1.0f) < 1e-6f, "gain clamps to 1.0");
+    audio_dsp_set_gain(dsp, 2.0f, 0);  /* >1.0 amplifies (boost) */
+    CHECK(fabsf(audio_dsp_get_gain(dsp) - 2.0f) < 1e-6f, "gain >1.0 is accepted");
+    audio_dsp_set_gain(dsp, 100.0f, 0);
+    CHECK(fabsf(audio_dsp_get_gain(dsp) - 4.0f) < 1e-6f, "gain clamps to +12 dB ceiling");
     audio_dsp_set_gain(dsp, -1.0f, 0);
     CHECK(audio_dsp_get_gain(dsp) == 0.0f, "gain clamps to 0.0");
+    audio_dsp_deinit(dsp);
+}
+
+static void test_gain_boost(void) {
+    /* gain > 1.0 amplifies; the output saturates to int16 instead of wrapping. */
+    audio_dsp_t dsp = make_dsp(48000, 1);
+    audio_dsp_set_gain(dsp, 2.0f, 0);  /* +6 dB, no fade */
+    int16_t buf[4] = {1000, -1000, 30000, -30000};
+    CHECK(audio_dsp_process(dsp, buf, sizeof(buf)) == ESP_OK, "process");
+    CHECK(buf[0] == 2000 && buf[1] == -2000, "in-range samples doubled");
+    CHECK(buf[2] == 32767, "over-range positive saturates (not wrap)");
+    CHECK(buf[3] == -32768, "over-range negative saturates (not wrap)");
     audio_dsp_deinit(dsp);
 }
 
@@ -222,6 +236,7 @@ int main(void) {
     test_gain_fade_ramp();
     test_gain_fade_chunk_invariance();
     test_gain_clamp();
+    test_gain_boost();
     test_mono_mix();
     test_eq_lowpass_response();
     test_clipping();

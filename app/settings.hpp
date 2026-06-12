@@ -37,4 +37,24 @@ enum class ColorDepth : uint8_t {
 ColorDepth display_color_depth();
 void set_display_color_depth(ColorDepth depth);
 
+// Tab5-side master playback volume, 0..150. 100 = unity (0 dB): below attenuates,
+// 100..150 is a digital boost up to +6 dB (the BSP SW-gain path amplifies above
+// unity). Default 100. Consumed by the mirror audio path; applied live via
+// bsp_audio_set_volume.
+int  master_volume();
+void set_master_volume(int volume);
+
+// Speaker route policy. Default Auto (speaker on only while no headphone is
+// plugged). The BSP's "always on" mode is intentionally not exposed in the UI.
+enum class SpeakerMode : uint8_t {
+    Auto = 0,  // default — maps to BSP_AUDIO_SPEAKER_MODE_AUTO
+    Off  = 1,  // maps to BSP_AUDIO_SPEAKER_MODE_OFF
+};
+SpeakerMode speaker_mode();
+void set_speaker_mode(SpeakerMode mode);
+
+// The audio_dsp fixed-chain equalizer, on/off. Default on.
+bool equalizer_enabled();
+void set_equalizer_enabled(bool enabled);
+
 }  // namespace app

@@ -86,10 +86,18 @@ void adb_app() {
     // Enable the touch controller INT so the DisplayManager touch task can block on
     // it (interrupt-driven wake) and idle when untouched instead of polling forever.
     config.touch.interrupt = true;
-    // Route audio to the speaker only while no headphone is plugged in: plugging in
-    // headphones (e.g. for the mirror audio) silences the speaker automatically.
-    config.audio.speaker_mode = BSP_AUDIO_SPEAKER_MODE_AUTO;
+    // Speaker route policy from the persisted setting (default Auto: speaker on
+    // only while no headphone is plugged, so plugging in headphones for the mirror
+    // audio silences the speaker automatically).
+    config.audio.speaker_mode = (app::speaker_mode() == app::SpeakerMode::Off)
+                                    ? BSP_AUDIO_SPEAKER_MODE_OFF
+                                    : BSP_AUDIO_SPEAKER_MODE_AUTO;
     ESP_ERROR_CHECK(bsp_init(&config));
+
+    // Apply the persisted audio settings (the volume is the gain the next stream
+    // fades in to; the EQ override sticks across HP-route re-voicing).
+    bsp_audio_set_volume(app::master_volume());
+    bsp_audio_set_eq_enabled(app::equalizer_enabled());
 
     display_manager.init();
     lv_async_call([](){

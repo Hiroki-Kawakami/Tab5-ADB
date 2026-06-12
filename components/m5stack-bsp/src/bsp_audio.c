@@ -26,6 +26,8 @@ static const char *TAG = "BSP_AUDIO";
 #define BSP_VOLUME_FADE_MS  100
 #define BSP_OPEN_FADE_MS    50
 #define BSP_VOLUME_DB_SPAN  40.0f   /* vol=1 → -40 dB, vol=100 → 0 dB */
+#define BSP_VOLUME_MAX      150     /* max accepted volume; 100..MAX amplifies */
+#define BSP_VOLUME_BOOST_DB 6.0f    /* vol=BSP_VOLUME_MAX → +6 dB (≈2x amplitude) */
 #define BSP_AMP_SETTLE_MS   50      /* DAC analog settle before touching the amp */
 #define BSP_MUTE_SETTLE_MS  20      /* hw-mute settle before stopping clocks */
 #define BSP_NOMINAL_RATE    48000   /* DSP placeholder rate until the first open */
@@ -41,6 +43,10 @@ static uint32_t s_rate = BSP_NOMINAL_RATE;   /* current stream rate (profile des
  * open and the DSP applies the user value as a software gain (with fade). */
 static int  s_volume = -1;       /* -1 = never set → silent */
 static bool s_mute;
+/* App override for the EQ enable. -1 = follow the board profile's eq_enabled
+ * (DSP_MODE_AUTO default); 0/1 = the app forced it, which survives route
+ * re-voicing (see apply_dsp_profile). */
+static int  s_eq_override = -1;
 
 static volatile bsp_audio_speaker_mode_t s_speaker_mode = BSP_AUDIO_SPEAKER_MODE_ON;
 static TaskHandle_t s_route_task;
@@ -85,7 +91,10 @@ static void apply_dsp_profile(bool hp) {
     if (s_audio->get_dsp_profile(s_audio, hp, s_rate, &profile) != ESP_OK) return;
     if (profile.num_stages > BSP_AUDIO_DSP_PROFILE_MAX_STAGES) return;
     audio_dsp_set_biquads(s_dsp, profile.biquads, profile.num_stages);
-    audio_dsp_set_eq_enabled(s_dsp, profile.eq_enabled);
+    /* App override wins over the board profile so an HP insert/remove re-voicing
+     * doesn't clobber the user's EQ on/off choice. */
+    audio_dsp_set_eq_enabled(s_dsp, s_eq_override >= 0 ? (bool)s_eq_override
+                                                       : profile.eq_enabled);
     audio_dsp_set_mono_mix(s_dsp, profile.mono_mix);
 }
 
@@ -140,11 +149,17 @@ static bool route_task_needed(void) {
 }
 
 static float volume_to_gain(int volume) {
-    /* Linear-in-dB curve: vol=100 → 0 dB (gain 1.0), vol=1 → -40 dB.
-     * vol<=0 is a hard zero so muting via volume=0 is true silence. */
+    /* Linear-in-dB curve. vol<=0 is a hard zero so muting via volume=0 is true
+     * silence. 1..100 attenuates (vol=1 → -40 dB, vol=100 → 0 dB / gain 1.0);
+     * 100..MAX is a gentler boost above unity (vol=MAX → +BOOST dB, a digital
+     * gain > 1 — useful when the source is quiet, capped to avoid clipping). */
     if (volume <= 0) return 0.0f;
-    if (volume > 100) volume = 100;
-    float db = (volume - 100) * (BSP_VOLUME_DB_SPAN / 100.0f);
+    if (volume > BSP_VOLUME_MAX) volume = BSP_VOLUME_MAX;
+    float db;
+    if (volume <= 100)
+        db = (volume - 100) * (BSP_VOLUME_DB_SPAN / 100.0f);
+    else
+        db = (volume - 100) * (BSP_VOLUME_BOOST_DB / (BSP_VOLUME_MAX - 100));
     return powf(10.0f, db / 20.0f);
 }
 
@@ -165,6 +180,7 @@ void bsp_audio_set_active(bsp_audio_t *audio, const bsp_audio_init_t *init) {
     s_rate = BSP_NOMINAL_RATE;
     s_volume = -1;
     s_mute = false;
+    s_eq_override = -1;  /* follow the board profile until the app forces it */
     if (!audio) return;
 
     static const bsp_audio_init_t defaults = {0};
@@ -234,8 +250,10 @@ static void stream_started(uint32_t rate, uint8_t bits, uint8_t ch) {
         }
     }
     if ((!s_dsp || s_dsp_bypass) && s_audio->set_hw_volume) {
-        /* No DSP on this stream → user volume lives on the codec. */
-        s_audio->set_hw_volume(s_audio, s_volume < 0 ? 0 : s_volume);
+        /* No DSP on this stream → user volume lives on the codec (0..100, no
+         * amplification — the >100 boost only exists on the SW gain path). */
+        int hw = s_volume < 0 ? 0 : (s_volume > 100 ? 100 : s_volume);
+        s_audio->set_hw_volume(s_audio, hw);
         if (s_mute && s_audio->set_hw_mute) s_audio->set_hw_mute(s_audio, true);
     }
     if (!s_mute && s_audio->set_hw_mute) s_audio->set_hw_mute(s_audio, false);
@@ -299,8 +317,8 @@ esp_err_t bsp_audio_write(void *data, size_t len) {
 
 esp_err_t bsp_audio_set_volume(int volume) {
     if (!pcm_available()) return ESP_ERR_NOT_SUPPORTED;
-    if (volume < 0)   volume = 0;
-    if (volume > 100) volume = 100;
+    if (volume < 0)               volume = 0;
+    if (volume > BSP_VOLUME_MAX)  volume = BSP_VOLUME_MAX;
     if (volume == s_volume) return ESP_OK;  /* drop slider duplicates */
     s_volume = volume;
     if (s_dsp && !s_dsp_bypass) {
@@ -308,8 +326,10 @@ esp_err_t bsp_audio_set_volume(int volume) {
         return audio_dsp_set_gain(s_dsp, volume_to_gain(volume), BSP_VOLUME_FADE_MS);
     }
     if (!s_open) return ESP_OK;  /* applied by stream_started */
-    /* No DSP on this stream → fall back to direct hardware volume (clicky). */
-    return s_audio->set_hw_volume ? s_audio->set_hw_volume(s_audio, volume)
+    /* No DSP on this stream → fall back to direct hardware volume (clicky). The
+     * codec volume is 0..100 and cannot amplify, so the >100 boost is dropped. */
+    int hw = volume > 100 ? 100 : volume;
+    return s_audio->set_hw_volume ? s_audio->set_hw_volume(s_audio, hw)
                                   : ESP_ERR_NOT_SUPPORTED;
 }
 
@@ -335,6 +355,19 @@ bool bsp_audio_get_mute(void) {
 
 audio_dsp_t bsp_audio_dsp(void) {
     return s_dsp;
+}
+
+esp_err_t bsp_audio_set_eq_enabled(bool enabled) {
+    if (!s_dsp) return ESP_ERR_NOT_SUPPORTED;  /* no DSP (DISABLE mode / no PCM) */
+    /* Record the override so route re-voicing (apply_dsp_profile) keeps it, then
+     * apply it now. In MANUAL mode there is no re-voicing, but the override still
+     * gives a single, consistent entry point alongside bsp_audio_dsp(). */
+    s_eq_override = enabled ? 1 : 0;
+    return audio_dsp_set_eq_enabled(s_dsp, enabled);
+}
+
+bool bsp_audio_get_eq_enabled(void) {
+    return s_dsp ? audio_dsp_is_eq_enabled(s_dsp) : false;
 }
 
 esp_err_t bsp_audio_set_speaker_mode(bsp_audio_speaker_mode_t mode) {

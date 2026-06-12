@@ -10,6 +10,7 @@
 #include "agent_client.hpp"  // app::agent_client
 #include "bsp.h"             // bsp_audio_*
 #include "esp_heap_caps.h"
+#include "settings.hpp"      // app::master_volume
 
 namespace {
 // ~340 ms jitter buffer at 48 kHz / stereo / 16-bit (192 KB/s). Drop-oldest past
@@ -18,13 +19,6 @@ constexpr size_t kRingCap = 64 * 1024;
 // Drain granularity handed to bsp_audio_write (it blocks on the I2S DMA). 2 KB =
 // 512 stereo frames ≈ 10.6 ms; small enough to keep on the stack.
 constexpr size_t kChunk = 2048;
-// Tab5 playback volume for the mirror (0..100). The BSP curve is linear-in-dB over
-// a -40 dB span (vol=100 -> 0 dB unity, the loudest without digital gain > 1), so
-// default to 100: the mirror should play the captured stream at full level. A
-// settings/overlay control can lower it later. Beyond unity the loudness is bounded
-// by the source level (the phone's media volume scales the REMOTE_SUBMIX capture —
-// the overlay Vol+/- keys raise it) and the speaker hardware.
-constexpr int kVolume = 100;
 }  // namespace
 
 std::shared_ptr<AgentAudio> AgentAudio::create() {
@@ -123,7 +117,9 @@ void AgentAudio::audio_loop() {
         // Stereo PCM; the BSP DSP downmixes to the (mono-wired) speaker and keeps
         // stereo on the headphone, so we just hand it the source format.
         if (bsp_audio_open(rate_.load(), 16, channels_.load()) == ESP_OK) {
-            bsp_audio_set_volume(kVolume);
+            // The Tab5-side master volume (Settings → Audio); 100 = unity, up to
+            // 150 = +6 dB digital boost on the BSP SW-gain path.
+            bsp_audio_set_volume(app::master_volume());
             opened = true;
         }
         // No PCM path (caps lack CAP_PCM) -> drain the ring silently.

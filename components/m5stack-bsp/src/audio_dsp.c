@@ -15,6 +15,9 @@
 #endif
 
 #define DSP_DEFAULT_MAX_STAGES 5
+/* Gain ceiling. >1.0 amplifies (the output is saturated to int16 in process);
+ * +12 dB is a sane safety bound well above the BSP volume curve's +6 dB boost. */
+#define DSP_MAX_GAIN           4.0f
 /* process() snapshots the coefficients onto the stack up to this many stages
  * (beyond it, the in-place pointer path is used — see audio_dsp_process). */
 #define DSP_SNAPSHOT_STAGES    8
@@ -275,8 +278,8 @@ esp_err_t audio_dsp_process(audio_dsp_t dsp, void *data, size_t bytes) {
 
 esp_err_t audio_dsp_set_gain(audio_dsp_t dsp, float target_gain, uint32_t fade_ms) {
     if (!dsp) return ESP_ERR_INVALID_ARG;
-    if (target_gain < 0.0f) target_gain = 0.0f;
-    if (target_gain > 1.0f) target_gain = 1.0f;
+    if (target_gain < 0.0f)          target_gain = 0.0f;
+    if (target_gain > DSP_MAX_GAIN)  target_gain = DSP_MAX_GAIN;
 
     xSemaphoreTake(dsp->mutex, portMAX_DELAY);
     dsp->target_gain = target_gain;

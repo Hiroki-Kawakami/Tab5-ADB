@@ -1,17 +1,19 @@
-# Settings screen: Home -> Settings nav card -> Display block (brightness slider +
-# 16/24-bit color toggle). Lower the brightness via the slider, then switch the
-# color depth (which pops the restart-required modal). The script never confirms
-# Restart — that would exit(0) the simulator.
+# Settings screen: Home -> Settings nav card -> Display + Audio blocks.
+# Exercises the brightness slider (incl. 0/100% knob clipping), the color-mode
+# toggle (restart modal), and the audio block: master volume slider, Speaker
+# Output (Off|Auto) and Equalizer (Off|On) toggles, and the Sound Playback
+# dropdown. The script never confirms Restart — that would exit(0) the simulator.
 settle
 capture simulator/verify/out/settings_home.jpg
 tap 589 1170
 settle
 capture simulator/verify/out/settings_open.jpg
-# Drag the brightness slider down to ~25% (slider spans the card width at y~418).
+
+# --- Brightness slider (Display) ---
 tap 200 418
 settle
 capture simulator/verify/out/settings_brightness.jpg
-# Extremes: grab the knob and drag past each end (the slider clamps to 0%/100%)
+# Extremes: grab the knob and drag past each end (the slider clamps to 1%/100%)
 # so the knob must not clip. Waits let the drag samples register.
 down 200 418
 wait 60
@@ -27,8 +29,30 @@ wait 60
 up
 settle
 capture simulator/verify/out/settings_max.jpg
-# Switch color depth to 16-bit -> half turns blue + the restart-required modal pops.
-tap 511 484
+
+# --- Audio block ---
+# Lower the master volume via a drag.
+down 457 737
+wait 60
+move 200 737
+wait 60
+up
+settle
+# Speaker Output -> Off (left pill), Equalizer -> Off (left pill).
+tap 536 818
+settle
+tap 553 905
+settle
+capture simulator/verify/out/settings_audio.jpg
+# Sound Playback dropdown -> open, pick "Android Device".
+tap 534 989
+settle
+tap 495 1084
+settle
+capture simulator/verify/out/settings_playback.jpg
+
+# --- Color mode toggle (16-bit; default is 24-bit) -> restart-required modal ---
+tap 511 502
 settle
 capture simulator/verify/out/settings_color.jpg
 quit

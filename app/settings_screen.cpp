@@ -1,5 +1,10 @@
 #include "settings_screen.hpp"
 
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <vector>
+
 #include "adb_app.hpp"
 #include "bsp.h"
 #include "modal.hpp"
@@ -127,6 +132,62 @@ void SettingsScreen::build() {
         return r;
     };
 
+    // A segmented pill toggle: N options, the active one painted blue. Tapping a
+    // different option repaints and fires on_select(index). Default is inline
+    // (content width — sits on a setting_row's right). Pass fill=true to span the
+    // parent width with equal-width options (for long labels on their own line).
+    auto segmented = [](lv_obj_t *parent, std::initializer_list<const char *> labels,
+                        int active, std::function<void(int)> on_select,
+                        bool fill = false) {
+        auto seg = lv_obj_create(parent);
+        lv_obj_remove_style_all(seg);
+        lv_obj_set_size(seg, fill ? LV_PCT(100) : LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_remove_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_all(seg, 4, 0);
+        lv_obj_set_style_pad_column(seg, 4, 0);
+        lv_obj_set_style_radius(seg, 12, 0);
+        lv_obj_set_style_bg_color(seg, lv_color_hex(0xe0e0e0), 0);
+        lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
+
+        auto btns = std::make_shared<std::vector<lv_obj_t *>>();
+        auto paint = [btns](int sel) {
+            for (size_t i = 0; i < btns->size(); i++) {
+                bool on = static_cast<int>(i) == sel;
+                auto b = (*btns)[i];
+                lv_obj_set_style_bg_color(
+                    b, on ? lv_color_hex(0x2196f3) : lv_color_hex(0xe0e0e0), 0);
+                lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+                lv_obj_set_style_text_color(
+                    lv_obj_get_child(b, 0),
+                    on ? lv_color_white() : lv_color_hex(0x404040), 0);
+            }
+        };
+        int i = 0;
+        for (auto txt : labels) {
+            auto b = lv_button_create(seg);
+            lv_obj_remove_style_all(b);
+            lv_obj_set_style_radius(b, 10, 0);
+            lv_obj_set_style_pad_hor(b, 22, 0);
+            lv_obj_set_style_pad_ver(b, 12, 0);
+            // flex_grow only when filling — in a content-sized seg it would
+            // collapse the buttons to zero width.
+            if (fill) lv_obj_set_flex_grow(b, 1);
+            auto l = lv_label_create(b);
+            lv_label_set_text(l, txt);
+            lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+            lv_obj_center(l);
+            int idx = i++;
+            lv_obj_add_event_fn(b, LV_EVENT_CLICKED, [paint, on_select, idx](lv_event_t *) {
+                paint(idx);
+                on_select(idx);
+            });
+            btns->push_back(b);
+        }
+        paint(active);
+        return seg;
+    };
+
     // ---- Display Settings block ----
     {
         auto display_block = block("Display");
@@ -180,62 +241,112 @@ void SettingsScreen::build() {
 
         // -- Color depth (16-bit / 24-bit segmented toggle) --
         auto color_head = setting_row(display_block, "Color Mode");
-
-        auto seg = lv_obj_create(color_head);
-        lv_obj_remove_style_all(seg);
-        lv_obj_set_size(seg, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(seg, LV_FLEX_FLOW_ROW);
-        lv_obj_set_style_pad_all(seg, 4, 0);
-        lv_obj_set_style_pad_column(seg, 4, 0);
-        lv_obj_set_style_radius(seg, 12, 0);
-        lv_obj_set_style_bg_color(seg, lv_color_hex(0xe0e0e0), 0);
-        lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
-
-        auto seg_btn = [](lv_obj_t *parent, const char *txt) {
-            auto b = lv_button_create(parent);
-            lv_obj_remove_style_all(b);
-            lv_obj_set_style_radius(b, 10, 0);
-            lv_obj_set_style_pad_hor(b, 22, 0);
-            lv_obj_set_style_pad_ver(b, 12, 0);
-            auto l = lv_label_create(b);
-            lv_label_set_text(l, txt);
-            lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
-            lv_obj_center(l);
-            return b;
-        };
-        auto btn16 = seg_btn(seg, "16-bit");
-        auto btn24 = seg_btn(seg, "24-bit");
-
-        // Paint the active half blue; read the persisted value so it survives
-        // re-entry (the live display only changes after a restart).
-        auto refresh_seg = [btn16, btn24]() {
-            bool is16 = app::display_color_depth() == app::ColorDepth::Color16;
-            struct { lv_obj_t *b; bool on; } items[] = {{btn16, is16}, {btn24, !is16}};
-            for (auto &it : items) {
-                lv_obj_set_style_bg_color(
-                    it.b, it.on ? lv_color_hex(0x2196f3) : lv_color_hex(0xe0e0e0), 0);
-                lv_obj_set_style_bg_opa(it.b, LV_OPA_COVER, 0);
-                lv_obj_set_style_text_color(
-                    lv_obj_get_child(it.b, 0),
-                    it.on ? lv_color_white() : lv_color_hex(0x404040), 0);
-            }
-        };
-        refresh_seg();
-
-        auto choose = [this, refresh_seg](app::ColorDepth d) {
-            if (app::display_color_depth() == d) return;  // no change
+        segmented(color_head, {"16-bit", "24-bit"},
+                  app::display_color_depth() == app::ColorDepth::Color16 ? 0 : 1,
+                  [this](int idx) {
+            auto d = idx == 0 ? app::ColorDepth::Color16 : app::ColorDepth::Color24;
+            if (app::display_color_depth() == d) return;  // tapped the active one
             app::set_display_color_depth(d);
-            refresh_seg();
             // Boot-fixed: the framebuffer format is allocated at bsp_init, so the
             // change only shows after a restart.
             app::modal_confirm(root_, "Restart required",
                                "The color depth changes after a restart.\n"
                                "Restart now?",
                                "Restart", false, []() { bsp_restart(); });
+        });
+    }
+
+    // ---- Audio Settings block ----
+    {
+        auto audio_block = block("Audio");
+        lv_obj_set_style_pad_all(audio_block, 20, 0);
+        lv_obj_set_style_pad_row(audio_block, 16, 0);
+
+        // A thin in-block divider between rows.
+        auto divider = [](lv_obj_t *parent) {
+            auto d = lv_obj_create(parent);
+            lv_obj_remove_style_all(d);
+            lv_obj_set_size(d, LV_PCT(100), 1);
+            lv_obj_set_style_bg_color(d, lv_color_hex(0xdddddd), 0);
+            lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
         };
-        lv_obj_add_event_fn(btn16, LV_EVENT_CLICKED,
-                            [choose](lv_event_t *) { choose(app::ColorDepth::Color16); });
-        lv_obj_add_event_fn(btn24, LV_EVENT_CLICKED,
-                            [choose](lv_event_t *) { choose(app::ColorDepth::Color24); });
+
+        // -- Master Volume (header row + slider 0..150, 100 = unity) --
+        auto vol = lv_obj_create(audio_block);
+        lv_obj_remove_style_all(vol);
+        lv_obj_set_size(vol, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_remove_flag(vol, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(vol, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(vol, 12, 0);
+
+        auto vol_head = setting_row(vol, "Master Volume");
+        auto vol_value = lv_label_create(vol_head);
+        lv_label_set_text_fmt(vol_value, "%d", app::master_volume());
+        lv_obj_set_style_text_font(vol_value, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(vol_value, lv_color_hex(0x808080), 0);
+
+        auto vslider = lv_slider_create(vol);
+        lv_obj_set_width(vslider, LV_PCT(100));
+        lv_slider_set_range(vslider, 0, 150);
+        lv_slider_set_value(vslider, app::master_volume(), LV_ANIM_OFF);
+        constexpr int kKnob = 28;
+        lv_obj_set_style_width(vslider, kKnob, LV_PART_KNOB);
+        lv_obj_set_style_height(vslider, kKnob, LV_PART_KNOB);
+        lv_obj_set_style_radius(vslider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+        lv_obj_set_style_margin_all(vslider, kKnob / 2, 0);
+        // Apply live (sets the gain the next stream fades in to); persist on release.
+        lv_obj_add_event_fn(vslider, LV_EVENT_VALUE_CHANGED,
+                            [vslider, vol_value](lv_event_t *) {
+            int v = lv_slider_get_value(vslider);
+            bsp_audio_set_volume(v);  // 0..150; 100 = unity, >100 boosts (+6 dB max)
+            lv_label_set_text_fmt(vol_value, "%d", v);
+        });
+        lv_obj_add_event_fn(vslider, LV_EVENT_RELEASED, [vslider](lv_event_t *) {
+            app::set_master_volume(lv_slider_get_value(vslider));
+        });
+
+        divider(audio_block);
+
+        // -- Speaker Output (Auto / Off; "always on" is intentionally not shown) --
+        auto spk_head = setting_row(audio_block, "Speaker Output");
+        segmented(spk_head, {"Off", "Auto"},
+                  app::speaker_mode() == app::SpeakerMode::Off ? 0 : 1,
+                  [](int idx) {
+            auto m = idx == 0 ? app::SpeakerMode::Off : app::SpeakerMode::Auto;
+            app::set_speaker_mode(m);
+            bsp_audio_set_speaker_mode(m == app::SpeakerMode::Off
+                                           ? BSP_AUDIO_SPEAKER_MODE_OFF
+                                           : BSP_AUDIO_SPEAKER_MODE_AUTO);
+        });
+
+        divider(audio_block);
+
+        // -- Equalizer (audio_dsp EQ stage on/off) --
+        auto eq_head = setting_row(audio_block, "Equalizer");
+        segmented(eq_head, {"Off", "On"}, app::equalizer_enabled() ? 1 : 0,
+                  [](int idx) {
+            bool on = idx == 1;
+            app::set_equalizer_enabled(on);
+            // The BSP override keeps this across HP insert/remove re-voicing.
+            bsp_audio_set_eq_enabled(on);
+        });
+
+        divider(audio_block);
+
+        // -- Sound Playback: which device plays the mirrored phone audio. The
+        // option labels are long, so a dropdown keeps it on one row. --
+        auto sp_head = setting_row(audio_block, "Sound Playback");
+        auto dd = lv_dropdown_create(sp_head);
+        lv_dropdown_set_options(dd, "M5Stack Tab5\nAndroid Device");
+        lv_dropdown_set_selected(
+            dd, app::audio_output_mode() == app::AudioOutputMode::PhoneOnly ? 1 : 0);
+        lv_obj_set_style_text_font(dd, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_font(lv_dropdown_get_list(dd), &lv_font_montserrat_20, 0);
+        lv_obj_set_width(dd, 280);
+        lv_obj_add_event_fn(dd, LV_EVENT_VALUE_CHANGED, [dd](lv_event_t *) {
+            app::set_audio_output_mode(lv_dropdown_get_selected(dd) == 1
+                                           ? app::AudioOutputMode::PhoneOnly
+                                           : app::AudioOutputMode::Tab5Only);
+        });
     }
 }

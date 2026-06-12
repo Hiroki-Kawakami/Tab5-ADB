@@ -12,6 +12,7 @@
 
 #include "bsp.h"
 #include "bsp_audio.h"
+#include <math.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -147,6 +148,34 @@ static void test_auto_mode(void) {
     CHECK(!s_stub.speaker_enabled, "quiesce drops the amp");
 }
 
+static void test_eq_override(void) {
+    /* The app EQ override must survive route re-voicing (the stub profile voices
+     * EQ on for the speaker, off for the headphone). */
+    bsp_audio_set_active(make_stub(), &(bsp_audio_init_t){
+        .dsp_mode = BSP_AUDIO_DSP_MODE_AUTO,
+        .speaker_mode = BSP_AUDIO_SPEAKER_MODE_AUTO,
+    });
+    audio_dsp_t dsp = bsp_audio_dsp();
+    CHECK(bsp_audio_open(44100, 16, 2) == ESP_OK, "open");
+    CHECK(audio_dsp_is_eq_enabled(dsp), "boot: speaker profile EQ on");
+
+    /* Force EQ on, then plug HP (profile would voice it off): override wins. */
+    CHECK(bsp_audio_set_eq_enabled(true) == ESP_OK, "force EQ on");
+    s_stub.hp = true;
+    route_settle();
+    CHECK(audio_dsp_is_eq_enabled(dsp), "HP in: forced EQ on survives re-voice");
+    CHECK(bsp_audio_get_eq_enabled(), "get reflects EQ on");
+
+    /* Force EQ off, then unplug (profile would voice it on): override wins. */
+    CHECK(bsp_audio_set_eq_enabled(false) == ESP_OK, "force EQ off");
+    s_stub.hp = false;
+    route_settle();
+    CHECK(!audio_dsp_is_eq_enabled(dsp), "HP out: forced EQ off survives re-voice");
+    CHECK(!bsp_audio_get_eq_enabled(), "get reflects EQ off");
+
+    bsp_audio_close();
+}
+
 static void test_manual_mode(void) {
     bsp_audio_set_active(make_stub(), &(bsp_audio_init_t){
         .dsp_mode = BSP_AUDIO_DSP_MODE_MANUAL,
@@ -158,6 +187,16 @@ static void test_manual_mode(void) {
     CHECK(!audio_dsp_is_eq_enabled(dsp), "Manual: EQ off");
 
     CHECK(bsp_audio_open(48000, 16, 2) == ESP_OK, "open");
+
+    /* SW gain curve: vol 100 = unity, the 100..150 region amplifies above unity
+     * (vol 150 → +6 dB ≈ 2x). get_gain returns the (non-interpolated) target. */
+    bsp_audio_set_volume(100);
+    CHECK(fabsf(audio_dsp_get_gain(dsp) - 1.0f) < 0.01f, "vol 100 = unity gain");
+    bsp_audio_set_volume(150);
+    CHECK(audio_dsp_get_gain(dsp) > 1.9f && audio_dsp_get_gain(dsp) < 2.05f,
+          "vol 150 boosts ~+6 dB above unity");
+    bsp_audio_set_volume(100);
+
     audio_dsp_set_mono_mix(dsp, true);   /* app's own setting... */
     s_stub.hp = true;
     route_settle();                       /* ...survives an HP flip */
@@ -176,11 +215,14 @@ static void test_disable_mode(void) {
     CHECK(s_stub.hw_volume == 40, "no DSP: user volume lands on the codec");
     CHECK(bsp_audio_set_volume(55) == ESP_OK, "hw volume path");
     CHECK(s_stub.hw_volume == 55, "hw volume applied");
+    CHECK(bsp_audio_set_volume(150) == ESP_OK, "boost value accepted");
+    CHECK(s_stub.hw_volume == 100, "codec can't amplify: >100 clamped to 100");
     bsp_audio_close();
 }
 
 int main(void) {
     test_auto_mode();
+    test_eq_override();
     test_manual_mode();
     test_disable_mode();
     bsp_audio_set_active(NULL, NULL);

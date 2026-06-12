@@ -103,8 +103,11 @@ esp_err_t bsp_audio_reconfig(uint32_t sample_rate, uint8_t bits_per_sample, uint
 /* `data` is filtered in-place by the DSP chain — caller must own the buffer.
  * Blocks while the output is full (the device's natural pacing). */
 esp_err_t bsp_audio_write(void *data, size_t len);
-/* 0..100, linear-in-dB; 0 is true silence. Starts at 0 until first set.
- * Callable before open — the stream fades in to the stored volume. */
+/* 0..150, linear-in-dB; 0 is true silence, 100 = 0 dB (unity). 1..100 attenuates
+ * (vol=1 → -40 dB); 100..150 is a digital boost above unity (vol=150 → +6 dB),
+ * available only on the SW-gain (DSP) path — the HW-codec fallback caps at 100.
+ * Starts at 0 until first set. Callable before open — the stream fades in to the
+ * stored volume. */
 esp_err_t bsp_audio_set_volume(int volume);
 int       bsp_audio_get_volume(void);
 esp_err_t bsp_audio_set_mute(bool mute);
@@ -112,8 +115,18 @@ bool      bsp_audio_get_mute(void);
 /* The DSP chain handle, driven with the audio_dsp_* API directly. NULL in
  * DSP_MODE_DISABLE (or no PCM path). Note set_gain is owned by the
  * volume/mute plumbing, and in DSP_MODE_AUTO the board re-voices
- * biquads/eq-enable/mono-mix on route changes (app edits get overwritten). */
+ * biquads/eq-enable/mono-mix on route changes (direct audio_dsp_* edits get
+ * overwritten — use bsp_audio_set_eq_enabled below for an EQ toggle that
+ * survives re-voicing). */
 audio_dsp_t bsp_audio_dsp(void);
+
+/* App-controlled EQ enable. Unlike a direct audio_dsp_set_eq_enabled(), this is
+ * remembered as an override so a DSP_MODE_AUTO route re-voicing (HP insert/remove)
+ * keeps the app's choice instead of restoring the board profile's eq_enabled.
+ * ESP_ERR_NOT_SUPPORTED when there is no DSP (DISABLE mode / no PCM path).
+ * get returns the live EQ enable state (false when there is no DSP). */
+esp_err_t bsp_audio_set_eq_enabled(bool enabled);
+bool      bsp_audio_get_eq_enabled(void);
 
 /* Speaker route policy (CAP_SPEAKER; AUTO additionally needs CAP_HEADPHONE). */
 esp_err_t bsp_audio_set_speaker_mode(bsp_audio_speaker_mode_t mode);

@@ -67,10 +67,11 @@ esp_err_t audio_dsp_set_eq_enabled(audio_dsp_t dsp, bool enabled);
 bool      audio_dsp_is_eq_enabled(audio_dsp_t dsp);
 esp_err_t audio_dsp_set_biquads(audio_dsp_t dsp, const audio_dsp_biquad_t *biquads, size_t num_stages);
 
-/* Gain stage. target_gain is linear (0.0..1.0); 1.0 = bypass. fade_ms=0
- * applies instantly; otherwise the gain is interpolated frame-by-frame so a
- * zipper-free transition happens inside audio_dsp_process. The gain applies
- * regardless of the EQ enable flag. */
+/* Gain stage. target_gain is linear; 1.0 = bypass (unity). >1.0 amplifies (the
+ * output is saturated to int16 in process) up to a +12 dB ceiling; <1.0
+ * attenuates; 0.0 = silence. fade_ms=0 applies instantly; otherwise the gain is
+ * interpolated frame-by-frame so a zipper-free transition happens inside
+ * audio_dsp_process. The gain applies regardless of the EQ enable flag. */
 esp_err_t audio_dsp_set_gain(audio_dsp_t dsp, float target_gain, uint32_t fade_ms);
 float     audio_dsp_get_gain(audio_dsp_t dsp);   /*!< target (not interpolated) */
 

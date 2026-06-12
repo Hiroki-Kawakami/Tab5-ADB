@@ -10,6 +10,9 @@ constexpr const char* kNamespace = "tab5adb";
 constexpr const char* kAudioModeKey = "audio_mode";
 constexpr const char* kBrightnessKey = "brightness";
 constexpr const char* kColorDepthKey = "color_depth";
+constexpr const char* kMasterVolKey = "master_vol";
+constexpr const char* kSpeakerModeKey = "speaker_mode";
+constexpr const char* kEqEnabledKey = "eq_enabled";
 
 // nvs_flash is initialised at boot (the BSP / the adb keystore), but a settings
 // access could in principle precede those, so ensure it once here too. Idempotent
@@ -89,6 +92,67 @@ void set_display_color_depth(ColorDepth depth) {
     nvs_handle_t h;
     if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_u8(h, kColorDepthKey, static_cast<uint8_t>(depth));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+int master_volume() {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READONLY, &h) != ESP_OK) return 100;
+    uint8_t v = 100;  // default, also covers a missing key (range 0..150 fits u8)
+    nvs_get_u8(h, kMasterVolKey, &v);
+    nvs_close(h);
+    return v > 150 ? 150 : v;
+}
+
+void set_master_volume(int volume) {
+    ensure_nvs();
+    if (volume < 0)   volume = 0;
+    if (volume > 150) volume = 150;
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, kMasterVolKey, static_cast<uint8_t>(volume));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+SpeakerMode speaker_mode() {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READONLY, &h) != ESP_OK)
+        return SpeakerMode::Auto;  // no namespace yet = default
+    uint8_t v = 0;  // missing key -> 0 -> Auto
+    nvs_get_u8(h, kSpeakerModeKey, &v);
+    nvs_close(h);
+    return v == static_cast<uint8_t>(SpeakerMode::Off) ? SpeakerMode::Off
+                                                       : SpeakerMode::Auto;
+}
+
+void set_speaker_mode(SpeakerMode mode) {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, kSpeakerModeKey, static_cast<uint8_t>(mode));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+bool equalizer_enabled() {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READONLY, &h) != ESP_OK) return true;
+    uint8_t v = 1;  // default on; a missing key leaves v untouched
+    nvs_get_u8(h, kEqEnabledKey, &v);
+    nvs_close(h);
+    return v != 0;
+}
+
+void set_equalizer_enabled(bool enabled) {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, kEqEnabledKey, enabled ? 1 : 0);
     nvs_commit(h);
     nvs_close(h);
 }
