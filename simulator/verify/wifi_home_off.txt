@@ -1,0 +1,19 @@
+# HomeScreen Wireless card shows "Wi-Fi off" when the radio is disabled.
+# Boot auto-connects to the saved OfficeWiFi; we open Settings -> Wi-Fi, flip the
+# switch Off, then pop back to Home and confirm the status line reads "Wi-Fi off".
+settle 2500
+# Settings -> Wi-Fi.
+tap 589 1171
+settle 1200
+tap 360 195
+settle 1500
+# Flip the switch Off.
+tap 640 182
+wait 800
+# Back to Settings, then back to Home.
+tap 50 58
+settle 1000
+tap 50 58
+settle 1200
+capture simulator/verify/out/wifi_home_off.jpg
+quit

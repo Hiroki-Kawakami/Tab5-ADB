@@ -88,8 +88,47 @@ void WiFiScreen::build() {
     lv_obj_set_style_pad_all(body, 24, 0);
     lv_obj_set_style_pad_row(body, 16, 0);
 
+    // Status card: a Wi-Fi on/off switch row, then the connection status line.
+    lv_obj_t *status_card = lv_obj_create(body);
+    lv_obj_remove_style_all(status_card);
+    lv_obj_set_width(status_card, LV_PCT(100));
+    lv_obj_set_height(status_card, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(status_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(status_card, 16, 0);
+    lv_obj_set_style_pad_row(status_card, 12, 0);
+    lv_obj_set_style_bg_color(status_card, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(status_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(status_card, 12, 0);
+    lv_obj_remove_flag(status_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *switch_row = lv_obj_create(status_card);
+    lv_obj_remove_style_all(switch_row);
+    lv_obj_set_width(switch_row, LV_PCT(100));
+    lv_obj_set_height(switch_row, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(switch_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(switch_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(switch_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *switch_label = lv_label_create(switch_row);
+    lv_label_set_text(switch_label, "Wi-Fi");
+    lv_obj_set_style_text_font(switch_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_flex_grow(switch_label, 1);
+
+    enable_switch_ = lv_switch_create(switch_row);
+    lv_obj_set_size(enable_switch_, 80, 44);
+    lv_obj_add_event_fn(enable_switch_, LV_EVENT_VALUE_CHANGED, [this](lv_event_t *) {
+        set_enabled(lv_obj_has_state(enable_switch_, LV_STATE_CHECKED));
+    });
+
+    // Separator.
+    lv_obj_t *sep = lv_obj_create(status_card);
+    lv_obj_remove_style_all(sep);
+    lv_obj_set_size(sep, LV_PCT(100), 1);
+    lv_obj_set_style_bg_color(sep, lv_color_hex(0xe0e0e0), 0);
+    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+
     // Status line.
-    status_label_ = lv_label_create(body);
+    status_label_ = lv_label_create(status_card);
     lv_label_set_long_mode(status_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(status_label_, LV_PCT(100));
     lv_obj_set_style_text_font(status_label_, &lv_font_montserrat_20, 0);
@@ -115,17 +154,68 @@ void WiFiScreen::build() {
 }
 
 void WiFiScreen::onEnter() {
-    // Register as the persistent listener (held weakly: drops when this screen is
-    // freed) and bring the radio up. start() is idempotent.
+    // Register the persistent listener cheaply (no bring-up): start()'s first call
+    // does the full esp_wifi bring-up (init + start over the SDIO C6 link), which
+    // would block the LVGL thread and make this screen slow to appear. The actual
+    // bring-up runs on a background task when the user flips the switch
+    // (set_enabled); set_listener only stores the weak listener.
     std::weak_ptr<wifi::Listener> wl(std::shared_ptr<wifi::Listener>(
         shared_from_this(), static_cast<wifi::Listener *>(this)));
-    wifi::manager().start(wl);
+    wifi::manager().set_listener(wl);
     update_status(wifi::manager().status());
 }
 
-void WiFiScreen::onAppear() { start_scan(); }
+void WiFiScreen::onAppear() { start_scan(); }  // no-op while off (guarded inside)
+
+void WiFiScreen::set_enabled(bool on) {
+    // LVGL thread. Give immediate feedback, then hand the blocking radio work to
+    // the wifi manager's worker task (non-blocking call) so the UI never stalls.
+    // The switch is disabled for the duration (re-enabled in the completion) so a
+    // second toggle can't race it.
+    if (busy_) return;
+    busy_ = true;
+    if (enable_switch_) {
+        if (on) lv_obj_add_state(enable_switch_, LV_STATE_CHECKED);
+        else lv_obj_remove_state(enable_switch_, LV_STATE_CHECKED);
+        lv_obj_add_state(enable_switch_, LV_STATE_DISABLED);
+    }
+    ++scan_gen_;  // drop any in-flight scan completion across the transition
+    if (on) {
+        if (spinner_) lv_obj_remove_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+        if (status_label_) {
+            lv_label_set_text(status_label_, "Turning on Wi-Fi...");
+            lv_obj_set_style_text_color(status_label_, lv_color_hex(0x607d8b), 0);
+        }
+    } else {
+        if (spinner_) lv_obj_add_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+        aps_.clear();
+        if (list_) lv_obj_clean(list_);
+        if (status_label_) {
+            lv_label_set_text(status_label_, "Wi-Fi off");
+            lv_obj_set_style_text_color(status_label_, lv_color_hex(0x90a4ae), 0);
+        }
+    }
+
+    // The done callback fires on the manager's worker thread once the radio op is
+    // applied; capture a strong self so the screen outlives an in-flight toggle,
+    // then marshal the UI finish to LVGL.
+    wifi::manager().set_enabled(on, [self = shared_from_this(), this, on]() {
+        lv_async_call([self, this, on]() {
+            if (exited()) return;
+            busy_ = false;
+            if (enable_switch_) lv_obj_remove_state(enable_switch_, LV_STATE_DISABLED);
+            if (on) {
+                start_scan();  // shows the spinner, repopulates on completion
+            } else if (spinner_) {
+                lv_obj_add_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+            }
+            update_status(wifi::manager().status());
+        });
+    });
+}
 
 void WiFiScreen::start_scan() {
+    if (!wifi::manager().enabled()) return;  // off: no scanning
     if (spinner_) lv_obj_remove_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
     int gen = ++scan_gen_;
     wifi::manager().scan(
@@ -141,6 +231,7 @@ void WiFiScreen::start_scan() {
 
 void WiFiScreen::rebuild_list() {
     lv_obj_clean(list_);
+    if (!wifi::manager().enabled()) return;  // off: list stays empty
     std::string connected = (wifi::manager().status().state == wifi::State::Connected)
                                 ? wifi::manager().status().ssid
                                 : std::string();
@@ -188,7 +279,15 @@ void WiFiScreen::rebuild_list() {
 
 void WiFiScreen::update_status(const wifi::Status &s) {
     if (!status_label_) return;
+    if (enable_switch_) {
+        if (s.state != wifi::State::Off) lv_obj_add_state(enable_switch_, LV_STATE_CHECKED);
+        else lv_obj_remove_state(enable_switch_, LV_STATE_CHECKED);
+    }
     switch (s.state) {
+        case wifi::State::Off:
+            lv_label_set_text(status_label_, "Wi-Fi off");
+            lv_obj_set_style_text_color(status_label_, lv_color_hex(0x90a4ae), 0);
+            break;
         case wifi::State::Connected:
             lv_label_set_text_fmt(status_label_, "Connected to %s\nIP %s",
                                   s.ssid.c_str(), s.ip.c_str());

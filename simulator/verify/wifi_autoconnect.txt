@@ -1,0 +1,9 @@
+# Boot-time background Wi-Fi auto-connect. The sim NVS has a saved network
+# (OfficeWiFi); at boot adb_app kicks a worker task -> autoconnect_saved(), which
+# brings the radio up and connects. The HomeScreen Wireless card status line
+# should turn green "Connected to OfficeWiFi" with no user interaction.
+settle 800
+capture simulator/verify/out/wifi_autoconnect_connecting.jpg
+wait 1200
+capture simulator/verify/out/wifi_autoconnect_home.jpg
+quit

@@ -71,6 +71,13 @@ public:
         started_ = true;
     }
 
+    void radio_on() override {
+        if (started_) esp_wifi_start();
+    }
+    void radio_off() override {
+        if (started_) esp_wifi_stop();
+    }
+
     void scan() override {
         wifi_scan_config_t sc = {};
         if (esp_wifi_scan_start(&sc, false) != ESP_OK)

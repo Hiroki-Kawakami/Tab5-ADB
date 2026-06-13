@@ -1,10 +1,18 @@
 #pragma once
 #include "screen.hpp"
+#include "wifi_manager.hpp"
 
-class HomeScreen : public Screen {
+// HomeScreen registers as the wifi::Listener while visible (held weakly, no
+// bring-up) so the Wireless card's status line updates live — e.g. the boot
+// background auto-connect completing. Callbacks fire on the wifi event thread and
+// are marshalled to LVGL.
+class HomeScreen : public Screen, public wifi::Listener {
 public:
     void build() override;
-    void onAppear() override;   // refresh the live Wi-Fi status line
+    void onAppear() override;   // re-register the listener + refresh the status line
+
+    // wifi::Listener — event thread; marshalled to LVGL.
+    void on_wifi_state(const wifi::Status& status) override;
 
 private:
     lv_obj_t *connect_btn_ = nullptr;

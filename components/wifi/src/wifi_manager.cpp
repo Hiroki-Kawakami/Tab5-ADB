@@ -10,6 +10,8 @@
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "freertos/timers.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -19,6 +21,17 @@ namespace wifi {
 
 static const char* TAG = "wifi";
 static constexpr char kNvsNs[] = "wifi";
+
+namespace {
+// A unit of blocking radio work for the Manager's worker task. Enqueued as a
+// heap pointer (the queue copies the pointer); the worker deletes it.
+enum class Op { Enable, Disable, Autoconnect };
+struct WorkItem {
+    Op op;
+    int timeout_ms;             // Autoconnect
+    std::function<void()> done; // optional completion (fires on the worker thread)
+};
+}  // namespace
 
 const char* result_str(Result r) {
     switch (r) {
@@ -37,6 +50,9 @@ struct Manager::Impl : BackendHost {
     std::mutex mtx;
     Backend* backend = nullptr;
     bool started = false;
+
+    QueueHandle_t cmd_q = nullptr;   // WorkItem* queue drained by the worker task
+    TaskHandle_t worker = nullptr;
 
     std::weak_ptr<Listener> listener;
 
@@ -118,7 +134,9 @@ struct Manager::Impl : BackendHost {
             std::lock_guard<std::mutex> lk(mtx);
             was_connecting = connecting;
             ip.clear();
-            state = State::Disconnected;
+            // Stay Off if the radio was turned off (esp_wifi_stop surfaces a
+            // disconnect event we must not read as a drop-to-idle).
+            if (state != State::Off) state = State::Disconnected;
             cancel_timeout();
             if (connecting) {
                 connecting = false;
@@ -195,13 +213,54 @@ struct Manager::Impl : BackendHost {
     }
 };
 
-Manager::Manager() : p_(new Impl) {}
+Manager::Manager() : p_(new Impl) {
+    // One worker task + command queue serialize the blocking radio operations
+    // (bring-up, on/off, autoconnect) so nothing races bring_up() and the LVGL
+    // thread never blocks. The Manager is a leaked singleton, so the task lives
+    // for the process lifetime (no join).
+    p_->cmd_q = xQueueCreate(8, sizeof(WorkItem*));
+    xTaskCreate(&Manager::worker_trampoline, "wifi_mgr", 8192, this, 4, &p_->worker);
+}
+
+void Manager::worker_trampoline(void* arg) { static_cast<Manager*>(arg)->worker_loop(); }
+
+void Manager::worker_loop() {
+    for (;;) {
+        WorkItem* it = nullptr;
+        if (xQueueReceive(p_->cmd_q, &it, portMAX_DELAY) != pdTRUE || !it) continue;
+        switch (it->op) {
+            case Op::Enable:      bring_up(); apply_enabled(true);  break;
+            case Op::Disable:     apply_enabled(false);             break;
+            case Op::Autoconnect: bring_up(); do_autoconnect(it->timeout_ms); break;
+        }
+        if (it->done) it->done();
+        delete it;
+    }
+}
+
+// Enqueue a WorkItem; drops (and runs done) if the queue is unexpectedly full so a
+// caller waiting on `done` is never stuck.
+static void enqueue(QueueHandle_t q, WorkItem* it) {
+    if (!q || xQueueSend(q, &it, 0) != pdTRUE) {
+        if (it->done) it->done();
+        delete it;
+    }
+}
+
+void Manager::set_listener(std::weak_ptr<Listener> listener) {
+    std::lock_guard<std::mutex> lk(p_->mtx);
+    p_->listener = std::move(listener);
+}
 
 void Manager::start(std::weak_ptr<Listener> listener) {
+    set_listener(std::move(listener));
+    enqueue(p_->cmd_q, new WorkItem{Op::Enable, 0, {}});
+}
+
+void Manager::bring_up() {
     bool first;
     {
         std::lock_guard<std::mutex> lk(p_->mtx);
-        p_->listener = std::move(listener);
         first = !p_->started;
         p_->started = true;
     }
@@ -222,6 +281,21 @@ void Manager::start(std::weak_ptr<Listener> listener) {
         std::lock_guard<std::mutex> lk(p_->mtx);
         if (p_->state == State::Off) p_->state = State::Disconnected;
     }
+}
+
+void Manager::autoconnect_saved(int timeout_ms) {
+    enqueue(p_->cmd_q, new WorkItem{Op::Autoconnect, timeout_ms, {}});
+}
+
+// Worker thread (after bring_up). Connect to the saved creds if any.
+void Manager::do_autoconnect(int timeout_ms) {
+    std::string s, pw;
+    if (!p_->load_creds(s, pw)) {
+        ESP_LOGI(TAG, "autoconnect: no saved network");
+        return;
+    }
+    ESP_LOGI(TAG, "autoconnect: connecting to %s", s.c_str());
+    connect(s, pw, [](Result) {}, timeout_ms);  // status flows via the Listener
 }
 
 bool Manager::configured() const {
@@ -286,6 +360,46 @@ void Manager::connect_saved(ConnectCb cb, int timeout_ms) {
     std::string s, pw;
     if (!p_->load_creds(s, pw)) { cb(Result::Failed); return; }
     connect(s, pw, std::move(cb), timeout_ms);
+}
+
+void Manager::set_enabled(bool on, std::function<void()> done) {
+    enqueue(p_->cmd_q, new WorkItem{on ? Op::Enable : Op::Disable, 0, std::move(done)});
+}
+
+// Worker thread. Apply the radio on/off state transition (Enable runs bring_up()
+// first, so the backend exists).
+void Manager::apply_enabled(bool on) {
+    ConnectCb pending;
+    Status s;
+    {
+        std::lock_guard<std::mutex> lk(p_->mtx);
+        if (!p_->backend) return;  // bring_up() did not run (should not happen)
+        bool is_off = (p_->state == State::Off);
+        if (on == !is_off) return;  // already in the requested state
+        if (on) {
+            p_->state = State::Disconnected;
+        } else {
+            p_->cancel_timeout();
+            if (p_->connecting) {
+                p_->connecting = false;
+                pending = std::move(p_->connect_cb);
+                p_->connect_cb = nullptr;
+            }
+            p_->ip.clear();
+            p_->ssid.clear();
+            p_->state = State::Off;
+        }
+        s = p_->snapshot_locked();
+    }
+    if (on) p_->backend->radio_on();
+    else p_->backend->radio_off();
+    if (pending) pending(Result::Failed);  // in-flight connect cancelled by Off
+    p_->notify(s);
+}
+
+bool Manager::enabled() const {
+    std::lock_guard<std::mutex> lk(p_->mtx);
+    return p_->state != State::Off;
 }
 
 void Manager::disconnect() {

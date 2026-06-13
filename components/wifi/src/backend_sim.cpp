@@ -78,6 +78,13 @@ public:
         ESP_LOGI(TAG, "fake wifi backend up");
     }
 
+    void radio_on() override {}  // no real radio; the Manager owns the state
+    void radio_off() override {
+        std::lock_guard<std::mutex> lk(fake().mtx);
+        fake().connected = false;
+        fake().cur_rssi = 0;
+    }
+
     void scan() override {
         std::vector<AP> aps;
         int delay;

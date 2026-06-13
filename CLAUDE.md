@@ -902,9 +902,15 @@ esp_event; `backend_sim.cpp` = a deterministic scriptable fake), **not** an
 host-network access), which the fake provides.
 
 **API (`inc/wifi_manager.hpp`, see README + docs/wifi.md).** `wifi::manager()` is a
-leaked singleton (like `app::agent_client()`). `start(listener_weak)` brings the
-stack/radio up (idempotent). Two delivery channels, like `adb`: **one-shot
-completions** for `scan()`/`connect()`/`connect_saved()` (fire exactly once) AND a
+leaked singleton (like `app::agent_client()`). The blocking radio ops (bring-up,
+on/off) run on **one Manager-owned worker task + command queue** (created in the
+ctor), so `start()`/`set_enabled()`/`autoconnect_saved()` are **non-blocking** and
+serialized — no caller races `bring_up()`, the LVGL thread never blocks (this
+replaced ad-hoc per-call tasks that raced when a screen toggle overlapped boot
+auto-connect). `set_listener()` registers the persistent listener synchronously
+with **no** bring-up. Two delivery channels, like `adb`: **one-shot
+completions** for `scan()`/`connect()`/`connect_saved()` (fire exactly once; plus a
+`set_enabled()` `done` cb on the worker thread) AND a
 **persistent `Listener::on_wifi_state(Status)`** for steady-state transitions
 incl. a mid-session drop (the gap the reference NetworkManager couldn't report —
 it dropped its single callback after the first success). All callbacks fire on the
@@ -917,11 +923,29 @@ connect outcome from the SSID (`fail-auth`/`fail-notfound`/`fail-assoc`/`timeout
 or an explicit `wifi::sim::set_next_connect_result()`; the sim harness exposes
 `wifi-aps` / `wifi-connect-result` / `wifi-delay` / `wifi-drop` script commands and
 `SIMULATOR_WIFI_CONNECT` for non-scripted runs. The **Settings → Wi-Fi** button
-pushes `WiFiScreen` (scan list + secured-network password modal + connect
-progress/error); the HomeScreen "Wireless (TCP/IP)" card only shows a live status
-line. The screen IS the `wifi::Listener`;
+pushes `WiFiScreen` (a top **status card** = a Wi-Fi on/off `lv_switch` + separator
++ the connection status line, then the scan list + secured-network password modal +
+connect progress/error); the HomeScreen "Wireless (TCP/IP)" card only shows a live
+status line. The switch drives `wifi::manager().set_enabled()` (radio
+`esp_wifi_stop`/`start`, keeping the stack); Off → `State::Off`, the screen hides
+the spinner, clears the AP list, and `start_scan()`/`rebuild_list()` no-op while
+off. **The screen does NOT bring the radio up on entry** — `onEnter` only registers
+the (weak) listener cheaply via `wifi::manager().set_listener()` (no bring-up).
+Flipping the switch gives immediate UI feedback (switch state + spinner +
+"Turning on…", and the switch is disabled for the transition), then calls the
+**non-blocking** `wifi::manager().set_enabled(on, done)` — the manager's worker task
+does the blocking esp_wifi work and fires `done` on the worker thread, which the
+screen marshals to LVGL (`lv_async_call`) to re-enable the switch + rescan. So there
+is no screen-owned task; the blocking work and the boot auto-connect both run on the
+single manager worker. **Boot auto-connect:** `adb_app()` calls
+`wifi::manager().autoconnect_saved()` (non-blocking — enqueues to the worker) so by
+the time the user opens the screen it usually opens *On* + connected (the switch
+reflects `enabled()`). The screen IS the `wifi::Listener`;
 verified headless via `./run.sh simverify simulator/verify/wifi.txt` (scan →
-connect open → password modal → forced auth-fail error). The password
+connect open → password modal → forced auth-fail error),
+`simulator/verify/wifi_onoff.txt` (switch off clears the list → on rescans), and
+`simulator/verify/wifi_autoconnect.txt` (boot auto-connect → HomeScreen line turns
+green, no tap). The password
 **`lv_keyboard` is anchored to the screen bottom (a child of `root_`,
 `IGNORE_LAYOUT` + `ALIGN_BOTTOM_MID`), NOT inside the modal card** (where it
 overflowed) — created after the scrim so taps reach it, and torn down by
@@ -1054,8 +1078,11 @@ layout: a full-bleed dark hero (title + the manually-bumped version constant in
 `app/app_version.hpp`) over a light card body matching the rest of the app. The
 body is a **USB card** (just the big Connect button; the Connect center stays at
 (360, 420) — the verify scripts tap by coordinate), a **Wireless (TCP/IP) card**
-that shows only a live Wi-Fi status line (`refresh_wifi_status()` on `onAppear`,
-from `wifi::manager()`) — Wi-Fi setup is opened from **Settings → Wi-Fi** (the
+that shows only a live Wi-Fi status line — `HomeScreen` **is** a `wifi::Listener`,
+re-registering itself (cheaply, via `wifi::manager().set_listener()` — no bring-up)
+on `onAppear` and refreshing the line both then (`refresh_wifi_status()`) and live
+on `on_wifi_state` (so the boot auto-connect completing turns the line green
+without a tap) — Wi-Fi setup is opened from **Settings → Wi-Fi** (the
 `WiFiScreen` scan/connect UI; see the `wifi` component section), not the
 HomeScreen; the phone-IP
 `Connect` row below stays `LV_STATE_DISABLED` (ADB-over-TCP lands later, on top of

@@ -16,6 +16,11 @@ This is the front door. The single public surface is `wifi::Manager` (see
   declares the board's esp-hosted wiring via sdkconfig (see below).
 - **Scan / connect / disconnect / forget**, with the last network persisted to
   NVS so the UI can show it and `connect_saved()` can reconnect.
+- **Radio on/off** (`set_enabled()`/`enabled()`) — the Wi-Fi enable switch:
+  `esp_wifi_stop`/`start` keeping the initialized stack; Off moves to `State::Off`.
+- **Boot auto-connect** (`autoconnect_saved()`) — radio On + connect to the saved
+  network, run from a task at startup; `set_listener()` registers a status listener
+  without the blocking bring-up.
 - **State reporting**: one-shot completions for `scan()`/`connect()` plus a
   persistent `Listener` for steady-state transitions (incl. a mid-session drop —
   the thing the reference NetworkManager couldn't report).

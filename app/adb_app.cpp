@@ -14,6 +14,7 @@
 #include "screen_manager.hpp"
 #include "home_screen.hpp"
 #include "settings.hpp"
+#include "wifi_manager.hpp"
 
 namespace app {
 namespace {
@@ -147,4 +148,10 @@ void adb_app() {
         screen_manager.push(std::make_shared<HomeScreen>());
     });
     bsp_display_set_brightness(app::display_brightness());
+
+    // Bring Wi-Fi up and auto-connect to the saved network. Non-blocking: the wifi
+    // manager runs the blocking esp_wifi bring-up on its own worker task, so boot
+    // never stalls. Status flows to the HomeScreen via the wifi::Listener it
+    // registers.
+    wifi::manager().autoconnect_saved();
 }

@@ -38,6 +38,11 @@ public:
     // set before this is called.
     virtual void start() = 0;
 
+    // Toggle the radio without tearing down the initialized stack. start() leaves
+    // the radio on; these turn it off (esp_wifi_stop) and back on (esp_wifi_start).
+    virtual void radio_on() = 0;
+    virtual void radio_off() = 0;
+
     virtual void scan() = 0;
     virtual void connect(const std::string& ssid, const std::string& password) = 0;
     virtual void disconnect() = 0;

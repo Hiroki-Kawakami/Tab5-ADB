@@ -1,0 +1,21 @@
+# Wi-Fi radio on/off switch (Settings -> Wi-Fi). Boot auto-connect brings the
+# radio up, so the screen now opens with the switch On and the scan list shown
+# (connected to the saved OfficeWiFi). Flipping the switch runs the esp_wifi
+# teardown/bring-up on a worker task so the UI stays responsive.
+settle 2500
+# HomeScreen Settings nav card -> Settings.
+tap 589 1171
+settle 1200
+# Settings "Wi-Fi" button -> the Wi-Fi screen (opens On, APs listed).
+tap 360 195
+settle 1500
+capture simulator/verify/out/wifi_onoff_on.jpg
+# Flip the switch Off -> radio off (worker task), list clears.
+tap 640 182
+wait 800
+capture simulator/verify/out/wifi_onoff_off.jpg
+# Flip it back On -> background bring-up + scan repopulates the list.
+tap 640 182
+wait 1200
+capture simulator/verify/out/wifi_onoff_back_on.jpg
+quit

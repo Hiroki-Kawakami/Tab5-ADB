@@ -10,13 +10,13 @@ settle 1200
 tap 360 195
 settle 1500
 capture simulator/verify/out/wifi_scan.jpg
-# Tap the open network (OpenCafe) -> connects with no password, status turns green.
+# Tap the open network (OpenCafe, 3rd row) -> connects with no password, green.
 wifi-connect-result Ok
-tap 360 397
+tap 360 498
 wait 800
 capture simulator/verify/out/wifi_connected.jpg
-# Tap a secured network -> password modal with on-screen keyboard.
-tap 360 237
+# Tap a secured network (OfficeWiFi, 1st row) -> password modal + on-screen keyboard.
+tap 360 338
 settle 1000
 capture simulator/verify/out/wifi_password.jpg
 # Force an auth failure; confirm (empty password) via the modal Connect button

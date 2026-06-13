@@ -75,11 +75,30 @@ public:
 
 class Manager {
 public:
-    // Bring up the network stack + radio and register the persistent listener.
-    // Idempotent: a second call just replaces the listener (the stack stays up).
-    // Does NOT auto-connect — call connect()/connect_saved(). On device this is
+    // The radio bring-up (esp_wifi over the SDIO C6 link) and on/off are blocking,
+    // so the Manager owns ONE worker task and a command queue: set_enabled() /
+    // autoconnect_saved() / start() are NON-BLOCKING — they enqueue work that the
+    // worker runs serially (no concurrent bring-up race, never on the LVGL thread).
+    // Listener / one-shot callbacks still fire on the backend event thread; a
+    // set_enabled() done callback fires on the worker thread. Marshalling to LVGL
+    // is the app's job either way.
+
+    // Register the persistent listener + bring the radio up (On). Idempotent. The
+    // bring-up is enqueued to the worker, so this returns immediately. Does NOT
+    // auto-connect — call connect()/connect_saved(). On device the bring-up is
     // where esp_netif/esp_event/esp_wifi_init/esp_wifi_start happen.
     void start(std::weak_ptr<Listener> listener);
+
+    // Register/replace the persistent listener only — cheap and synchronous, no
+    // bring-up. For a screen that wants live status without enabling the radio
+    // (that comes via start() / set_enabled(true) / autoconnect_saved()). Held
+    // weakly: drop the shared_ptr to detach.
+    void set_listener(std::weak_ptr<Listener> listener);
+
+    // Boot-time auto-connect: enqueue "bring the radio up (On) and connect to the
+    // saved network if one exists" onto the worker. Non-blocking. Does NOT change
+    // the registered listener — status flows to whoever is registered.
+    void autoconnect_saved(int timeout_ms = 15000);
 
     // A saved network exists (from a prior successful connect()).
     bool configured() const;
@@ -105,6 +124,16 @@ public:
     // synchronously if none are saved.
     void connect_saved(ConnectCb cb, int timeout_ms = 15000);
 
+    // Turn the radio on/off (the Wi-Fi enable switch). Non-blocking: the blocking
+    // bring-up (On) / esp_wifi_stop (Off) runs on the worker. Off drops any
+    // live/in-flight connection and moves to State::Off (no scanning/connecting
+    // until back On); On brings the stack up and returns to State::Disconnected.
+    // Notifies the Listener with the new state; a pending connect() completes
+    // (Failed) when turned Off. `done` (optional) fires on the worker thread once
+    // the op has been applied (always fires, even for a no-op toggle).
+    void set_enabled(bool on, std::function<void()> done = {});
+    bool enabled() const;  // false == State::Off (radio down)
+
     // Disconnect from the current AP (stays up / idle). Notifies the Listener.
     void disconnect();
 
@@ -117,6 +146,11 @@ public:
 private:
     friend Manager& manager();
     Manager();
+    void bring_up();              // idempotent stack+radio bring-up (worker only)
+    void apply_enabled(bool on);  // radio on/off state transition (worker only)
+    void do_autoconnect(int timeout_ms);  // connect to saved creds (worker only)
+    void worker_loop();           // drains the command queue, runs ops serially
+    static void worker_trampoline(void* arg);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

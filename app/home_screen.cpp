@@ -186,7 +186,21 @@ void HomeScreen::build_body() {
     });
 }
 
-void HomeScreen::onAppear() { refresh_wifi_status(); }
+void HomeScreen::onAppear() {
+    // Register (cheap, no bring-up) so the status line tracks live transitions
+    // while Home is visible, then show the current state.
+    std::weak_ptr<wifi::Listener> wl(std::shared_ptr<wifi::Listener>(
+        shared_from_this(), static_cast<wifi::Listener *>(this)));
+    wifi::manager().set_listener(wl);
+    refresh_wifi_status();
+}
+
+void HomeScreen::on_wifi_state(const wifi::Status & /*status*/) {
+    lv_async_call([self = shared_from_this(), this]() {
+        if (exited()) return;
+        refresh_wifi_status();
+    });
+}
 
 void HomeScreen::refresh_wifi_status() {
     if (!wifi_status_) return;
@@ -194,6 +208,16 @@ void HomeScreen::refresh_wifi_status() {
     if (st.state == wifi::State::Connected) {
         lv_label_set_text_fmt(wifi_status_, "Connected to %s", st.ssid.c_str());
         lv_obj_set_style_text_color(wifi_status_, lv_color_hex(0x2e7d32), 0);
+        return;
+    }
+    if (st.state == wifi::State::Connecting) {
+        lv_label_set_text_fmt(wifi_status_, "Connecting to %s...", st.ssid.c_str());
+        lv_obj_set_style_text_color(wifi_status_, lv_color_hex(0x90a4ae), 0);
+        return;
+    }
+    if (st.state == wifi::State::Off) {
+        lv_label_set_text(wifi_status_, "Wi-Fi off");
+        lv_obj_set_style_text_color(wifi_status_, lv_color_hex(0x90a4ae), 0);
         return;
     }
     std::string saved = wifi::manager().saved_ssid();

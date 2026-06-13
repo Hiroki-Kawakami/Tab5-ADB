@@ -7,7 +7,7 @@ detail for the `wifi::Manager` API.
 ## State model
 
 ```
-State::Off          start() not called
+State::Off          start() not called, or radio turned off (set_enabled(false))
 State::Disconnected up, idle (or after a drop / disconnect())
 State::Connecting   a connect() is in flight (associating / awaiting IP)
 State::Connected    associated AND has an IP (usable)
@@ -21,15 +21,31 @@ user-visible edges are `Connecting` (on `connect()`) → `Connected` (on IP) or
 `Status` is `{ state, ssid, ip, rssi }`. `ip` is valid only in `Connected`;
 `rssi` is the live AP RSSI in `Connected`, else 0.
 
-## Lifecycle
+## Lifecycle — the worker task
+
+The radio bring-up (esp_wifi over the SDIO C6 link) and on/off **block**, so the
+Manager owns **one worker task + a command queue** (created in its constructor;
+the singleton is leaked, so the task lives for the process). `start()`,
+`set_enabled()` and `autoconnect_saved()` are **non-blocking** — they enqueue work
+the worker runs **serially**, so two callers can't race `bring_up()` and the LVGL
+thread never blocks. (This replaced ad-hoc per-call tasks, which raced `bring_up()`
+when a screen toggle overlapped the boot auto-connect.)
 
 ```cpp
-wifi::manager().start(listener_weak);   // once at boot; idempotent (re-sets listener)
+wifi::manager().set_listener(listener_weak);  // cheap, synchronous: NO bring-up
+wifi::manager().start(listener_weak);         // set_listener + enqueue radio-On
+wifi::manager().autoconnect_saved();          // enqueue: bring up + connect saved
 ```
 
-`start()` brings up the stack + radio in STA mode and ensures NVS. It does **not**
-auto-connect. On device this is where `esp_netif_init` / `esp_event_loop` /
-`esp_wifi_init` / `esp_wifi_start` happen — the lifecycle the BSP no longer owns.
+`set_listener()` registers/replaces the persistent listener **synchronously,
+without** the bring-up — for a screen that wants live status but must stay
+responsive (the radio comes up via `start()` / `set_enabled(true)` /
+`autoconnect_saved()`). `start()` is `set_listener()` + an enqueued radio-On; on
+device the bring-up is where `esp_netif_init` / `esp_event_loop` / `esp_wifi_init`
+/ `esp_wifi_start` happen — the lifecycle the BSP no longer owns. It does **not**
+auto-connect. `autoconnect_saved()` is the boot path: enqueue "bring the radio up
+(On) and connect to the saved network if any" (no-op otherwise), **without**
+changing the registered listener (status flows to whoever is registered).
 
 ## Scan (one-shot)
 
@@ -57,6 +73,23 @@ Credentials are saved to NVS (namespace `wifi`) on the attempt, so `configured()
 **exactly once**; a later drop is a `Listener` event, not a second completion. A
 connect with no terminal event within `timeout_ms` completes `Timeout` (the
 Manager disconnects the backend).
+
+## Radio on/off (the enable switch)
+
+```cpp
+manager().set_enabled(false);            // radio off -> State::Off (no scan/connect)
+manager().set_enabled(true, on_applied); // radio On -> State::Disconnected; cb on worker
+bool on = manager().enabled();           // false == State::Off
+```
+
+`set_enabled()` is **non-blocking** (enqueues to the worker; On brings the stack up
+itself if needed, so no prior `start()` is required) and idempotent. The optional
+`done` callback fires on the **worker thread** once the op is applied (always, even
+for a no-op toggle) — the UI uses it to re-enable the switch + rescan. It notifies
+the `Listener` with the new state. Turning Off drops any live connection and
+completes a pending `connect()` with `Failed`. On device it is `esp_wifi_stop()` /
+`esp_wifi_start()` (the initialized stack is kept); the `esp_wifi_stop` disconnect
+event is not read as a drop-to-idle (state stays Off).
 
 ## Disconnect / forget
 
