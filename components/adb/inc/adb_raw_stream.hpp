@@ -61,6 +61,12 @@ public:
 
     bool is_open() const;
 
+    // Bytes still queued for the writer task (enqueued by write() but not yet
+    // handed to the transport). A backpressure signal callable from any thread:
+    // it lets a caller coalesce/drop low-value frames (e.g. a touch MOVE) when the
+    // link can't keep up, rather than letting them pile up behind the queue.
+    size_t pending_bytes() const;
+
     // Send A_CLSE and stop the writer task. Idempotent. Blocks until the writer
     // task has exited, except when called from the reader thread (e.g. inside
     // on_stream_close), where it only signals the stop.
@@ -87,7 +93,7 @@ private:
     // lifetime; each dispatch lock()s it, so dropping the owner detaches.
     std::weak_ptr<StreamListener> listener_;
 
-    std::mutex q_mtx_;  // guards queue_/queued_bytes_/closing_ + close bookkeeping
+    mutable std::mutex q_mtx_;  // guards queue_/queued_bytes_/closing_ + close bookkeeping
     std::deque<std::vector<uint8_t>> queue_;
     size_t queued_bytes_ = 0;
     bool closing_ = false;

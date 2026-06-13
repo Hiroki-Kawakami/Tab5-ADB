@@ -105,6 +105,11 @@ Error Stream::write(const uint8_t* data, size_t len) {
 
 bool Stream::is_open() const { return stream_ && stream_->is_open(); }
 
+size_t Stream::pending_bytes() const {
+    std::lock_guard<std::mutex> lk(q_mtx_);
+    return queued_bytes_;
+}
+
 void Stream::handle_data(const uint8_t* d, size_t n) {
     if (auto l = listener_.lock()) l->on_stream_data(this, d, n);
 }

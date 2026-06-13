@@ -282,6 +282,11 @@ public:
     // display coords and assembles the multi-pointer MotionEvent itself. Like
     // inject_key: fire-and-forget, non-blocking, no response, callable from any
     // thread (e.g. the DisplayManager touch task). Returns StreamClosed if down.
+    // A kTouchMove is COALESCED (silently dropped, returning Ok) when the writer
+    // queue is already backed up — a MOVE is a redundant sample, so under a slow
+    // link this keeps the backlog short and lets the kTouchUp through promptly
+    // (otherwise a swipe's queued MOVEs delay the UP and read as a long-press).
+    // kTouchDown / kTouchUp are never dropped.
     adb::Error inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
                             uint16_t y);
 

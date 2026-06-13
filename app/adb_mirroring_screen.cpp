@@ -123,6 +123,12 @@ void ADBMirroringScreen::start_mirror_ui() {
     apply_overlay(cur_rot_, /*first=*/true);  // cur_rot_ defaults to 0 (portrait)
     display_manager.set_overlay_visible(true);
 
+    // Cap the touch-passthrough MOVE rate to suit the link: USB carries every
+    // ~60 Hz sample fine, but the higher-latency, bandwidth-limited TCP/Wi-Fi link
+    // chokes on it, so throttle to ~30 Hz there (the agent_link layer additionally
+    // coalesces under live backpressure). Set before the touch listener fires.
+    move_min_us_ = app::connection_is_tcp() ? 33000 : 0;
+
     // Observe raw touch (pushed from the DisplayManager touch task): a swipe out of
     // the bottom-left corner reveals a hidden strip. on_touch fires off the LVGL
     // thread, but the swipe logic only flips DM flags (no LVGL access).
@@ -585,8 +591,16 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
             p.x = x; p.y = y;
             if (p.kind == PtKind::Pass) {
                 if (po) {
-                    if (link) link->inject_touch(agent_link::kTouchMove,
-                                                 static_cast<uint8_t>(id), x, y);
+                    // Rate-limit MOVE injection to move_min_us_ (0 = every sample).
+                    // The (x,y) above is already saved, so a skipped MOVE is carried
+                    // by the next one that passes the gate (or the UP); coordinates
+                    // are never lost. DOWN/UP are unconditional (above / below).
+                    int64_t now = esp_timer_get_time();
+                    if (now - p.last_move_us >= move_min_us_) {
+                        p.last_move_us = now;
+                        if (link) link->inject_touch(agent_link::kTouchMove,
+                                                     static_cast<uint8_t>(id), x, y);
+                    }
                 } else {
                     // Touch-control switched off mid-gesture: release this pointer.
                     if (link) link->inject_touch(agent_link::kTouchUp,

@@ -8,6 +8,13 @@ namespace agent_link {
 
 namespace {
 constexpr const char* kSocket = "localabstract:tab5adb-agent";
+
+// inject_touch coalesces MOVEs once more than this many bytes are still queued on
+// the writer (i.e. the link can't drain them as fast as the touch task samples).
+// A touch INPUT frame is 16 bytes (8 header + 8 payload), so this allows ~a couple
+// of frames of pipelining on a healthy link while collapsing the backlog on a slow
+// one — keeping the gap before the (never-dropped) UP short. DOWN/UP/keys ignore it.
+constexpr size_t kInputBacklogCoalesce = 48;
 }  // namespace
 
 Link::Link(std::weak_ptr<LinkLifecycleListener> listener, const HelloConfig& cfg)
@@ -197,6 +204,18 @@ adb::Error Link::tap_key(uint32_t keycode) {
 adb::Error Link::inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
                               uint16_t y) {
     if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+
+    // Coalesce MOVEs under backpressure: a touch MOVE is a redundant sample (the
+    // next one carries a fresher position), so when the writer queue is already
+    // backed up — a slow link, e.g. ADB-over-TCP — drop this MOVE rather than let
+    // it pile up. That keeps the queue short so the DOWN/UP transitions (which
+    // bypass this gate) reach the source promptly; otherwise a long backlog of
+    // MOVEs delays the UP and the agent misreads a swipe as a long-press. DOWN/UP
+    // are never dropped — they are gesture state, not samples.
+    if (action == kTouchMove &&
+        stream_->pending_bytes() > kInputBacklogCoalesce) {
+        return adb::Error::Ok;  // coalesced (dropped); reported as sent
+    }
 
     // INPUT payload (§4.7): input_type, then the INPUT_TOUCH args. Fire-and-forget
     // (TYPE=INPUT) — no req_id / no response. Coordinates are Tab5 panel coords.

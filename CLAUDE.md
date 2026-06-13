@@ -908,7 +908,15 @@ in `agent_link_protocol.hpp`) and 0x01=TOUCH (the mirror's touch passthrough —
 per-pointer DOWN/MOVE/UP in **Tab5 panel coords**, `pointer_id` = the source's
 touch track id; the agent inverts the mirror geometry to the source's logical
 display coords and assembles the multi-pointer `MotionEvent` itself, scrcpy
-`PointersState`-style); 0x02=TEXT/keyboard is reserved. The agent
+`PointersState`-style). **MOVE coalescing under
+backpressure:** `inject_touch` drops a `kTouchMove` (returns Ok without enqueuing)
+when the underlying `adb::Stream::pending_bytes()` exceeds `kInputBacklogCoalesce`
+(48 B ≈ a couple of 16 B input frames) — a MOVE is a redundant sample the next one
+supersedes, so on a slow link (ADB-over-TCP) this stops the writer queue piling up
+and keeps the **never-dropped `kTouchDown`/`kTouchUp`** prompt; without it a swipe's
+backlog of MOVEs delays the UP and the source reads a swipe as a long-press.
+(`Stream::pending_bytes()` is the generic backpressure accessor added for this.)
+0x02=TEXT/keyboard is reserved. The agent
 injects via the hidden `InputManager.injectInputEvent` (scrcpy technique, shell
 uid holds INJECT_EVENTS) in `android-agent/.../Input.java` (a minimal port of
 scrcpy's `Workarounds.getSystemContext` → `getSystemService(INPUT_SERVICE)`). The same
@@ -1737,7 +1745,15 @@ diffs each touch-task snapshot into per-pointer DOWN/MOVE/UP, keying off the BSP
 `bsp_touch_point_t.id` (the controller track id) so multi-touch needs no
 id synthesis; each new pointer is classified once — **Pass** (injected), **Reveal**
 (a corner-swipe candidate), or **Ignore** (over a visible strip / passthrough off) —
-and keeps that role until it lifts. `onExit`/dtor + turning OpMode off call
+and keeps that role until it lifts. **MOVE send rate is throttled per transport**
+(`move_min_us_`, set in `start_mirror_ui` from `app::connection_is_tcp()`): 0 over
+USB (inject every ~60 Hz sample) vs ~30 Hz (33 ms) over the slower TCP/Wi-Fi link;
+the per-pointer `last_move_us` gates it. The latest `(x,y)` is saved every sample
+regardless, so a skipped MOVE is carried by the next one (or the UP) — no lost
+coordinates. This is the app-side baseline cap; `agent_link`'s `inject_touch`
+additionally coalesces MOVEs under live writer backpressure (see the agent_link
+section), and DOWN/UP are always sent — together they stop a swipe from being
+misread as a long-press when the link can't keep up. `onExit`/dtor + turning OpMode off call
 `release_all_pointers()` to UP any still-down Pass pointer (no stuck finger on the
 source). No timeout auto-hide: the in-strip **Hide** button hides it, and a **swipe
 out of the anchor corner** (the **L-shaped** `in_corner` hot zone = two narrow
