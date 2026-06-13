@@ -57,6 +57,7 @@ g++ -std=c++17 -I"$comp/inc" -I"$cc/include" \
     "$comp/src/adb_protocol.cpp" "$comp/src/adb_crypto.cpp" \
     "$comp/src/adb_keystore.cpp" "$comp/src/adb_connection.cpp" \
     "$comp/src/adb_stream.cpp" "$comp/src/transport_libusb.cpp" \
+    "$comp/src/transport_tcp.cpp" \
     $objs \
     $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson) \
     -lpthread -o "$bin"

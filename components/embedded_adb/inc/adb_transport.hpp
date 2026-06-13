@@ -7,8 +7,11 @@
 // in the component CMakeLists.txt.
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <string>
 
+#include "adb_crypto.hpp"   // RsaKey (start_tls)
 #include "adb_protocol.hpp"
 
 namespace adb {
@@ -35,11 +38,24 @@ public:
 
     // Release the interface / handle. Idempotent.
     virtual void close() = 0;
+
+    // Upgrade the stream to TLS for the ADB STARTTLS handshake (Android 11+
+    // wireless debugging): present a self-signed cert derived from `key` and run a
+    // TLS 1.3 client handshake. After success, write_packet/read_packet run over
+    // TLS. Returns false if the transport can't do TLS (USB) or the handshake
+    // fails. Default: unsupported.
+    virtual bool start_tls(const RsaKey& key) { return false; }
 };
 
 // Find and open the first connected Android device exposing an ADB interface.
 // Returns nullptr if none is found or the open fails. Per-target implementation.
 std::unique_ptr<Transport> open_usb_transport();
+
+// Open an ADB-over-TCP connection to host:port (a device already listening via
+// `adb tcpip` / wireless debugging). Returns nullptr on resolve/connect failure.
+// Same implementation on both targets (BSD sockets / lwip), so it is not part of
+// the USB device/simulator split.
+std::unique_ptr<Transport> open_tcp_transport(const std::string& host, uint16_t port);
 
 // Optional hook to reset the USB host port, so a device already attached when the
 // host transport opens re-attaches with a clean connect edge (some host

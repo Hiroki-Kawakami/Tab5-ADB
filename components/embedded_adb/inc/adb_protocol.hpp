@@ -31,6 +31,10 @@ enum AuthType : uint32_t {
 constexpr uint32_t A_VERSION_MIN = 0x01000000;  // baseline
 constexpr uint32_t A_VERSION     = 0x01000001;  // skip-checksum capable
 
+// Version carried in A_STLS.arg0 (adb.h) — the ADB STARTTLS handshake used by
+// Android 11+ wireless debugging.
+constexpr uint32_t A_STLS_VERSION = 0x01000000;
+
 constexpr size_t ADB_TOKEN_SIZE = 20;    // TOKEN_SIZE (adb.h)
 constexpr size_t MAX_PAYLOAD_V1 = 4096;  // pre-negotiation cap (adb.h)
 

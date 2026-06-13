@@ -570,8 +570,10 @@ Layering (one concern per pair, all portable C++ **except the transport**):
 - `adb_keystore` — persists the RSA private key via the **NVS C API** (per the NVS
   rule above; JSON-backed in the simulator). We **never read the host's
   `~/.android/adbkey`** — always generate/store our own key in NVS.
-- `transport` — USB bulk transfer to the ADB interface (USB class `0xFF` /
-  subclass `0x42` / protocol `0x01`). This is the **only device/simulator split**:
+- `transport` — the byte pipe under the protocol engine. Two kinds: **USB** (the
+  device/simulator split) and **TCP** (one impl, both targets). USB bulk transfer
+  to the ADB interface (USB class `0xFF` /
+  subclass `0x42` / protocol `0x01`) is the **only device/simulator split**:
   `transport_usbhost.cpp` (esp-idf `usb_host`) vs `transport_libusb.cpp` (libusb),
   selected by the `ESP_PLATFORM` branch in the component `CMakeLists.txt` — same
   pattern as `m5stack-bsp`. It lives inside `embedded_adb`, not the BSP: the
@@ -654,6 +656,41 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   silently, the stack stayed installed, and the next Connect's `usb_host_install`
   returned `ESP_ERR_INVALID_STATE`. (Device-only path — the sim's libusb transport
   can't reproduce it; needs a real-HW flash check.)
+- `transport_tcp.cpp` — **ADB-over-TCP** (the "Wireless (TCP/IP)" path). ADB's wire
+  protocol is identical over TCP — the same 24-byte header + payload, streamed on a
+  socket — so this is the **one transport that is the SAME on both targets** (lwip on
+  device, the host's BSD sockets on the simulator): it is in the component's common
+  sources, **not** the `ESP_PLATFORM` split, and needs no `idf_compat` shim (sockets
+  are a standard contract, not an Espressif API). `open_tcp_transport(host, port)`
+  does a non-blocking connect with a 5 s timeout (a wrong target fails fast), sets
+  `TCP_NODELAY` (ADB is request/response-heavy) and `SO_RCVTIMEO` 1 s (so the read
+  loop wakes to check `stop()`); `read_packet` loops `recv` until a whole packet is
+  read (a stream, unlike USB bulk), reporting `Timeout` only at a packet boundary.
+  **Two flavours, both verified on a real Tab5-vs-Android-phone path (in the simulator over
+  the host network):** (1) **classic `adb tcpip 5555`** — same RSA AUTH as USB, works
+  directly; (2) **Android 11+ wireless debugging** — the device replies **`A_STLS`**
+  (STARTTLS) to our CNXN, and the connection upgrades to **TLS 1.3** before the
+  banner exchange. `Transport::start_tls(const RsaKey&)` (a base no-op; only the TCP
+  transport implements it) presents a **self-signed X.509 cert built from the same
+  adb RSA key** (`RsaKey::self_signed_cert_der`, mbedTLS, fixed wide validity since
+  the device has no RTC) and runs a mutual-TLS handshake (authmode NONE — we don't
+  verify the device's ephemeral cert; adbd authenticates *us* by the client cert).
+  After the handshake `write_packet`/`read_packet` route through `mbedtls_ssl_*` with
+  the same boundary/Timeout semantics. `AdbConnection::on_stls` sends the `A_STLS`
+  reply on the plaintext socket, then calls `start_tls`; the device then sends CNXN
+  over TLS → Online, with **no RSA AUTH challenge** (auth is the cert). **A
+  USB-authorized key is accepted for wireless-debugging TLS with no separate
+  pairing** (verified). The TCP transport advertises the full 256 KB CNXN maxdata on
+  both targets (no per-payload DMA alloc like usb_host). **Both builds compile.**
+  ESP-IDF's mbedTLS has x509 cert *writing* on by default but **TLS 1.3 off**, so
+  `esp32p4/sdkconfig.defaults` sets `CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y` (the transport
+  requests min=max=TLS1.3; +~64 KB binary). One device-mbedTLS gotcha: the deprecated
+  mpi `mbedtls_x509write_crt_set_serial` is removed there — use
+  `mbedtls_x509write_crt_set_serial_raw` (works on both). The on-device TCP/TLS path
+  still needs a real-HW flash-and-check (sim-verified against a real Android device over the host
+  network). Host test: `TAB5ADB_TCP_TARGET=host:port TEST=test_connect_tcp nix
+  develop -c components/embedded_adb/test/run.sh` (env-supplied target → no IP in git;
+  classic and wireless ports both pass).
 - `adb_connection` / `adb_stream` — CNXN handshake + AUTH state machine, and
   `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing (`open_stream()` + `run_service()`
   for one-shot commands, classic per-OKAY flow control). The packet read loop is
@@ -1112,15 +1149,21 @@ on `onAppear` and refreshing the line both then (`refresh_wifi_status()`) and li
 on `on_wifi_state` (so the boot auto-connect completing turns the line green
 without a tap) — Wi-Fi setup is opened from **Settings → Wi-Fi** (the
 `WiFiScreen` scan/connect UI; see the `wifi` component section), not the
-HomeScreen; the phone-IP
-`Connect` row below stays `LV_STATE_DISABLED` (ADB-over-TCP lands later, on top of
-this Wi-Fi link). Under the input row, `rebuild_tcp_history()` renders the
-**recent ADB-over-TCP targets** from `app::tcp_history` (NVS-persisted
+HomeScreen. The phone-IP
+`Connect` row is wired: an `lv_textarea` (`host` or `host:port`, default port 5555)
++ a Connect button, with an on-screen `lv_keyboard` raised on focus (a child of
+`root_`, `IGNORE_LAYOUT` + `ALIGN_BOTTOM_MID`, WiFiScreen-style; its OK confirms,
+torn down via `lv_async_call` so it isn't deleted mid-event). `start_connect_tcp()`
+parses host:port (`parse_host_port`), then runs the **same two-stage connect flow**
+as USB (`proceed_after_connect` — adb link → eager agent bring-up → push
+`ADBDeviceScreen`) via `app::adb_connect_tcp_async()`; a successful target is saved
+with `app::tcp_history::add()`. Under the input row, `rebuild_tcp_history()` renders
+the **recent ADB-over-TCP targets** from `app::tcp_history` (NVS-persisted
 `host:port` list, most-recent-first, `kCap` entries, newline-separated under
 `tab5adb/tcp_history`): a "Recent" heading + one tappable, separator-divided row
 per target (lucide history glyph + `host:port`), or a "No recent connections"
-placeholder when empty. Tapping a row calls `select_tcp_target()` (fills the
-address field today; wires the connect flow once `connect_tcp` lands). Rebuilt on
+placeholder when empty. Tapping a row (`select_tcp_target()`) fills the address
+field and connects to that target. Rebuilt on
 `build` and `onAppear` (a later connect may have added an entry). Seed the list
 for simverify by writing `tab5adb/tcp_history` into the gitignored `nvs_data.json`
 (newline-joined `host:port`, hex+trailing-NUL — the sim NVS stores values as hex);

@@ -48,6 +48,12 @@ public:
     // shared_ptr to detach — no callback fires after the weak ref expires).
     static std::shared_ptr<Client> connect_usb(std::weak_ptr<ClientListener> listener);
 
+    // Same as connect_usb, but over ADB-over-TCP to host:port (a device already
+    // listening via `adb tcpip` / wireless debugging). The RSA identity is the same
+    // NVS key, so a device already authorized over USB connects with no prompt.
+    static std::shared_ptr<Client> connect_tcp(const std::string& host, uint16_t port,
+                                               std::weak_ptr<ClientListener> listener);
+
     ~Client();
 
     Client(const Client&) = delete;
@@ -96,13 +102,22 @@ public:
     void close();
 
 private:
-    explicit Client(std::weak_ptr<ClientListener> listener);
+    // The transport to open is a thunk (USB vs TCP), resolved on the reader thread
+    // so an enumeration/connect can be aborted cheaply by a concurrent close().
+    using TransportFactory = std::function<std::unique_ptr<Transport>()>;
+    Client(std::weak_ptr<ClientListener> listener, TransportFactory open_transport,
+           uint32_t max_payload);
+    static std::shared_ptr<Client> launch(std::weak_ptr<ClientListener> listener,
+                                          TransportFactory open_transport,
+                                          uint32_t max_payload);
     static void reader_trampoline(void* arg);
     void run();                       // the reader task body
     void set_state(ConnectionState s);  // dedupe + notify the listener
 
     // Held weakly; lock()ed before each on_state dispatch (see connect_usb).
     std::weak_ptr<ClientListener> listener_;
+    TransportFactory open_transport_;       // opens the USB or TCP transport
+    uint32_t advertised_max_payload_;       // our CNXN.arg1 (transport-dependent)
     std::unique_ptr<AdbConnection> conn_;  // created inside run()
     std::atomic<ConnectionState> state_{ConnectionState::Offline};
     std::string banner_;  // set on the reader thread before Online is notified

@@ -32,6 +32,10 @@ std::shared_ptr<adb::Client> g_client;
 // is fine — apply_usb_host_power() only flips an I2C load switch.
 bool g_adb_online = false;
 
+// Whether the live (or most recent) connection is over USB vs TCP. A TCP link must
+// not drive the USB host VBUS — there is no phone on the host port to power.
+bool g_connection_is_usb = true;
+
 // Set by adb_disconnect() (the Disconnect button) so the reader-thread Closed
 // handler can tell a user-initiated disconnect from an unexpected one (cable
 // pulled, device rebooted). Only the unexpected case shows the "Disconnected"
@@ -40,11 +44,18 @@ bool g_user_disconnect = false;
 
 class Holder : public adb::ClientListener {
 public:
-    void start(std::weak_ptr<adb::ClientListener> self,
-               std::function<void(bool)> on_result) {
-        on_result_ = std::move(on_result);
-        reported_ = false;
+    void start_usb(std::weak_ptr<adb::ClientListener> self,
+                   std::function<void(bool)> on_result) {
+        begin(std::move(on_result));
+        g_connection_is_usb = true;
         g_client = adb::Client::connect_usb(std::move(self));
+    }
+
+    void start_tcp(std::weak_ptr<adb::ClientListener> self, const std::string& host,
+                   uint16_t port, std::function<void(bool)> on_result) {
+        begin(std::move(on_result));
+        g_connection_is_usb = false;
+        g_client = adb::Client::connect_tcp(host, port, std::move(self));
     }
 
     void on_state(adb::Client* /*c*/, adb::ConnectionState s) override {
@@ -77,6 +88,11 @@ public:
     }
 
 private:
+    void begin(std::function<void(bool)> on_result) {
+        on_result_ = std::move(on_result);
+        reported_ = false;
+    }
+
     void report(bool ok) {
         if (reported_) return;  // deliver the result once (Online then Closed, etc.)
         reported_ = true;
@@ -93,11 +109,18 @@ std::shared_ptr<Holder> g_holder = std::make_shared<Holder>();
 }  // namespace
 
 void adb_connect_async(std::function<void(bool)> on_result) {
-    g_holder->start(g_holder, std::move(on_result));
+    g_holder->start_usb(g_holder, std::move(on_result));
+}
+
+void adb_connect_tcp_async(const std::string& host, uint16_t port,
+                           std::function<void(bool)> on_result) {
+    g_holder->start_tcp(g_holder, host, port, std::move(on_result));
 }
 
 void apply_usb_host_power() {
-    bool on = usb_host_power() == UsbHostPower::Always || g_adb_online;
+    // Only a live USB link keeps VBUS on; a TCP link uses no host-port power.
+    bool on = usb_host_power() == UsbHostPower::Always ||
+              (g_adb_online && g_connection_is_usb);
     bsp_usb_host_set_power(on);
 }
 

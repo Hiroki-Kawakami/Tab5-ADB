@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 // Panel geometry (M5Stack Tab5 / ILI9881C MIPI-DSI), native portrait.
 constexpr int PANEL_W = 720;
@@ -21,6 +23,13 @@ namespace app {
 // Connect to the first USB device in the background. `on_result` runs on the LVGL
 // thread: true once Online, false on failure. (Single-device: one connection.)
 void adb_connect_async(std::function<void(bool ok)> on_result);
+
+// Connect over ADB-over-TCP to host:port (the device must be listening — `adb
+// tcpip` / wireless debugging). Same single-device holder and `on_result`
+// contract as adb_connect_async; the USB VBUS policy is left untouched for a TCP
+// link.
+void adb_connect_tcp_async(const std::string& host, uint16_t port,
+                           std::function<void(bool ok)> on_result);
 
 // The live Client, valid after a successful connect (else nullptr). Use it for
 // everything connection-scoped, e.g. adb_client()->banner() / adb_client()->exec().

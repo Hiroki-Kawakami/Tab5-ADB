@@ -44,6 +44,12 @@ public:
     bool android_public_key(std::string& out,
                             const char* comment = "tab5-adb@embedded") const;
 
+    // Self-signed X.509 certificate (DER) wrapping this key, for the ADB STARTTLS
+    // handshake (Android 11+ wireless debugging). adbd matches the client cert by
+    // its public-key fingerprint, so the subject and validity window are fixed
+    // (the device has no RTC to date a cert).
+    bool self_signed_cert_der(std::vector<uint8_t>& out) const;
+
 private:
     struct Impl;
     explicit RsaKey(Impl* impl) : impl_(impl) {}

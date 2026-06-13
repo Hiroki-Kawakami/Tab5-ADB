@@ -6,6 +6,7 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/rsa.h>
+#include <mbedtls/x509_crt.h>
 
 #include <cstring>
 
@@ -169,6 +170,45 @@ bool RsaKey::android_public_key(std::string& out, const char* comment) const {
     out.append(" ");
     out.append(comment);
     return true;
+}
+
+bool RsaKey::self_signed_cert_der(std::vector<uint8_t>& out) const {
+    constexpr char kName[] = "CN=Tab5 ADB,O=Tab5 ADB,C=US";
+    mbedtls_x509write_cert crt;
+    mbedtls_x509write_crt_init(&crt);
+
+    bool ok = false;
+    do {
+        // Self-signed: subject key == issuer key == our key.
+        mbedtls_x509write_crt_set_subject_key(&crt, &impl_->pk);
+        mbedtls_x509write_crt_set_issuer_key(&crt, &impl_->pk);
+        if (mbedtls_x509write_crt_set_subject_name(&crt, kName) != 0) break;
+        if (mbedtls_x509write_crt_set_issuer_name(&crt, kName) != 0) break;
+        mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
+        mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
+        // serial_raw (the non-deprecated form; the mpi set_serial is removed in the
+        // ESP-IDF mbedTLS build).
+        uint8_t serial[] = {0x01};
+        if (mbedtls_x509write_crt_set_serial_raw(&crt, serial, sizeof(serial)) != 0)
+            break;
+        // Fixed wide validity — the device has no RTC, and adbd matches the cert by
+        // its public-key fingerprint, not its dates.
+        if (mbedtls_x509write_crt_set_validity(&crt, "20200101000000",
+                                               "20400101000000") != 0) {
+            break;
+        }
+
+        // crt_der writes to the END of the buffer and returns the length.
+        uint8_t buf[2048];
+        int len = mbedtls_x509write_crt_der(&crt, buf, sizeof(buf),
+                                            mbedtls_ctr_drbg_random, &impl_->drbg);
+        if (len < 0) break;
+        out.assign(buf + sizeof(buf) - len, buf + sizeof(buf));
+        ok = true;
+    } while (false);
+
+    mbedtls_x509write_crt_free(&crt);
+    return ok;
 }
 
 }  // namespace adb

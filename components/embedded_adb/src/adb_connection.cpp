@@ -98,10 +98,7 @@ void AdbConnection::handle_packet(Packet& p) {
     switch (p.header.command) {
         case A_CNXN: on_connect(p); break;
         case A_AUTH: on_auth(p); break;
-        case A_STLS:
-            ESP_LOGW(TAG, "device requested TLS (A_STLS) — not supported yet");
-            running_ = false;
-            break;
+        case A_STLS: on_stls(p); break;
         case A_OPEN:
         case A_OKAY:
         case A_WRTE:
@@ -112,6 +109,22 @@ void AdbConnection::handle_packet(Packet& p) {
             ESP_LOGW(TAG, "unknown command 0x%08" PRIx32, p.header.command);
             break;
     }
+}
+
+void AdbConnection::on_stls(Packet& /*p*/) {
+    // Android 11+ wireless debugging: the device asks us to start TLS before any
+    // banner exchange. Reply A_STLS over the plaintext socket, then upgrade the
+    // transport to TLS. After the handshake the device sends CNXN over TLS — there
+    // is no RSA AUTH challenge in TLS mode (auth is the client certificate, derived
+    // from the same key, so a paired/authorized device accepts it with no prompt).
+    set_state(ConnectionState::Authorizing);
+    send(Packet::make(A_STLS, A_STLS_VERSION, 0, std::vector<uint8_t>()));
+    if (!transport_->start_tls(key_)) {
+        ESP_LOGE(TAG, "TLS handshake failed");
+        running_ = false;
+        return;
+    }
+    ESP_LOGI(TAG, "TLS established; awaiting CNXN");
 }
 
 void AdbConnection::on_auth(Packet& p) {

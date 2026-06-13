@@ -85,6 +85,7 @@ private:
     void send_connect();
     void handle_packet(Packet& p);
     void on_auth(Packet& p);
+    void on_stls(Packet& p);
     void on_connect(Packet& p);
     void on_stream_packet(Packet& p);
 

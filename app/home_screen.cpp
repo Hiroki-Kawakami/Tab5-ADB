@@ -135,14 +135,23 @@ void HomeScreen::build_body() {
     lv_obj_set_style_text_font(tcp_addr_, &lv_font_montserrat_20, 0);
     lv_obj_set_height(tcp_addr_, 60);
     lv_obj_set_flex_grow(tcp_addr_, 1);
-    lv_obj_add_state(tcp_addr_, LV_STATE_DISABLED);
+    // Focusing the field raises the on-screen keyboard; lv_keyboard drops
+    // CLICK_FOCUSABLE, so a re-tap of the already-focused field sends no FOCUSED —
+    // hook CLICKED too (the logcat-screen gotcha).
+    lv_obj_add_event_fn(tcp_addr_, LV_EVENT_FOCUSED,
+                        [this](lv_event_t *) { show_tcp_keyboard(); });
+    lv_obj_add_event_fn(tcp_addr_, LV_EVENT_CLICKED,
+                        [this](lv_event_t *) { show_tcp_keyboard(); });
+
     lv_obj_t *tcp_btn = lv_button_create(input_row);
     lv_obj_set_size(tcp_btn, 160, 60);
     lv_obj_t *tcp_btn_label = lv_label_create(tcp_btn);
     lv_label_set_text(tcp_btn_label, "Connect");
     lv_obj_set_style_text_font(tcp_btn_label, &lv_font_montserrat_20, 0);
     lv_obj_center(tcp_btn_label);
-    lv_obj_add_state(tcp_btn, LV_STATE_DISABLED);
+    lv_obj_add_event_fn(tcp_btn, LV_EVENT_CLICKED, [this](lv_event_t *) {
+        start_connect_tcp(lv_textarea_get_text(tcp_addr_));
+    });
 
     // Recent targets. Filled from NVS (tab5adb/tcp_history); a tap selects an
     // entry. Shows a "No recent connections" placeholder while empty.
@@ -298,36 +307,123 @@ void HomeScreen::rebuild_tcp_history() {
 
 void HomeScreen::select_tcp_target(const std::string &target) {
     if (tcp_addr_) lv_textarea_set_text(tcp_addr_, target.c_str());
-    // TODO(tcp-transport): once adb_connect_tcp_async exists, parse host:port and
-    // start the connect flow here (open_progress + adb_connect_tcp_async).
+    start_connect_tcp(target);
+}
+
+void HomeScreen::show_tcp_keyboard() {
+    if (tcp_keyboard_) return;  // already up
+    // Pinned full-width to the screen bottom (a child of root_, taken out of the
+    // flex layout), WiFiScreen-style. Its OK key triggers the connect.
+    constexpr int kKeyboardH = 420;
+    tcp_keyboard_ = lv_keyboard_create(root_);
+    lv_obj_add_flag(tcp_keyboard_, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_size(tcp_keyboard_, PANEL_W, kKeyboardH);
+    lv_obj_align(tcp_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_textarea(tcp_keyboard_, tcp_addr_);
+    // OK confirms = connect to the typed address. Deferred via lv_async_call so the
+    // keyboard is torn down OUTSIDE its own in-flight event (tearing an lv_keyboard
+    // down mid-event hangs LVGL).
+    lv_obj_add_event_fn(tcp_keyboard_, LV_EVENT_READY, [this](lv_event_t *) {
+        std::string addr = lv_textarea_get_text(tcp_addr_);
+        lv_async_call([self = shared_from_this(), this, addr]() {
+            if (exited()) return;
+            start_connect_tcp(addr);
+        });
+    });
+    // Tapping the X/close key (CANCEL) just hides the keyboard.
+    lv_obj_add_event_fn(tcp_keyboard_, LV_EVENT_CANCEL, [this](lv_event_t *) {
+        lv_async_call([self = shared_from_this(), this]() {
+            if (exited()) return;
+            hide_tcp_keyboard();
+        });
+    });
+}
+
+void HomeScreen::hide_tcp_keyboard() {
+    if (tcp_keyboard_) {
+        lv_obj_delete(tcp_keyboard_);
+        tcp_keyboard_ = nullptr;
+    }
+}
+
+// Split "host" or "host:port" into host + port (default 5555 when omitted). The
+// last ':' is the separator (an IPv4/hostname has none in the host part). Returns
+// false on an empty host or an out-of-range / non-numeric port.
+static bool parse_host_port(const std::string &addr, std::string &host, uint16_t &port) {
+    std::string s = addr;
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    if (s.empty()) return false;
+
+    size_t colon = s.rfind(':');
+    if (colon == std::string::npos) {
+        host = s;
+        port = 5555;
+        return true;
+    }
+    host = s.substr(0, colon);
+    std::string p = s.substr(colon + 1);
+    if (host.empty() || p.empty()) return false;
+    long v = 0;
+    for (char c : p) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+        if (v > 65535) return false;
+    }
+    if (v == 0) return false;
+    port = static_cast<uint16_t>(v);
+    return true;
 }
 
 void HomeScreen::start_connect() {
     // A modal scrim covers the cards for the whole connect flow, so the user
     // can't navigate away (or kick off TCP/IP) mid-connect.
     open_progress("Connecting...\nAllow USB debugging on the phone");
-
-    // Two stages, both completing on the LVGL thread: the adb link, then the eager
-    // tab5adb-agent bring-up that decides Normal vs Limited mode (AgentClient
-    // records the mode). The device screen is pushed once the mode is known —
-    // success or failure both proceed; Limited just hides the agent-backed
-    // features — so every screen can read a settled mode at build time.
     app::adb_connect_async([this](bool ok) {
-        if (!ok) {
-            close_progress();
-            app::modal_message(root_, "Connection failed",
-                               "Could not reach the device. Check the USB cable and "
-                               "that USB debugging is allowed, then tap Connect again.");
-            return;
-        }
-        // In Limited mode ensure_connected short-circuits (no agent is started),
-        // so don't show the misleading "starting agent" status for that path.
-        if (app::android_mode() != app::AndroidMode::Limited)
-            set_progress("Starting agent on the phone...");
-        app::agent_client().ensure_connected([this](bool /*agent_ok*/) {
-            close_progress();
-            screen_manager.push(std::make_shared<ADBDeviceScreen>());
-        });
+        proceed_after_connect(ok,
+                              "Could not reach the device. Check the USB cable and "
+                              "that USB debugging is allowed, then tap Connect again.");
+    });
+}
+
+void HomeScreen::start_connect_tcp(const std::string &addr) {
+    std::string host;
+    uint16_t port = 0;
+    if (!parse_host_port(addr, host, port)) {
+        app::modal_message(root_, "Invalid address",
+                           "Enter the device address as host or host:port "
+                           "(e.g. 192.168.1.100:5555).");
+        return;
+    }
+    hide_tcp_keyboard();
+    std::string target = host + ":" + std::to_string(port);
+    open_progress((std::string("Connecting to ") + target + "...").c_str());
+    app::adb_connect_tcp_async(host, port, [this, target](bool ok) {
+        if (ok) app::tcp_history::add(target);  // remember a target that worked
+        proceed_after_connect(ok,
+                              "Could not reach the device. Check the address and that "
+                              "wireless debugging is on, then try again.");
+    });
+}
+
+void HomeScreen::proceed_after_connect(bool ok, const char *fail_msg) {
+    // Two stages, both completing on the LVGL thread: the adb link (done — `ok`),
+    // then the eager tab5adb-agent bring-up that decides Normal vs Limited mode
+    // (AgentClient records the mode). The device screen is pushed once the mode is
+    // known — success or failure both proceed; Limited just hides the agent-backed
+    // features — so every screen can read a settled mode at build time.
+    if (!ok) {
+        close_progress();
+        app::modal_message(root_, "Connection failed", fail_msg);
+        return;
+    }
+    // In Limited mode ensure_connected short-circuits (no agent is started), so
+    // don't show the misleading "starting agent" status for that path.
+    if (app::android_mode() != app::AndroidMode::Limited)
+        set_progress("Starting agent on the phone...");
+    app::agent_client().ensure_connected([this](bool /*agent_ok*/) {
+        close_progress();
+        screen_manager.push(std::make_shared<ADBDeviceScreen>());
     });
 }
 

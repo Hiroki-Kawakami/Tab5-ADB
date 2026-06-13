@@ -22,19 +22,26 @@ private:
     lv_obj_t *progress_label_ = nullptr;  // its message line
     lv_obj_t *wifi_status_ = nullptr;     // Wireless card status line
     lv_obj_t *tcp_addr_ = nullptr;        // Wireless card target input (host:port)
-    lv_obj_t *tcp_history_box_ = nullptr; // recent-targets list; hidden when empty
+    lv_obj_t *tcp_history_box_ = nullptr; // recent-targets list; placeholder when empty
+    lv_obj_t *tcp_keyboard_ = nullptr;    // on-screen keyboard for the address; null when hidden
 
     void build_hero();
     void build_body();
-    void start_connect();
+    void start_connect();                 // USB
+    void start_connect_tcp(const std::string &addr);  // ADB-over-TCP to host:port
+    // Shared post-adb continuation (agent bring-up -> push device screen, or error).
+    void proceed_after_connect(bool ok, const char *fail_msg);
     void refresh_wifi_status();
 
     // (Re)populate the recent ADB-over-TCP targets list from NVS. Called on build
-    // and onAppear (a future connect may have added an entry). Hidden when empty.
+    // and onAppear (a connect may have added an entry). Shows a placeholder when
+    // empty.
     void rebuild_tcp_history();
-    // Pick a recent target: fill the address field with it. The actual connect is
-    // wired once the TCP transport lands.
+    // Pick a recent target: fill the address field and connect to it.
     void select_tcp_target(const std::string &target);
+    // The address textarea's on-screen keyboard (pinned to the screen bottom).
+    void show_tcp_keyboard();
+    void hide_tcp_keyboard();
 
     // Connect-progress modal (spinner + message). The scrim blocks taps to the
     // cards behind, so a connect in flight can't be interrupted by navigating

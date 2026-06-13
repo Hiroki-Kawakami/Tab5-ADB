@@ -13,21 +13,31 @@ namespace {
 // usb_host DMA-allocs per payload on device, so keep the advertised CNXN maxdata
 // modest there; the simulator (libusb) can afford the full ADB max.
 #ifdef ESP_PLATFORM
-constexpr uint32_t kMaxPayload = 16 * 1024;
+constexpr uint32_t kMaxPayloadUsb = 16 * 1024;
 #else
-constexpr uint32_t kMaxPayload = 256 * 1024;
+constexpr uint32_t kMaxPayloadUsb = 256 * 1024;
 #endif
+
+// TCP has no per-payload DMA alloc (it streams over a socket), so advertise the
+// full ADB max on both targets — fewer A_WRTE splits help the mirror's throughput.
+constexpr uint32_t kMaxPayloadTcp = 256 * 1024;
 
 // Big stack: the first connect generates the RSA-2048 key (mbedTLS is stack-heavy).
 constexpr uint32_t kReaderStack = 16384;
 
 }  // namespace
 
-Client::Client(std::weak_ptr<ClientListener> listener)
-    : listener_(std::move(listener)) {}
+Client::Client(std::weak_ptr<ClientListener> listener, TransportFactory open_transport,
+               uint32_t max_payload)
+    : listener_(std::move(listener)),
+      open_transport_(std::move(open_transport)),
+      advertised_max_payload_(max_payload) {}
 
-std::shared_ptr<Client> Client::connect_usb(std::weak_ptr<ClientListener> listener) {
-    auto c = std::shared_ptr<Client>(new Client(std::move(listener)));
+std::shared_ptr<Client> Client::launch(std::weak_ptr<ClientListener> listener,
+                                       TransportFactory open_transport,
+                                       uint32_t max_payload) {
+    auto c = std::shared_ptr<Client>(
+        new Client(std::move(listener), std::move(open_transport), max_payload));
     c->done_ = xSemaphoreCreateBinary();
     TaskHandle_t task = nullptr;
     // The reader task takes a raw pointer; ~Client -> close() joins it, so the
@@ -36,6 +46,18 @@ std::shared_ptr<Client> Client::connect_usb(std::weak_ptr<ClientListener> listen
                 &task);
     c->task_ = task;
     return c;
+}
+
+std::shared_ptr<Client> Client::connect_usb(std::weak_ptr<ClientListener> listener) {
+    return launch(std::move(listener), [] { return open_usb_transport(); },
+                  kMaxPayloadUsb);
+}
+
+std::shared_ptr<Client> Client::connect_tcp(const std::string& host, uint16_t port,
+                                            std::weak_ptr<ClientListener> listener) {
+    return launch(
+        std::move(listener),
+        [host, port] { return open_tcp_transport(host, port); }, kMaxPayloadTcp);
 }
 
 Client::~Client() { close(); }
@@ -47,7 +69,7 @@ void Client::run() {
     // during key gen / enumeration aborts cheaply).
     auto key = load_or_create_key();
     std::unique_ptr<Transport> transport;
-    if (key) transport = open_usb_transport();
+    if (key) transport = open_transport_();
 
     {
         std::lock_guard<std::mutex> lk(life_mtx_);
@@ -55,8 +77,8 @@ void Client::run() {
         // closing_ here and we skip it, or sees conn_ and can stop() it. The
         // stop-before-run_blocking window is handled by AdbConnection::stop().
         if (!closing_ && key && transport) {
-            conn_ = std::make_unique<AdbConnection>(std::move(transport),
-                                                    std::move(*key), kMaxPayload);
+            conn_ = std::make_unique<AdbConnection>(
+                std::move(transport), std::move(*key), advertised_max_payload_);
             conn_->set_state_callback([this](ConnectionState s) { set_state(s); });
         }
     }
