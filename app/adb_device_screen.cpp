@@ -391,25 +391,39 @@ void ADBDeviceScreen::createToolsContainer() {
     tools_container_ = lv_obj_create(control_container_);
     lv_obj_remove_style_all(tools_container_);
     lv_obj_set_size(tools_container_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(tools_container_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_bottom(tools_container_, 2, 0);
     lv_obj_set_flex_grow(tools_container_, 1);
     lv_obj_set_flex_flow(tools_container_, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(tools_container_, 16, 0);
 
-    auto tool_button = [this](const char *icon, const char *title, std::function<void(lv_event_t*)> callback){
+    auto tool_button = [this](const char *icon, const char *title, std::function<void(lv_event_t*)> callback, bool danger = false){
+        lv_color_t fg = danger ? lv_color_hex(0xd32f2f) : lv_color_black();
         auto button = lv_button_create(tools_container_);
-        lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
+        lv_obj_remove_style_all(button);
         lv_obj_set_size(button, LV_PCT(100), 80);
+        lv_obj_set_style_bg_color(button, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(button, 1, 0);
+        lv_obj_set_style_border_color(button, danger ? fg : lv_color_hex(0x444444), 0);
+        lv_obj_set_style_radius(button, 12, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+        lv_obj_set_style_translate_y(button, 2, LV_STATE_PRESSED);
+        lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_hor(button, 20, 0);
         lv_obj_set_style_pad_column(button, 12, 0);
         lv_obj_add_event_fn(button, LV_EVENT_CLICKED, callback);
 
         auto icon_label = lv_label_create(button);
         lv_label_set_text(icon_label, icon);
         lv_obj_set_style_text_font(icon_label, R.font.lucide_40, 0);
+        lv_obj_set_style_text_color(icon_label, fg, 0);
 
         auto title_label = lv_label_create(button);
         lv_label_set_text(title_label, title);
         lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(title_label, fg, 0);
     };
     tool_button(LUCIDE_SQUARE_TERMINAL, "Shell", [](lv_event_t*){
         screen_manager.push(std::make_shared<ADBShellScreen>());
@@ -433,5 +447,5 @@ void ADBDeviceScreen::createToolsContainer() {
                 app::adb_disconnect();
                 screen_manager.load(std::make_shared<HomeScreen>());
             });
-    });
+    }, /*danger=*/true);
 }
