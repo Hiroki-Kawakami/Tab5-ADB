@@ -15,6 +15,6 @@ list(FILTER APP_SRCS EXCLUDE REGEX "/test/")
 idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS "."
-    REQUIRES m5stack-bsp "lvgl++" screen_manager lvgl adb agent_link
+    REQUIRES m5stack-bsp "lvgl++" screen_manager lvgl adb agent_link wifi
              jpeg_decode_enhanced esp_driver_jpeg esp_driver_ppa
              esp_timer zlib term_emu nvs_flash)

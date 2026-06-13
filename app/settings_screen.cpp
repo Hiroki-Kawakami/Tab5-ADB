@@ -11,6 +11,7 @@
 #include "resources/resources.h"
 #include "screen_manager.hpp"
 #include "settings.hpp"
+#include "wifi_screen.hpp"
 
 void SettingsScreen::build() {
     lv_obj_set_size(root_, PANEL_W, PANEL_H);
@@ -63,7 +64,7 @@ void SettingsScreen::build() {
     lv_obj_set_style_pad_all(body_, 24, 0);
     lv_obj_set_style_pad_row(body_, 24, 0);
 
-    // ---- Wi-Fi settings button ----
+    // ---- Wi-Fi settings button (opens the scan/connect screen) ----
     auto wifi_button = lv_button_create(body_);
     lv_obj_remove_style_all(wifi_button);
     lv_obj_set_size(wifi_button, LV_PCT(100), 80);
@@ -79,7 +80,7 @@ void SettingsScreen::build() {
     lv_obj_set_style_pad_hor(wifi_button, 32, 0);
     lv_obj_set_style_pad_column(wifi_button, 24, 0);
     lv_obj_add_event_fn(wifi_button, LV_EVENT_CLICKED, [](lv_event_t*) {
-        // screen_manager.push(std::make_shared<WiFiSettingsScreen>());
+        screen_manager.push(std::make_shared<WiFiScreen>());
     });
     auto wifi_icon = lv_label_create(wifi_button);
     lv_label_set_text(wifi_icon, LUCIDE_WIFI);

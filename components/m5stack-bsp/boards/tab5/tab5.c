@@ -148,8 +148,12 @@ esp_err_t bsp_init(const bsp_config_t *config) {
         }
     }
 
-    if (config->wifi.mode || config->bluetooth.enable) {
-        // NVS (for WiFi & Bluetooth)
+    if (config->bluetooth.enable) {
+        // NVS (for Bluetooth). Wi-Fi lifecycle (esp_netif/esp_wifi) is owned by the
+        // `wifi` component, not the BSP — the C6 esp-hosted transport is brought up
+        // by esp_wifi_init() itself, driven entirely by sdkconfig (SDIO pins / reset
+        // GPIO / slave target), so the board needs no Wi-Fi bring-up code. NVS is
+        // ensured idempotently by each consumer (settings, adb keystore, wifi).
         err = nvs_flash_init();
         if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
             if ((err = nvs_flash_erase()) == ESP_OK) {
@@ -160,16 +164,6 @@ esp_err_t bsp_init(const bsp_config_t *config) {
             ESP_LOGE(TAG, "Failed to initialize NVS flash");
             return err;
         }
-    }
-
-    // WiFi
-    if (config->wifi.mode) {
-        ESP_ERROR_CHECK(esp_netif_init());
-        ESP_ERROR_CHECK(esp_event_loop_create_default());
-        if (config->wifi.mode & BSP_WIFI_MODE_STA) esp_netif_create_default_wifi_sta();
-        if (config->wifi.mode & BSP_WIFI_MODE_AP) esp_netif_create_default_wifi_ap();
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     }
 
     // Bluetooth

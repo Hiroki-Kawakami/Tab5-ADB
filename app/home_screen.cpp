@@ -13,6 +13,7 @@
 #include "sd_file_browser_screen.hpp"
 #include "settings.hpp"
 #include "settings_screen.hpp"
+#include "wifi_manager.hpp"
 
 namespace {
 
@@ -114,29 +115,16 @@ void HomeScreen::build_body() {
     lv_obj_add_event_fn(connect_btn_, LV_EVENT_CLICKED,
                         [this](lv_event_t *) { start_connect(); });
 
-    // ---- TCP/IP connection card (placeholder — wireless adb lands later;
-    // the widgets exist now so the layout and tap coordinates are final) ----
+    // ---- Wireless (TCP/IP) card. The Wi-Fi setup is wired now (gets the Tab5
+    // onto a LAN); the phone-IP connect row is still a placeholder — ADB-over-TCP
+    // (the embedded_adb TCP transport) lands later, on top of this Wi-Fi link. ----
     lv_obj_t *tcp_card = make_card(body);
-    lv_obj_t *tcp_head = make_row(tcp_card);
-    card_title(tcp_head, LUCIDE_WIFI, "Wireless (TCP/IP)");
-    lv_obj_t *head_spacer = lv_obj_create(tcp_head);
-    lv_obj_remove_style_all(head_spacer);
-    lv_obj_set_size(head_spacer, 1, 1);  // width comes from flex_grow
-    lv_obj_set_flex_grow(head_spacer, 1);
-    lv_obj_t *soon = lv_label_create(tcp_head);
-    lv_label_set_text(soon, "Coming soon");
-    lv_obj_set_style_text_font(soon, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(soon, lv_color_hex(0x90a4ae), 0);
-    lv_obj_set_style_bg_color(soon, lv_color_hex(0xeceff1), 0);
-    lv_obj_set_style_bg_opa(soon, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(soon, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_pad_hor(soon, 14, 0);
-    lv_obj_set_style_pad_ver(soon, 6, 0);
+    card_title(make_row(tcp_card), LUCIDE_WIFI, "Wireless (TCP/IP)");
 
-    lv_obj_t *wifi_status = lv_label_create(tcp_card);
-    lv_label_set_text(wifi_status, "Wi-Fi: not configured");
-    lv_obj_set_style_text_font(wifi_status, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(wifi_status, lv_color_hex(0x90a4ae), 0);
+    wifi_status_ = lv_label_create(tcp_card);
+    lv_obj_set_style_text_font(wifi_status_, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(wifi_status_, lv_color_hex(0x90a4ae), 0);
+    refresh_wifi_status();  // Wi-Fi is set up from Settings; this card just shows status
 
     lv_obj_t *input_row = make_row(tcp_card);
     lv_obj_t *addr = lv_textarea_create(input_row);
@@ -196,6 +184,24 @@ void HomeScreen::build_body() {
     nav_card(LUCIDE_SETTINGS, "Settings", [](lv_event_t *) {
         screen_manager.push(std::make_shared<SettingsScreen>());
     });
+}
+
+void HomeScreen::onAppear() { refresh_wifi_status(); }
+
+void HomeScreen::refresh_wifi_status() {
+    if (!wifi_status_) return;
+    auto st = wifi::manager().status();
+    if (st.state == wifi::State::Connected) {
+        lv_label_set_text_fmt(wifi_status_, "Connected to %s", st.ssid.c_str());
+        lv_obj_set_style_text_color(wifi_status_, lv_color_hex(0x2e7d32), 0);
+        return;
+    }
+    std::string saved = wifi::manager().saved_ssid();
+    if (!saved.empty())
+        lv_label_set_text_fmt(wifi_status_, "Wi-Fi: saved network %s", saved.c_str());
+    else
+        lv_label_set_text(wifi_status_, "Wi-Fi: not configured");
+    lv_obj_set_style_text_color(wifi_status_, lv_color_hex(0x90a4ae), 0);
 }
 
 void HomeScreen::start_connect() {

@@ -97,6 +97,7 @@ set(SHARED_COMPONENTS
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/embedded_adb
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/adb
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/agent_link
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/wifi
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/jpeg_decode_enhanced
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/term_emu
     ${CMAKE_CURRENT_SOURCE_DIR}/../app)

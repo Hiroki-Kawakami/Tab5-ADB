@@ -252,6 +252,10 @@ components/                  # SHARED  (both targets)
   agent_link/                #   Tab5-side link to tab5adb-agent (protocol.md) — over adb::Stream
     inc/                     #     agent_link.hpp (Link + LinkLifecycleListener/VideoListener) + agent_link_protocol.hpp (wire)
     src/  test/              #     impl + host HELLO test (test_hello.cpp)
+  wifi/                      #   Wi-Fi STA connection manager (scan/connect/state) — prerequisite for ADB-over-TCP
+    inc/                     #     wifi_manager.hpp (Manager/Listener/Status/Result) + wifi_sim.hpp (sim fake control)
+    src/                     #     wifi_manager.cpp (portable) + backend_espwifi.cpp (device) / backend_sim.cpp (sim); wifi_backend.hpp seam
+    README.md  docs/         #     README = front door; docs/wifi.md = surface detail
   jpeg_decode_enhanced/      #   enhanced P4 HW JPEG decode (full-range CSC, strip pipeline, PPA); ESP_PLATFORM-branched
     include/  src/           #     Layer 1 (jpeg_decode_enhanced.h) + Layer 2 (jpeg_ppa_pipeline.h); _sim.c = libjpeg/SW-PPA-backed (see its README)
   term_emu/                  #   VT100/xterm-subset terminal emulator (bytes in -> Cell grid out); no LVGL/adb deps
@@ -868,6 +872,67 @@ receive→decode→**render done**: the app drives the link via `app::AgentClien
 → `start_mirror` → `on_video_strip` decoded straight into the bsp framebuffer (no
 LVGL), verified headless against a real Android device.
 
+### The `wifi` component (Wi-Fi STA connection manager)
+
+Gets the Tab5 onto a LAN — the prerequisite for the future **ADB-over-TCP**
+("Wireless (TCP/IP)") path. ADB-over-TCP itself is **not** this component: once an
+IP is up it is a plain socket and belongs in `embedded_adb` (a future
+`transport_tcp.cpp` + `adb::Client::connect_tcp()`), independent of `wifi`.
+
+**Tab5 has no radio**: Wi-Fi is an **ESP32-C6 co-processor** over SDIO via
+`esp-hosted` + `esp_wifi_remote`. `esp_wifi` calls are API-compatible and routed
+to the C6, and `esp_wifi_init()` brings the SDIO transport up itself — driven
+**entirely by sdkconfig** (SDIO pins / reset GPIO / slave target), NOT by C code.
+The Tab5 wiring lives in `esp32p4/sdkconfig.defaults` (reset GPIO 15 active-low,
+CMD=13 / CLK=12 / D0..D3 = 11/10/9/8, 4-bit @ 40 MHz, `esp32c6`), mirrored from the
+`tab5remote` reference project. So **the BSP owns no Wi-Fi code** — the old
+`bsp_config.wifi` / `esp_netif`/`esp_wifi_init` block was removed; standard ESP-IDF
+network lifecycle is this component's job (the same way `adb` owns the USB/esp
+lifecycle, not the BSP).
+
+**Layering = the project's ONE-split pattern.** Portable C++
+(`src/wifi_manager.cpp`: state machine, NVS persistence of the last network,
+connect timeout via a FreeRTOS one-shot timer, listener dispatch) over a single
+device/simulator backend split through the private `Backend`/`BackendHost` seam
+(`src/wifi_backend.hpp`) — the SAME reasoning as `embedded_adb`'s usb_host
+transport: `esp_wifi` is too large to reimplement on the host, so it is an
+`ESP_PLATFORM`-branched backend (`backend_espwifi.cpp` = esp_wifi/esp_netif/
+esp_event; `backend_sim.cpp` = a deterministic scriptable fake), **not** an
+`idf_compat` esp_wifi shim. simverify must stay deterministic (no real
+host-network access), which the fake provides.
+
+**API (`inc/wifi_manager.hpp`, see README + docs/wifi.md).** `wifi::manager()` is a
+leaked singleton (like `app::agent_client()`). `start(listener_weak)` brings the
+stack/radio up (idempotent). Two delivery channels, like `adb`: **one-shot
+completions** for `scan()`/`connect()`/`connect_saved()` (fire exactly once) AND a
+**persistent `Listener::on_wifi_state(Status)`** for steady-state transitions
+incl. a mid-session drop (the gap the reference NetworkManager couldn't report —
+it dropped its single callback after the first success). All callbacks fire on the
+backend's **event thread**, never LVGL — marshalling is the app's job; the
+listener is held **weakly** (drop the shared_ptr to detach). `Status` =
+`{state, ssid, ip, rssi}`; `Result` adds `Timeout` to the reference's granularity.
+Credentials persist to NVS (namespace `wifi`) so `configured()`/`saved_ssid()`/
+`connect_saved()` work. **Sim control** (`inc/wifi_sim.hpp`): the fake picks a
+connect outcome from the SSID (`fail-auth`/`fail-notfound`/`fail-assoc`/`timeout`)
+or an explicit `wifi::sim::set_next_connect_result()`; the sim harness exposes
+`wifi-aps` / `wifi-connect-result` / `wifi-delay` / `wifi-drop` script commands and
+`SIMULATOR_WIFI_CONNECT` for non-scripted runs. The **Settings → Wi-Fi** button
+pushes `WiFiScreen` (scan list + secured-network password modal + connect
+progress/error); the HomeScreen "Wireless (TCP/IP)" card only shows a live status
+line. The screen IS the `wifi::Listener`;
+verified headless via `./run.sh simverify simulator/verify/wifi.txt` (scan →
+connect open → password modal → forced auth-fail error). The password
+**`lv_keyboard` is anchored to the screen bottom (a child of `root_`,
+`IGNORE_LAYOUT` + `ALIGN_BOTTOM_MID`), NOT inside the modal card** (where it
+overflowed) — created after the scrim so taps reach it, and torn down by
+`close_password_modal()` (the keyboard is a sibling of the card, so closing the
+modal alone wouldn't delete it). **Keyboard gotcha:** that teardown must be
+deferred via `lv_async_call` — deleting an `lv_keyboard` inside the in-flight
+button/keyboard event hangs LVGL (modal_confirm's plain dialogs don't hit this).
+**Next:** real
+Tab5 HW bring-up (verify the C6 esp-hosted link + sdkconfig pins), then the
+`embedded_adb` TCP transport.
+
 ### The JPEG decode seam (for the mirror render)
 
 `VideoListener::on_video_strip` hands the app a whole JPEG strip to decode into the
@@ -989,11 +1054,14 @@ layout: a full-bleed dark hero (title + the manually-bumped version constant in
 `app/app_version.hpp`) over a light card body matching the rest of the app. The
 body is a **USB card** (just the big Connect button; the Connect center stays at
 (360, 420) — the verify scripts tap by coordinate), a **Wireless (TCP/IP) card**
-that is a
-fully-built but `LV_STATE_DISABLED` placeholder ("Coming soon" — wireless adb
-lands later; the widgets exist now so tap coordinates are final), and a bottom
-row of three nav cards: **About** and **Settings** (placeholders, screens land
-later) and **Files** at (360, 1170), which pushes `SDFileBrowserScreen`
+that shows only a live Wi-Fi status line (`refresh_wifi_status()` on `onAppear`,
+from `wifi::manager()`) — Wi-Fi setup is opened from **Settings → Wi-Fi** (the
+`WiFiScreen` scan/connect UI; see the `wifi` component section), not the
+HomeScreen; the phone-IP
+`Connect` row below stays `LV_STATE_DISABLED` (ADB-over-TCP lands later, on top of
+this Wi-Fi link), and a bottom
+row of three nav cards: **About** (placeholder) and **Settings** and
+**Files** at (360, 1170), which pushes `SDFileBrowserScreen`
 directly — the local browser (and its previews / APK info) needs no adb
 connection (`simulator/verify/home_sd.txt`). The hero fonts pulled
 montserrat 18 + 48 into the device sdkconfig (the sim's `lv_conf.h` enables all
@@ -1576,7 +1644,9 @@ boards reuse them:
   interactive loop. A tiny line-oriented interpreter that runs **on the main/LVGL
   thread** (so capture/input never race rendering): `wait <ms>`,
   `settle [<max_ms>]`, `capture <path.jpg>`, `tap <x> <y>`, `down <x> <y>`,
-  `move <x> <y>`, `up`, `quit`. `settle` pumps `lv_timer_handler` until no
+  `move <x> <y>`, `up`, `quit`, plus the Wi-Fi fake-backend controls
+  `wifi-aps <ssid:rssi:secured,...>` / `wifi-connect-result <Result>` /
+  `wifi-delay <ms>` / `wifi-drop` (drive `wifi::sim::*`). `settle` pumps `lv_timer_handler` until no
   animation runs for a few frames (drains `lv_async_call` work), so capturing
   before the frame settles is the caller's mistake. `tap` = inject press →
   hold a few frames → release → hold a few frames, so each edge spans both a

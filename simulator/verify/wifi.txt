@@ -1,0 +1,28 @@
+# Wi-Fi setup flow against the deterministic fake backend (wifi::sim).
+# Reached via Settings -> Wi-Fi: scan, connect to an open network (success),
+# then a secured network with a forced auth failure.
+settle 2000
+capture simulator/verify/out/wifi_home.jpg
+# HomeScreen Settings nav card -> Settings.
+tap 589 1171
+settle 1200
+# Settings "Wi-Fi" button -> the scan/connect screen.
+tap 360 195
+settle 1500
+capture simulator/verify/out/wifi_scan.jpg
+# Tap the open network (OpenCafe) -> connects with no password, status turns green.
+wifi-connect-result Ok
+tap 360 397
+wait 800
+capture simulator/verify/out/wifi_connected.jpg
+# Tap a secured network -> password modal with on-screen keyboard.
+tap 360 237
+settle 1000
+capture simulator/verify/out/wifi_password.jpg
+# Force an auth failure; confirm (empty password) via the modal Connect button
+# (the keyboard sits separately at the screen bottom).
+wifi-connect-result AuthFailed
+tap 546 493
+wait 800
+capture simulator/verify/out/wifi_failed.jpg
+quit

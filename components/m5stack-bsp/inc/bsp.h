@@ -19,12 +19,6 @@ extern "C" {
 #endif
 
 typedef enum {
-    BSP_WIFI_MODE_NONE = 0,
-    BSP_WIFI_MODE_STA  = 1 << 0,
-    BSP_WIFI_MODE_AP   = 1 << 1,
-} bsp_wifi_mode_t;
-
-typedef enum {
     BSP_AUDIO_CAP_PCM       = 1 << 0,  /*!< PCM playback path (DAC / codec / I2S amp) */
     BSP_AUDIO_CAP_TONE      = 1 << 1,  /*!< tone-only buzzer */
     BSP_AUDIO_CAP_SPEAKER   = 1 << 2,  /*!< speaker route */
@@ -63,9 +57,6 @@ typedef struct {
     struct {
         bool usb5v_en;
     } usb;
-    struct {
-        bsp_wifi_mode_t mode;
-    } wifi;
     struct {
         bool enable;
     } bluetooth;

@@ -50,6 +50,7 @@ JPEG frames out — instead of clicking/screenshotting the real window:
 ```sh
 ./run.sh simverify simulator/verify/home.txt     # build + run headless, capture frames
 ./run.sh simverify simulator/verify/mirror.txt   # connect a phone + show the live mirror
+./run.sh simverify simulator/verify/wifi.txt     # Wi-Fi scan/connect UI (fake backend)
 ```
 
 The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
@@ -80,7 +81,10 @@ The script (`tap`/`down`/`move`/`up`, `wait`/`settle`, `capture <path.jpg>`,
   and exposes `Client`/`Shell`/`Sync`; see `components/adb/README.md`). For screen
   mirroring: `agent_link/` (the Tab5 end of the `tab5adb-agent` wire protocol) and
   `jpeg_decode_enhanced/` (enhanced P4 HW JPEG decode — full-range YUV→RGB,
-  strip pipelining, PPA pipeline; libjpeg-backed in the simulator). For the
+  strip pipelining, PPA pipeline; libjpeg-backed in the simulator). For wireless:
+  `wifi/` (Wi-Fi STA connection manager — scan/connect/state; ESP32-C6 esp-hosted
+  on device via `esp_wifi`, a scriptable fake in the simulator; the prerequisite
+  for ADB-over-TCP; see `components/wifi/README.md`). For the
   terminal: `term_emu/` (a VT100/xterm-subset terminal emulator — PTY bytes in,
   cell grid out; no LVGL/adb deps, host unit test via its `test/run.sh`) behind
   the **Shell** screen's grid renderer + on-screen keyboard (`app/terminal/`).

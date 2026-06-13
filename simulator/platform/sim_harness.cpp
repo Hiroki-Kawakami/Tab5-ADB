@@ -15,12 +15,16 @@
 
 #include "lvgl.h"
 #include "sdl_backend.h"
+#include "wifi_manager.hpp"
+#include "wifi_sim.hpp"
 
 #include <SDL2/SDL.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -28,6 +32,40 @@ extern "C" {
 }
 
 namespace {
+
+/* Parse a wifi::Result name (for the wifi-connect-result command). */
+bool parse_wifi_result(const char *s, wifi::Result &out) {
+    using R = wifi::Result;
+    struct { const char *name; R r; } map[] = {
+        {"Ok", R::Ok}, {"ApNotFound", R::ApNotFound}, {"AuthFailed", R::AuthFailed},
+        {"AssocFailed", R::AssocFailed}, {"IpFailed", R::IpFailed},
+        {"Timeout", R::Timeout}, {"Failed", R::Failed},
+    };
+    for (auto &m : map) if (strcmp(s, m.name) == 0) { out = m.r; return true; }
+    return false;
+}
+
+/* Parse "ssid:rssi:secured,ssid:rssi:secured,..." into a fake AP list. */
+std::vector<wifi::AP> parse_wifi_aps(const char *spec) {
+    std::vector<wifi::AP> aps;
+    std::string s(spec);
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t comma = s.find(',', i);
+        std::string entry = s.substr(i, comma == std::string::npos ? std::string::npos : comma - i);
+        size_t c1 = entry.find(':'), c2 = entry.rfind(':');
+        if (c1 != std::string::npos && c2 != c1) {
+            wifi::AP ap;
+            ap.ssid = entry.substr(0, c1);
+            ap.rssi = (int8_t)atoi(entry.substr(c1 + 1, c2 - c1 - 1).c_str());
+            ap.secured = atoi(entry.substr(c2 + 1).c_str()) != 0;
+            aps.push_back(ap);
+        }
+        if (comma == std::string::npos) break;
+        i = comma + 1;
+    }
+    return aps;
+}
 
 constexpr uint32_t FRAME_MS = 16;   /* ~60 Hz pump step */
 
@@ -158,6 +196,18 @@ bool run_line(char *line) {
         else fprintf(stderr, "[sim] %s: need x y\n", cmd);
     } else if (strcmp(cmd, "up") == 0) {
         sdl_backend_inject_up();
+    } else if (strcmp(cmd, "wifi-aps") == 0) {
+        if (n >= 2) wifi::sim::set_aps(parse_wifi_aps(a1));
+        else fprintf(stderr, "[sim] wifi-aps: need ssid:rssi:secured,...\n");
+    } else if (strcmp(cmd, "wifi-connect-result") == 0) {
+        wifi::Result r;
+        if (n >= 2 && parse_wifi_result(a1, r)) wifi::sim::set_next_connect_result(r);
+        else fprintf(stderr, "[sim] wifi-connect-result: bad/missing result name\n");
+    } else if (strcmp(cmd, "wifi-delay") == 0) {
+        if (n >= 2) wifi::sim::set_event_delay_ms(atoi(a1));
+        else fprintf(stderr, "[sim] wifi-delay: need ms\n");
+    } else if (strcmp(cmd, "wifi-drop") == 0) {
+        wifi::sim::drop_link();
     } else {
         fprintf(stderr, "[sim] unknown command: %s\n", cmd);
     }
