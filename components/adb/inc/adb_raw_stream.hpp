@@ -61,10 +61,13 @@ public:
 
     bool is_open() const;
 
-    // Bytes still queued for the writer task (enqueued by write() but not yet
-    // handed to the transport). A backpressure signal callable from any thread:
-    // it lets a caller coalesce/drop low-value frames (e.g. a touch MOVE) when the
-    // link can't keep up, rather than letting them pile up behind the queue.
+    // Bytes not yet acknowledged by the peer: the queued bytes still waiting for
+    // the writer task PLUS the one frame it currently has in flight (dequeued but
+    // its blocking embedded_adb write — one A_WRTE per A_OKAY — has not returned).
+    // So pending_bytes() == 0 means the link is genuinely idle (queue empty and
+    // the last frame's A_OKAY received), the precise "channel free" signal a caller
+    // needs to coalesce/batch low-value frames (e.g. touch MOVEs) without piling
+    // them up behind the link. Callable from any thread.
     size_t pending_bytes() const;
 
     // Send A_CLSE and stop the writer task. Idempotent. Blocks until the writer
@@ -96,6 +99,7 @@ private:
     mutable std::mutex q_mtx_;  // guards queue_/queued_bytes_/closing_ + close bookkeeping
     std::deque<std::vector<uint8_t>> queue_;
     size_t queued_bytes_ = 0;
+    size_t in_flight_bytes_ = 0;  // the frame the writer is currently blocked sending
     bool closing_ = false;
     std::atomic<bool> close_notified_{false};  // on_stream_close fires once
 

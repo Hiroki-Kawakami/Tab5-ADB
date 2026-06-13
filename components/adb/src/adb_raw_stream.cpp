@@ -77,8 +77,17 @@ void Stream::writer_loop() {
                 chunk = std::move(queue_.front());
                 queue_.pop_front();
                 queued_bytes_ -= chunk.size();
+                // Count it as in flight until the blocking write below returns
+                // (its A_OKAY arrives), so pending_bytes() stays non-zero across the
+                // round-trip — otherwise the queue reads "empty" mid-flight.
+                in_flight_bytes_ = chunk.size();
             }
-            if (!stream_->write(chunk.data(), chunk.size())) goto done;  // closed
+            bool ok = stream_->write(chunk.data(), chunk.size());
+            {
+                std::lock_guard<std::mutex> lk(q_mtx_);
+                in_flight_bytes_ = 0;
+            }
+            if (!ok) goto done;  // closed
         }
     }
 done:
@@ -107,7 +116,7 @@ bool Stream::is_open() const { return stream_ && stream_->is_open(); }
 
 size_t Stream::pending_bytes() const {
     std::lock_guard<std::mutex> lk(q_mtx_);
-    return queued_bytes_;
+    return queued_bytes_ + in_flight_bytes_;
 }
 
 void Stream::handle_data(const uint8_t* d, size_t n) {

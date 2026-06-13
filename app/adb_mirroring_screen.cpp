@@ -123,12 +123,6 @@ void ADBMirroringScreen::start_mirror_ui() {
     apply_overlay(cur_rot_, /*first=*/true);  // cur_rot_ defaults to 0 (portrait)
     display_manager.set_overlay_visible(true);
 
-    // Cap the touch-passthrough MOVE rate to suit the link: USB carries every
-    // ~60 Hz sample fine, but the higher-latency, bandwidth-limited TCP/Wi-Fi link
-    // chokes on it, so throttle to ~30 Hz there (the agent_link layer additionally
-    // coalesces under live backpressure). Set before the touch listener fires.
-    move_min_us_ = app::connection_is_tcp() ? 33000 : 0;
-
     // Observe raw touch (pushed from the DisplayManager touch task): a swipe out of
     // the bottom-left corner reveals a hidden strip. on_touch fires off the LVGL
     // thread, but the swipe logic only flips DM flags (no LVGL access).
@@ -528,14 +522,25 @@ bool ADBMirroringScreen::in_overlay_footprint(int px, int py, uint8_t rot) {
     return px >= x1 && px < x1 + kStripCross && py >= y1 && py < y1 + kStripLen;
 }
 
+void ADBMirroringScreen::flush_touch_batch(agent_link::Link* link) {
+    // Call under pass_mtx_. Ship the accumulated transitions as one INPUT frame.
+    if (!link || tx_batch_.empty()) return;
+    link->inject_touch_batch(tx_batch_.data(), tx_batch_.size());
+    tx_batch_.clear();
+}
+
 void ADBMirroringScreen::release_all_pointers() {
     std::lock_guard<std::mutex> lk(pass_mtx_);
     auto l = app::agent_client().link();
     for (auto& p : pass_) {
-        if (p.used && p.kind == PtKind::Pass && l)
-            l->inject_touch(agent_link::kTouchUp, static_cast<uint8_t>(p.id), p.x, p.y);
+        // UP any still-down Pass pointer (flushed below) so the source sees no stuck
+        // finger, then retire every tracked pointer.
+        if (p.used && p.kind == PtKind::Pass)
+            tx_batch_.push_back({agent_link::kTouchUp, static_cast<uint8_t>(p.id),
+                                 p.x, p.y});
         p.used = false;
     }
+    flush_touch_batch(l.get());  // UPs go out immediately (teardown / OpMode off)
 }
 
 void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
@@ -561,6 +566,20 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
         return -1;
     };
 
+    // Append a per-pointer transition to the batch. DOWN/UP must always be carried
+    // (gesture state), so they set `edge` to force a flush; a MOVE past kBatchMax
+    // evicts the oldest queued MOVE so a stalled link can't grow the frame without
+    // bound (the batch only ever holds MOVEs between flushes — edges flush at once).
+    bool edge = false;
+    auto enqueue = [&](uint8_t action, int id, uint16_t x, uint16_t y) {
+        if (action == agent_link::kTouchMove) {
+            if (tx_batch_.size() >= kBatchMax) tx_batch_.erase(tx_batch_.begin());
+        } else {
+            edge = true;
+        }
+        tx_batch_.push_back({action, static_cast<uint8_t>(id), x, y});
+    };
+
     bool seen[kMaxPass] = {false};
 
     for (int i = 0; i < count; ++i) {
@@ -581,8 +600,7 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
                 p.kind = PtKind::Reveal;
             } else if (po && !(visible && in_overlay_footprint(x, y, rot))) {
                 p.kind = PtKind::Pass;
-                if (link) link->inject_touch(agent_link::kTouchDown,
-                                             static_cast<uint8_t>(id), x, y);
+                enqueue(agent_link::kTouchDown, id, x, y);
             } else {
                 p.kind = PtKind::Ignore;  // overlay handles it, or passthrough off
             }
@@ -591,20 +609,10 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
             p.x = x; p.y = y;
             if (p.kind == PtKind::Pass) {
                 if (po) {
-                    // Rate-limit MOVE injection to move_min_us_ (0 = every sample).
-                    // The (x,y) above is already saved, so a skipped MOVE is carried
-                    // by the next one that passes the gate (or the UP); coordinates
-                    // are never lost. DOWN/UP are unconditional (above / below).
-                    int64_t now = esp_timer_get_time();
-                    if (now - p.last_move_us >= move_min_us_) {
-                        p.last_move_us = now;
-                        if (link) link->inject_touch(agent_link::kTouchMove,
-                                                     static_cast<uint8_t>(id), x, y);
-                    }
+                    enqueue(agent_link::kTouchMove, id, x, y);
                 } else {
                     // Touch-control switched off mid-gesture: release this pointer.
-                    if (link) link->inject_touch(agent_link::kTouchUp,
-                                                 static_cast<uint8_t>(id), x, y);
+                    enqueue(agent_link::kTouchUp, id, x, y);
                     p.used = false;
                     continue;  // dropped; leave it unseen so it isn't re-UP'd below
                 }
@@ -626,10 +634,20 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
     // Pointers absent from this snapshot lifted: UP the Pass ones, retire all.
     for (int s = 0; s < kMaxPass; ++s) {
         if (!pass_[s].used || seen[s]) continue;
-        if (pass_[s].kind == PtKind::Pass && link)
-            link->inject_touch(agent_link::kTouchUp,
-                               static_cast<uint8_t>(pass_[s].id), pass_[s].x, pass_[s].y);
+        if (pass_[s].kind == PtKind::Pass)
+            enqueue(agent_link::kTouchUp, pass_[s].id, pass_[s].x, pass_[s].y);
         pass_[s].used = false;
+    }
+
+    // Flush the batch as one frame when the link is idle (so it ships the instant
+    // the channel frees — no added latency) or a DOWN/UP edge needs to go now.
+    // While a slow link is mid-round-trip, MOVEs keep accumulating instead. On USB
+    // the link is idle at every sample, so this flushes every time = one transition
+    // per frame, as before.
+    if (!link) {
+        tx_batch_.clear();  // link gone — nothing to send on; don't keep stale events
+    } else if (!tx_batch_.empty() && (edge || link->tx_pending_bytes() == 0)) {
+        flush_touch_batch(link.get());
     }
 }
 

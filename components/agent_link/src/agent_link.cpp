@@ -8,13 +8,6 @@ namespace agent_link {
 
 namespace {
 constexpr const char* kSocket = "localabstract:tab5adb-agent";
-
-// inject_touch coalesces MOVEs once more than this many bytes are still queued on
-// the writer (i.e. the link can't drain them as fast as the touch task samples).
-// A touch INPUT frame is 16 bytes (8 header + 8 payload), so this allows ~a couple
-// of frames of pipelining on a healthy link while collapsing the backlog on a slow
-// one — keeping the gap before the (never-dropped) UP short. DOWN/UP/keys ignore it.
-constexpr size_t kInputBacklogCoalesce = 48;
 }  // namespace
 
 Link::Link(std::weak_ptr<LinkLifecycleListener> listener, const HelloConfig& cfg)
@@ -205,18 +198,6 @@ adb::Error Link::inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
                               uint16_t y) {
     if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
 
-    // Coalesce MOVEs under backpressure: a touch MOVE is a redundant sample (the
-    // next one carries a fresher position), so when the writer queue is already
-    // backed up — a slow link, e.g. ADB-over-TCP — drop this MOVE rather than let
-    // it pile up. That keeps the queue short so the DOWN/UP transitions (which
-    // bypass this gate) reach the source promptly; otherwise a long backlog of
-    // MOVEs delays the UP and the agent misreads a swipe as a long-press. DOWN/UP
-    // are never dropped — they are gesture state, not samples.
-    if (action == kTouchMove &&
-        stream_->pending_bytes() > kInputBacklogCoalesce) {
-        return adb::Error::Ok;  // coalesced (dropped); reported as sent
-    }
-
     // INPUT payload (§4.7): input_type, then the INPUT_TOUCH args. Fire-and-forget
     // (TYPE=INPUT) — no req_id / no response. Coordinates are Tab5 panel coords.
     uint8_t payload[1 + kInputTouchArgsLen];
@@ -232,6 +213,34 @@ adb::Error Link::inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
                  static_cast<uint32_t>(sizeof(payload)));
     std::memcpy(frame + kFrameHeaderSize, payload, sizeof(payload));
     return stream_->write(frame, sizeof(frame));
+}
+
+adb::Error Link::inject_touch_batch(const TouchSample* samples, size_t n) {
+    if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+    if (n == 0) return adb::Error::Ok;
+    if (n > kTouchBatchMax) n = kTouchBatchMax;  // count is a u8
+
+    // INPUT payload (§4.7): input_type, count, then n packed records.
+    const size_t payload_len = 2 + n * kTouchBatchRecordLen;
+    std::vector<uint8_t> frame(kFrameHeaderSize + payload_len);
+    write_header(frame.data(), kTypeInput, /*flags=*/0, tx_seq_.fetch_add(1),
+                 static_cast<uint32_t>(payload_len));
+    uint8_t* p = frame.data() + kFrameHeaderSize;
+    p[0] = kInputTouchBatch;
+    p[1] = static_cast<uint8_t>(n);
+    uint8_t* rec = p + 2;
+    for (size_t i = 0; i < n; ++i) {
+        rec[0] = samples[i].action;
+        rec[1] = samples[i].pointer_id;
+        wr_u16(rec + 2, samples[i].x);
+        wr_u16(rec + 4, samples[i].y);
+        rec += kTouchBatchRecordLen;
+    }
+    return stream_->write(frame.data(), frame.size());
+}
+
+size_t Link::tx_pending_bytes() const {
+    return stream_ ? stream_->pending_bytes() : 0;
 }
 
 void Link::close() {

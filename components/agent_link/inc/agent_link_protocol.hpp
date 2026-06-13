@@ -116,9 +116,10 @@ enum AudioCodec : uint8_t {
 // power/volume/nav), touch passthrough and keyboard all ride. The payload's
 // first byte is the input_type; the rest is type-specific.
 enum InputType : uint8_t {
-    kInputKey = 0x00,   // a single key event (down or up)
-    kInputTouch = 0x01,  // touch passthrough (reserved)
-    kInputText = 0x02,   // text/keyboard (reserved)
+    kInputKey = 0x00,         // a single key event (down or up)
+    kInputTouch = 0x01,       // a single per-pointer touch transition
+    kInputText = 0x02,        // text/keyboard (reserved)
+    kInputTouchBatch = 0x03,  // N per-pointer touch transitions in one frame
 };
 
 // INPUT_KEY args after the input_type byte (§4.7):
@@ -151,6 +152,22 @@ enum TouchAction : uint8_t {
     kTouchMove = 1,
     kTouchUp = 2,
 };
+
+// INPUT_TOUCH_BATCH args after the input_type byte (§4.7): a count then that many
+// packed per-pointer records, replayed by the agent in order through the same
+// per-pointer state machine as INPUT_TOUCH — semantically identical, just fewer
+// frames. The Tab5 batches MOVEs that pile up while a slow link (ADB-over-TCP) is
+// mid-round-trip and flushes them as one frame the instant the link goes idle, so
+// a fast drag costs ~one frame per RTT instead of one per touch sample (no points
+// dropped, no added latency vs sending them individually).
+//  +1   u8   count       number of records that follow (1..kTouchBatchMax)
+//  then count × record, each:
+//    +0  u8   action     kTouchDown / kTouchMove / kTouchUp
+//    +1  u8   pointer_id source touch-controller track id
+//    +2  u16  x          Tab5 panel x [px] (LE)
+//    +4  u16  y          Tab5 panel y [px] (LE)
+constexpr size_t kTouchBatchRecordLen = 6;  // action + pointer_id + x + y
+constexpr size_t kTouchBatchMax = 255;      // count is a u8
 
 // Android KeyEvent.KEYCODE_* values for the keys the overlay drives. The agent
 // passes these straight to KeyEvent, so the Tab5 side owns the mapping.

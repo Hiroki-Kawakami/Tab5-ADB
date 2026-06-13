@@ -908,18 +908,28 @@ in `agent_link_protocol.hpp`) and 0x01=TOUCH (the mirror's touch passthrough —
 per-pointer DOWN/MOVE/UP in **Tab5 panel coords**, `pointer_id` = the source's
 touch track id; the agent inverts the mirror geometry to the source's logical
 display coords and assembles the multi-pointer `MotionEvent` itself, scrcpy
-`PointersState`-style). **MOVE coalescing under
-backpressure:** `inject_touch` drops a `kTouchMove` (returns Ok without enqueuing)
-when the underlying `adb::Stream::pending_bytes()` exceeds `kInputBacklogCoalesce`
-(48 B ≈ a couple of 16 B input frames) — a MOVE is a redundant sample the next one
-supersedes, so on a slow link (ADB-over-TCP) this stops the writer queue piling up
-and keeps the **never-dropped `kTouchDown`/`kTouchUp`** prompt; without it a swipe's
-backlog of MOVEs delays the UP and the source reads a swipe as a long-press.
-(`Stream::pending_bytes()` is the generic backpressure accessor added for this.)
-0x02=TEXT/keyboard is reserved. The agent
+`PointersState`-style). **Batched touch (`kInputTouchBatch`, input_type 0x03) for
+slow links:** touch is small-but-high-frequency, the pathological case for ADB's
+per-A_WRTE/A_OKAY stop-and-wait — every event is a full transaction (header + RTT
+round-trip + the single serialized `write_mtx_` send) that contends with the
+inbound video's flow control, so processing touch drags the whole link down.
+`Link::inject_touch_batch(samples, n)` packs N per-pointer transitions into ONE
+INPUT frame (count + n×{action,ptr,x,y}); the agent replays them in order through
+the same per-pointer state machine as `inject_touch` (semantically identical, one
+A_WRTE). The mirror batches the MOVEs that pile up while the link is mid-round-trip
+and flushes when it goes idle (see `ADBMirroringScreen`), cutting a fast drag from
+one frame per touch sample to ~one per RTT — no points dropped, no added latency.
+The idle signal is **`Link::tx_pending_bytes()`** → **`adb::Stream::pending_bytes()`**,
+which now counts the **in-flight (dequeued-but-unacked) frame** too — so `== 0`
+means the link is genuinely idle (the last A_WRTE's A_OKAY arrived), the precise
+"channel free" gate batching needs. `inject_touch` (single) stays for non-batched
+callers; the agent parses both input_types. 0x02=TEXT/keyboard is reserved. The agent
 injects via the hidden `InputManager.injectInputEvent` (scrcpy technique, shell
 uid holds INJECT_EVENTS) in `android-agent/.../Input.java` (a minimal port of
-scrcpy's `Workarounds.getSystemContext` → `getSystemService(INPUT_SERVICE)`). The same
+scrcpy's `Workarounds.getSystemContext` → `getSystemService(INPUT_SERVICE)`).
+`Server.handleInput` dispatches on input_type: KEY (0x00), TOUCH (0x01), and
+TOUCH_BATCH (0x03) — the batch handler just loops the records through the same
+`handleTouch` path as a single TOUCH, so `Input.java` is unchanged. The same
 parser carries the JPEG strip stream: each whole JPEG frame (the frame layer
 reassembles A_WRTE splits) is handed to a **decode+framebuffer seam** =
 `VideoListener::on_video_strip(VideoStrip)` (rect + JPEG bytes + frame_start/end),
@@ -1745,15 +1755,20 @@ diffs each touch-task snapshot into per-pointer DOWN/MOVE/UP, keying off the BSP
 `bsp_touch_point_t.id` (the controller track id) so multi-touch needs no
 id synthesis; each new pointer is classified once — **Pass** (injected), **Reveal**
 (a corner-swipe candidate), or **Ignore** (over a visible strip / passthrough off) —
-and keeps that role until it lifts. **MOVE send rate is throttled per transport**
-(`move_min_us_`, set in `start_mirror_ui` from `app::connection_is_tcp()`): 0 over
-USB (inject every ~60 Hz sample) vs ~30 Hz (33 ms) over the slower TCP/Wi-Fi link;
-the per-pointer `last_move_us` gates it. The latest `(x,y)` is saved every sample
-regardless, so a skipped MOVE is carried by the next one (or the UP) — no lost
-coordinates. This is the app-side baseline cap; `agent_link`'s `inject_touch`
-additionally coalesces MOVEs under live writer backpressure (see the agent_link
-section), and DOWN/UP are always sent — together they stop a swipe from being
-misread as a long-press when the link can't keep up. `onExit`/dtor + turning OpMode off call
+and keeps that role until it lifts. **Touches are sent BATCHED** to cut the
+per-event transaction cost that drags down the link (small high-frequency touch
+packets contend with the inbound video's ADB flow control — see the agent_link
+section): each `on_touch` sample appends its per-pointer transitions to `tx_batch_`
+(guarded by `pass_mtx_`), flushed as ONE `inject_touch_batch` frame when the link
+is idle (`link()->tx_pending_bytes() == 0`) or a DOWN/UP edge needs to go now. On
+USB the link is idle at every ~60 Hz sample → flush every sample = one transition
+per frame (**unchanged from per-event sending — no batching, no added latency**);
+on the slower TCP/Wi-Fi link the MOVEs that arrive mid-round-trip accumulate and
+ship together the instant it frees (~one frame per RTT, no points dropped, no
+deliberate delay — the samples were going to wait for the link anyway). DOWN/UP
+force a flush; a MOVE past `kBatchMax` (24) evicts the oldest queued MOVE so a
+stalled link can't grow the frame unbounded (the batch only holds MOVEs between
+flushes). `release_all_pointers()` flushes the pending batch + UPs. `onExit`/dtor + turning OpMode off call
 `release_all_pointers()` to UP any still-down Pass pointer (no stuck finger on the
 source). No timeout auto-hide: the in-strip **Hide** button hides it, and a **swipe
 out of the anchor corner** (the **L-shaped** `in_corner` hot zone = two narrow

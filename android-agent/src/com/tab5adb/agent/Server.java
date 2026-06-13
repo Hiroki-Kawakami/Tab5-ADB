@@ -48,6 +48,8 @@ public final class Server {
     private static final int TYPE_AUDIO = 0x11;
     private static final int INPUT_KEY = 0x00;  // input_type (§4.7)
     private static final int INPUT_TOUCH = 0x01;  // input_type (§4.7)
+    private static final int INPUT_TOUCH_BATCH = 0x03;  // input_type (§4.7)
+    private static final int TOUCH_BATCH_RECORD_LEN = 6;  // action+ptr+x+y
     private static final int EVENT_ORIENTATION = 0x03;
     private static final int FLAG_FRAME_START = 0x01;
     private static final int FLAG_FRAME_END = 0x02;
@@ -280,6 +282,27 @@ public final class Server {
             int px = readU16(p, 4);     // Tab5 panel coords
             int py = readU16(p, 6);
             handleTouch(conn, action, pointerId, px, py);
+        } else if (inputType == INPUT_TOUCH_BATCH) {
+            // count, then `count` packed records — replay each through handleTouch in
+            // order (same per-pointer state machine as a run of INPUT_TOUCH frames).
+            if (p.length < 2) {
+                System.err.println("tab5adb-agent: short INPUT_TOUCH_BATCH");
+                return;
+            }
+            int count = p[1] & 0xFF;
+            if (p.length < 2 + count * TOUCH_BATCH_RECORD_LEN) {
+                System.err.println("tab5adb-agent: truncated INPUT_TOUCH_BATCH");
+                return;
+            }
+            int off = 2;
+            for (int i = 0; i < count; i++) {
+                int action = p[off] & 0xFF;
+                int pointerId = p[off + 1] & 0xFF;
+                int px = readU16(p, off + 2);
+                int py = readU16(p, off + 4);
+                handleTouch(conn, action, pointerId, px, py);
+                off += TOUCH_BATCH_RECORD_LEN;
+            }
         }
         // unknown input_type: ignore (forward compat, §4.7)
     }

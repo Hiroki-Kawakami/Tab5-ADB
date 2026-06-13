@@ -457,6 +457,33 @@ mirror 表示中の Tab5 パネルへのタッチを、ソース端末へ **ポ�
   `ACTION_POINTER_UP`、最後の UP を `ACTION_UP` に変換する（index は agent が現在のポインタ配列から算出）。
 - KEY 同様 **一方向・fire-and-forget**（`req_id`／応答なし、状態を変えない）。
 
+#### INPUT_TOUCH_BATCH (input_type = 0x03) — タッチイベント（まとめ送り）
+
+`INPUT_TOUCH` を **1 フレームに複数件まとめた**もの。意味論は完全に同じで、agent は各レコードを
+順番に `INPUT_TOUCH` と同一の注入経路（`handleTouch` → per-pointer state machine）へ流すだけ。
+**目的は転送効率**：タッチは「小さいデータを高頻度」で送るため、ADB のストリーム単位 stop-and-wait
+（1 A_WRTE ＝ 1 往復）では 1 イベント＝1 トランザクションのコストが映像のフロー制御と競合し、
+回線全体を重くする。Tab5 は**リンクが往復待ちの間に溜まった MOVE をまとめ、リンクが空いた瞬間に
+1 フレームで送る**ので、速いドラッグでも「1 サンプル＝1 フレーム」ではなく「~1 フレーム/RTT」に減る
+（点は捨てない＝軌跡の精度は保つ／個別送信に対する追加遅延もない）。USB のような速いリンクでは毎サンプル
+即フラッシュ＝実質 count=1 なので従来と同じ。
+
+```
+ +1   u8    count       後続レコード数（1..255）
+ then count × record（各 6 bytes）:
+   +0  u8   action      0=DOWN, 1=MOVE, 2=UP（ポインタ単位）
+   +1  u8   pointer_id  ソース端末タッチコントローラの track ID
+   +2  u16  x           Tab5 パネル座標 X [px] (LE)
+   +4  u16  y           Tab5 パネル座標 Y [px] (LE)
+ (= 入力ペイロード計 2 + 6×count bytes)
+```
+
+- レコードの **action / pointer_id / 座標の意味は `INPUT_TOUCH` と同一**（reserved バイトは持たない）。
+  座標は Tab5 パネル座標で、ソース端末座標への逆変換は agent が行う（上記 `INPUT_TOUCH` と同じ）。
+- agent は count 件を**到着順**に replay する（DOWN/MOVE/UP の順序はそのまま）。Tab5 側で DOWN/UP は
+  常に即フラッシュされるので、まとめ対象になるのは連続する MOVE のみ。
+- KEY/TOUCH 同様 **一方向・fire-and-forget**（`req_id`／応答なし）。
+
 > **テキスト（input_type=0x02）は予約**。同じ INPUT チャネル・同じ注入経路に乗るので、
 > フレーム層（§3）は変えない。
 
