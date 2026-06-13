@@ -60,6 +60,8 @@ private:
 
     TaskHandle_t lib_task_ = nullptr;
     TaskHandle_t client_task_ = nullptr;
+    SemaphoreHandle_t lib_done_ = nullptr;  // given by lib_task as it exits
+    SemaphoreHandle_t cli_done_ = nullptr;  // given by client_task as it exits
     volatile bool running_ = false;
     volatile bool device_gone_ = false;
 
@@ -77,6 +79,7 @@ void UsbHostTransport::lib_task(void* arg) {
         uint32_t flags = 0;
         usb_host_lib_handle_events(portMAX_DELAY, &flags);
     }
+    xSemaphoreGive(self->lib_done_);  // close() joins on this before uninstalling
     vTaskDelete(nullptr);
 }
 
@@ -85,6 +88,7 @@ void UsbHostTransport::client_task(void* arg) {
     while (self->running_) {
         usb_host_client_handle_events(self->client_, portMAX_DELAY);
     }
+    xSemaphoreGive(self->cli_done_);  // close() joins on this before deregistering
     vTaskDelete(nullptr);
 }
 
@@ -99,7 +103,9 @@ void UsbHostTransport::client_event(const usb_host_client_event_msg_t* msg, void
 bool UsbHostTransport::open() {
     in_sem_ = xSemaphoreCreateBinary();
     out_sem_ = xSemaphoreCreateBinary();
-    if (!in_sem_ || !out_sem_) return false;
+    lib_done_ = xSemaphoreCreateBinary();
+    cli_done_ = xSemaphoreCreateBinary();
+    if (!in_sem_ || !out_sem_ || !lib_done_ || !cli_done_) return false;
 
     usb_host_config_t host_cfg = {};
     host_cfg.skip_phy_setup = false;
@@ -360,18 +366,46 @@ void UsbHostTransport::close() {
         usb_host_device_close(client_, dev_);
         dev_ = nullptr;
     }
-    // Unblock the event tasks so they can exit.
-    if (client_) usb_host_client_unblock(client_);
-    usb_host_lib_unblock();
-    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Deterministic teardown so the stack is fully uninstalled and a later
+    // Connect can reinstall it (otherwise usb_host_install fails ESP_ERR_INVALID_STATE):
+    // stop + JOIN the client event task before deregistering its client (handling
+    // events on a deregistered client is UB), then stop + join the lib task, then
+    // free devices and uninstall — pumping the lib events ourselves now that the
+    // lib task is gone, since uninstall only succeeds once the deregister/free
+    // (NO_CLIENTS / ALL_FREE) events have been processed.
+    if (client_task_) {
+        usb_host_client_unblock(client_);
+        xSemaphoreTake(cli_done_, portMAX_DELAY);
+        client_task_ = nullptr;
+    }
     if (client_) {
         usb_host_client_deregister(client_);
         client_ = nullptr;
     }
-    usb_host_uninstall();
+    if (lib_task_) {
+        usb_host_lib_unblock();
+        xSemaphoreTake(lib_done_, portMAX_DELAY);
+        lib_task_ = nullptr;
+    }
+
+    usb_host_device_free_all();
+    esp_err_t uerr = ESP_FAIL;
+    for (int i = 0; i < 100; ++i) {
+        uerr = usb_host_uninstall();
+        if (uerr != ESP_ERR_INVALID_STATE) break;
+        // Devices/clients not fully freed yet: pump the lib so it processes the
+        // pending free/no-clients events, then retry.
+        uint32_t flags = 0;
+        usb_host_lib_handle_events(pdMS_TO_TICKS(20), &flags);
+    }
+    if (uerr != ESP_OK) ESP_LOGE(TAG, "usb_host_uninstall: %s", esp_err_to_name(uerr));
+
     if (in_sem_) vSemaphoreDelete(in_sem_);
     if (out_sem_) vSemaphoreDelete(out_sem_);
-    in_sem_ = out_sem_ = nullptr;
+    if (lib_done_) vSemaphoreDelete(lib_done_);
+    if (cli_done_) vSemaphoreDelete(cli_done_);
+    in_sem_ = out_sem_ = lib_done_ = cli_done_ = nullptr;
 }
 
 }  // namespace

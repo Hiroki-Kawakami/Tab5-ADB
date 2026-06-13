@@ -31,4 +31,10 @@ adb::Client* adb_client();
 // need this rather than the raw pointer.
 std::shared_ptr<adb::Client> adb_client_shared();
 
+// Tear down the active connection: close the Client (which stops the reader task
+// and, via on_state(Closed), the tab5adb-agent link too) and release the holder's
+// shared_ptr, so adb_client() is null again. Idempotent; call on the LVGL thread.
+// The UI navigation back to HomeScreen is the caller's job.
+void adb_disconnect();
+
 }  // namespace app

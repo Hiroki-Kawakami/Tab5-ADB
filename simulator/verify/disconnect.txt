@@ -1,0 +1,19 @@
+# Disconnect tool button: Connect -> device screen, tap Disconnect, confirm in the
+# modal, and verify the app unwinds back to the HomeScreen (connection dropped, so
+# the USB card shows Connect again). Needs a real phone on the PC.
+settle
+tap 360 420
+wait 9000
+settle
+wait 2000
+# Disconnect tool button (last in the tools column)
+tap 550 668
+settle
+wait 500
+# Confirm: the red "Disconnect" button in the modal
+tap 498 698
+settle
+wait 1500
+settle
+capture simulator/verify/out/disconnect.jpg
+quit

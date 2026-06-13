@@ -70,6 +70,15 @@ adb::Client* adb_client() { return g_client.get(); }
 
 std::shared_ptr<adb::Client> adb_client_shared() { return g_client; }
 
+void adb_disconnect() {
+    if (!g_client) return;
+    // close() blocks until the reader task exits; on the way out it fires
+    // on_state(Closed) on the reader thread, which tears down the agent link
+    // (Holder::on_state -> agent_client().on_adb_disconnected()).
+    g_client->close();
+    g_client.reset();
+}
+
 }  // namespace app
 
 void adb_app() {

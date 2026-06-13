@@ -16,6 +16,7 @@
 #include "agent_client.hpp"
 #include "device_icons.hpp"
 #include "device_info.hpp"
+#include "home_screen.hpp"
 #include "modal.hpp"
 #include "screen_manager.hpp"
 #include "resources/resources.h"
@@ -360,5 +361,14 @@ void ADBDeviceScreen::createToolsContainer() {
         screen_manager.push(std::make_shared<ADBLogcatScreen>());
     });
     tool_button(LUCIDE_POWER, "Power Menu", [](lv_event_t*){});
-    tool_button(LUCIDE_UNPLUG, "Disconect", [](lv_event_t*){});
+    tool_button(LUCIDE_UNPLUG, "Disconnect", [this](lv_event_t*){
+        app::modal_confirm(
+            root_, "Disconnect", "Disconnect from this device?", "Disconnect",
+            /*destructive=*/true, []{
+                // Drop the connection (also tears down the agent link), then reset
+                // the UI to the home screen. load() unwinds the whole screen stack.
+                app::adb_disconnect();
+                screen_manager.load(std::make_shared<HomeScreen>());
+            });
+    });
 }

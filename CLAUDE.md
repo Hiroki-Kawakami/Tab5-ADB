@@ -629,6 +629,20 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   `bsp_usb_host_set_power(bool)` (tab5 = PI4IO USB5V_EN, sim = no-op). VBUS is **on
   at boot** (`config.usb.usb5v_en = true`); embedded_adb has no VBUS/on-off concept
   and no embedded_adb → bsp dependency.
+  **Fourth gotcha — teardown must fully uninstall or a reconnect fails
+  `usb_host_install: ESP_ERR_INVALID_STATE`:** the transport runs two background
+  event tasks (`lib_task` = `usb_host_lib_handle_events`, `client_task` =
+  `usb_host_client_handle_events`). `close()` (Disconnect button → `Client::close`
+  → transport dtor) must **deterministically join both before uninstalling** — they
+  give a per-task done semaphore (`lib_done_`/`cli_done_`) as they exit, and
+  `close()` does: unblock + join `client_task`, `usb_host_client_deregister`, unblock
+  + join `lib_task`, `usb_host_device_free_all`, then `usb_host_uninstall` in a retry
+  loop that **pumps `usb_host_lib_handle_events` itself** (the lib task is gone, and
+  uninstall only succeeds once the NO_CLIENTS / ALL_FREE events are processed). The
+  old code only `vTaskDelay(50ms)`'d and ignored the uninstall return → it failed
+  silently, the stack stayed installed, and the next Connect's `usb_host_install`
+  returned `ESP_ERR_INVALID_STATE`. (Device-only path — the sim's libusb transport
+  can't reproduce it; needs a real-HW flash check.)
 - `adb_connection` / `adb_stream` — CNXN handshake + AUTH state machine, and
   `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing (`open_stream()` + `run_service()`
   for one-shot commands, classic per-OKAY flow control). The packet read loop is
@@ -989,7 +1003,12 @@ the reader-thread `on_state` callbacks to the LVGL thread with `lv_async_call`
 Online it pushes `ADBDeviceScreen`. The app pulls in no
 protocol/transport details, only the `adb` component's typed surface. On `Closed`
 the holder also calls `app::agent_client().on_adb_disconnected()` so the
-tab5adb-agent connection is torn down with the adb link.
+tab5adb-agent connection is torn down with the adb link. `ADBDeviceScreen`'s
+**Disconnect** tool button (confirm modal) calls `app::adb_disconnect()` —
+`g_client->close()` (which fires `on_state(Closed)` → the agent teardown above) +
+drops the holder's `shared_ptr` so `adb_client()` is null — then
+`screen_manager.load(HomeScreen)` to unwind back to the start
+(`simulator/verify/disconnect.txt`, verified on a real Android device).
 
 `ADBDeviceScreen`'s **summary header** is a tappable card: device name
 (`settings get global device_name`, falls back to the banner model), a
