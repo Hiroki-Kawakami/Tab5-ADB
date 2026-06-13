@@ -78,6 +78,12 @@ typedef struct {
 esp_err_t bsp_init(const bsp_config_t *config);
 void bsp_restart(void);
 
+// MARK: USB
+/* Switch the USB host port's VBUS (5V) rail on/off (on at boot per
+ * bsp_config usb.usb5v_en). No-op on models without a switchable host-port rail
+ * (e.g. the simulator). */
+void bsp_usb_host_set_power(bool on);
+
 // MARK: Display
 bsp_pixel_format_t bsp_display_get_pixel_format(void);
 void  bsp_display_set_brightness(int brightness);

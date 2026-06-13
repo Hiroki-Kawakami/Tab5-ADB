@@ -27,6 +27,8 @@ const char* TAG = "adb/usbhost";
 
 size_t round_up(size_t v, size_t a) { return a ? (v + a - 1) / a * a : v; }
 
+UsbHostResetHook g_usb_reset_hook = nullptr;
+
 // Transfer completion callback (runs on the client-events task). The context is
 // the semaphore to release; the caller reads transfer->status afterwards.
 void xfer_done(usb_transfer_t* t) {
@@ -138,6 +140,16 @@ bool UsbHostTransport::open() {
         return false;
     }
     xTaskCreate(client_task, "adb_usb_cli", 4096, this, 5, &client_task_);
+
+    // Reset the host port *now*, after the host stack is up. open() runs on
+    // demand, so a device may have been attached (D+ pulled up) long before
+    // usb_host_install() powered the root port — the DWC2 then sees no
+    // idle→connected transition and never enumerates, so the poll below would spin
+    // forever (toggling the controller's internal root-port-power does NOT fix
+    // this: the device's VBUS doesn't physically cycle, so its line state never
+    // changes). The caller-supplied reset makes the device re-attach into the
+    // already-ready host = the connect edge the controller needs.
+    if (g_usb_reset_hook) g_usb_reset_hook();
 
     // Poll for a connected device exposing an ADB interface (~20s).
     ESP_LOGI(TAG, "usb_host installed; waiting for a device on the host port...");
@@ -369,5 +381,7 @@ std::unique_ptr<Transport> open_usb_transport() {
     if (!t->open()) return nullptr;
     return t;
 }
+
+void set_usb_host_reset_hook(UsbHostResetHook hook) { g_usb_reset_hook = hook; }
 
 }  // namespace adb

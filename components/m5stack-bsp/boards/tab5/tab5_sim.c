@@ -49,3 +49,8 @@ esp_err_t bsp_init(const bsp_config_t *config) {
 void bsp_restart(void) {
     exit(0);
 }
+
+void bsp_usb_host_set_power(bool on) {
+    /* No switchable host-port VBUS rail on the simulator. */
+    (void)on;
+}

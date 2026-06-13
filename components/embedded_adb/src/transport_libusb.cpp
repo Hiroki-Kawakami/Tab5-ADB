@@ -201,4 +201,8 @@ std::unique_ptr<Transport> open_usb_transport() {
     return result;
 }
 
+// No host port to reset on the simulator (libusb talks to a device the host OS
+// already enumerated); the hook is a device-only concern.
+void set_usb_host_reset_hook(UsbHostResetHook) {}
+
 }  // namespace adb

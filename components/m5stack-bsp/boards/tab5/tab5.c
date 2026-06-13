@@ -210,3 +210,8 @@ void bsp_restart(void) {
     vTaskDelay(pdMS_TO_TICKS(50));
     esp_restart();
 }
+
+void bsp_usb_host_set_power(bool on) {
+    /* USB5V_EN is PI4IOE2 (0x44) pin 3 — the host-port 5V load switch. */
+    pi4io_set_output(pi4ioe2, 3, on);
+}

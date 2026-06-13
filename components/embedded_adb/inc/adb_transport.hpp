@@ -41,4 +41,12 @@ public:
 // Returns nullptr if none is found or the open fails. Per-target implementation.
 std::unique_ptr<Transport> open_usb_transport();
 
+// Optional hook to reset the USB host port, so a device already attached when the
+// host transport opens re-attaches with a clean connect edge (some host
+// controllers can't detect a device that was already present at power-up). The
+// device transport calls it once while opening; the caller supplies the mechanism
+// (embedded_adb has no board knowledge). nullptr = no reset.
+using UsbHostResetHook = void (*)();
+void set_usb_host_reset_hook(UsbHostResetHook hook);
+
 }  // namespace adb

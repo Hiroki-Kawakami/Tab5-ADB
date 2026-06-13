@@ -1,8 +1,12 @@
 #include "adb_app.hpp"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 #include <memory>
 
 #include "adb.hpp"  // adb::Client, adb::ClientListener
+#include "adb_transport.hpp"  // adb::set_usb_host_power_hook
 #include "agent_client.hpp"
 #include "bsp.h"
 #include "display_manager.hpp"
@@ -93,6 +97,17 @@ void adb_app() {
                                     ? BSP_AUDIO_SPEAKER_MODE_OFF
                                     : BSP_AUDIO_SPEAKER_MODE_AUTO;
     ESP_ERROR_CHECK(bsp_init(&config));
+
+    // Teach the USB transport how to reset the host port (called once after the
+    // host stack is up, so a device plugged in before Connect re-attaches with a
+    // clean connect edge). embedded_adb stays board-agnostic — it knows only
+    // "reset"; the VBUS power-cycle (USB5V_EN off→settle→on) lives here. No-op on
+    // the simulator (the libusb transport never calls it).
+    adb::set_usb_host_reset_hook([] {
+        bsp_usb_host_set_power(false);
+        vTaskDelay(pdMS_TO_TICKS(200));  // let the phone observe VBUS removal
+        bsp_usb_host_set_power(true);
+    });
 
     // Apply the persisted audio settings (the volume is the gain the next stream
     // fades in to; the EQ override sticks across HP-route re-voicing).

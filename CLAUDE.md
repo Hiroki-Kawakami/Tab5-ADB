@@ -607,6 +607,28 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   only because its in-callback re-submit can *drop* on overflow (fine for video,
   not for ADB). The single-transfer-per-payload reader is already clean at 40-49
   fps, so the pool's read-ahead wasn't the bottleneck; **not pursued.**
+  **Third gotcha — already-plugged enumeration (verified on a real Tab5 + an Android phone):**
+  the host stack is installed **lazily** (only when the user taps Connect, inside
+  `open_usb_transport`), but the Tab5's host-port VBUS is the PI4IO **USB5V_EN**
+  load switch (`pi4ioe2` pin 3), not the DWC2's internal DRVVBUS. If VBUS is on
+  before `usb_host_install`, a device plugged in **before Connect** is already
+  attached (D+ pulled up) when the root port powers, the DWC2 sees no
+  idle→connected edge, and enumeration never starts (`enumerated devices: 0`
+  forever — the 20 s poll can't help). Toggling the controller's internal
+  root-port-power (`usb_host_lib_set_root_port_power`) does **NOT** fix it: the
+  phone's physical VBUS doesn't cycle, so its line state never changes (tried,
+  failed). **Fix:** *after* `usb_host_install` the transport **resets the host
+  port** via an app-supplied hook (a real **USB5V_EN off→200 ms→on** power cycle) —
+  the phone sees VBUS drop and rise = a genuine re-attach into an already-ready
+  host = the connect edge the controller needs, so "already plugged" becomes
+  identical to "plug after Connect". **API split (board-agnostic):** embedded_adb
+  knows only **"reset the port"** — `adb::set_usb_host_reset_hook(void(*)())`, the
+  transport calls it once after install (the libusb/sim transport never does).
+  *What* a reset is lives in `adb_app` (the integrator): the registered hook
+  composes the VBUS power-cycle out of the BSP primitive
+  `bsp_usb_host_set_power(bool)` (tab5 = PI4IO USB5V_EN, sim = no-op). VBUS is **on
+  at boot** (`config.usb.usb5v_en = true`); embedded_adb has no VBUS/on-off concept
+  and no embedded_adb → bsp dependency.
 - `adb_connection` / `adb_stream` — CNXN handshake + AUTH state machine, and
   `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing (`open_stream()` + `run_service()`
   for one-shot commands, classic per-OKAY flow control). The packet read loop is
