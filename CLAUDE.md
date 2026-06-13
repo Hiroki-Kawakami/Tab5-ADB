@@ -937,7 +937,17 @@ to the C6, and `esp_wifi_init()` brings the SDIO transport up itself — driven
 **entirely by sdkconfig** (SDIO pins / reset GPIO / slave target), NOT by C code.
 The Tab5 wiring lives in `esp32p4/sdkconfig.defaults` (reset GPIO 15 active-low,
 CMD=13 / CLK=12 / D0..D3 = 11/10/9/8, 4-bit @ 40 MHz, `esp32c6`), mirrored from the
-`tab5remote` reference project. So **the BSP owns no Wi-Fi code** — the old
+`tab5remote` reference project. **Host esp_hosted is pinned to 2.12.6 +
+esp_wifi_remote 1.6.1** in `components/m5stack-bsp/idf_component.yml` to match the C6
+slave firmware (the slave and host esp_hosted versions must match — a 1.x-host/2.x-slave
+mismatch ran very slowly). esp-hosted 2.x reworked the SDIO Kconfig: the old
+`CONFIG_ESP_HOSTED_SDIO_PIN_*` keys became non-settable *derived* values, so pins are
+set via the per-slot PRIV symbols (`CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_*_SLOT_1`) plus
+`CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6` / `..._P4_DEV_BOARD_NONE` / `..._SDIO_SLOT_1`.
+The receive-heavy mirror also bumps the `esp_wifi_remote` RX path
+(`CONFIG_WIFI_RMT_RX_BA_WIN=32`, `..._STATIC_RX_BUFFER_NUM=32`,
+`..._DYNAMIC_RX_BUFFER_NUM=64`; TX stays static — `WIFI_RMT_DYNAMIC_TX_BUFFER` is
+Kconfig-disabled when `SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`). So **the BSP owns no Wi-Fi code** — the old
 `bsp_config.wifi` / `esp_netif`/`esp_wifi_init` block was removed; standard ESP-IDF
 network lifecycle is this component's job (the same way `adb` owns the USB/esp
 lifecycle, not the BSP).
@@ -964,9 +974,10 @@ guarded by `s_sta_netif_started || esp_netif_is_netif_up`), a connected handler
 (rxcb register when `!esp_wifi_is_if_ready_when_started`), and IDF's public
 `esp_netif_action_disconnected`/`esp_netif_action_got_ip` for the rest. This is the
 STA analogue of M5Tab5-UserDemo's `fix wifi init crash with updated c6 firmware`
-(which patched the AP path only — that demo is SoftAP-only). Host esp_hosted stays
-1.4.0 / esp_wifi_remote 0.8.5 (same as M5); the fix is C-side only. **Device-only —
-not reproducible in the sim fake; needs a real Tab5 + C6 flash check.**
+(which patched the AP path only — that demo is SoftAP-only). The fix is C-side only;
+it is version-independent and kept as a defensive guard even now that the host
+esp_hosted matches the 2.x slave. **Device-only — not reproducible in the sim fake;
+needs a real Tab5 + C6 flash check.**
 
 **API (`inc/wifi_manager.hpp`, see README + docs/wifi.md).** `wifi::manager()` is a
 leaked singleton (like `app::agent_client()`). The blocking radio ops (bring-up,
