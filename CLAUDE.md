@@ -1356,7 +1356,18 @@ appear/disappear, so pushing the mirroring screen stops the preview stream
 first (and the agent tolerates the reconfigure either way). **Tapping the
 preview** is the mirroring entry: Normal → push `ADBMirroringScreen`; Limited →
 a `modal_message` explaining the agent couldn't be started (the old Mirroring
-tool button is gone).
+tool button is gone). Directly **under** the preview (in the same 360-wide
+column, `createNavBar`) sits a `[ Back | Home | Recents | Power ]` row, rendered
+as one bordered bar with thin separators between the four flat icon buttons:
+Back/Home/Recents `flex_grow` to share the width evenly, Power is a fixed narrow
+button pinned right. Unlike the mirror overlay's low-latency INPUT channel these
+go over plain **`app::adb_client()->exec("input keyevent <code>")`** (KEYCODE
+Back=4/Home=3/AppSwitch=187/Power=26) — agent-independent, so they work in
+**both Normal and Limited mode**; the small `input` fork latency is fine for
+discrete taps. Gesture-nav devices still get the 3 nav keys (the KEYCODEs work
+regardless of nav mode), same as the mirror overlay. Verified on a real Android device via
+`simulator/verify/device_nav.txt` (Recents tap → the phone's overview shows in
+the live preview, Home → back to the launcher).
 
 Tapping the preview (Normal mode) pushes **`ADBMirroringScreen`**
 (`app/adb_mirroring_screen.*`) — the live screen-mirror viewer over `agent_link`.

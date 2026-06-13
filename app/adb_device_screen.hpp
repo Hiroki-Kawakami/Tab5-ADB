@@ -49,6 +49,7 @@ private:
     void createHeader();
     void refreshSummary();
     void createPreviewContainer();
+    void createNavBar();  // Back/Home/Recents/Power row under the preview
     void createToolsContainer();
     void startPreview();   // pick + start the mode's preview (LVGL thread)
     void stopPreview();

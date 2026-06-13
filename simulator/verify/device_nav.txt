@@ -1,0 +1,21 @@
+# Device screen nav bar: the [ Back | Home | Recents | Power ] row under the
+# preview drives the phone over `adb shell input keyevent` (agent-independent,
+# works in both Normal and Limited mode). The effect is observable end-to-end:
+# the live preview streams the phone, so tapping Recents shows the overview and
+# Home returns to the launcher. Bar y ~= 973; Back ~73 / Home ~171 / Recents
+# ~270 / Power ~352. Needs a real phone plugged into the PC.
+settle
+tap 360 420
+wait 9000
+settle
+# Recents -> the phone switches to the overview screen
+tap 270 973
+wait 5000
+settle
+capture simulator/verify/out/device_nav_recents.jpg
+# Home -> back to the launcher
+tap 171 973
+wait 5000
+settle
+capture simulator/verify/out/device_nav_home.jpg
+quit

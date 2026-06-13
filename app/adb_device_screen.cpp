@@ -305,13 +305,18 @@ void ADBDeviceScreen::createPreviewContainer() {
     preview_container_ = lv_obj_create(control_container_);
     lv_obj_remove_style_all(preview_container_);
     lv_obj_set_size(preview_container_, width, LV_SIZE_CONTENT);
+    // Column: the preview image, then the Back/Home/Recents/Power nav row right
+    // below it. Cross-axis centered so a narrower frame (very tall source hitting
+    // the height cap, or a landscape-rotated device) stays centered in the
+    // 360-wide column; the nav row follows the image's bottom edge.
+    lv_obj_set_flex_flow(preview_container_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(preview_container_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(preview_container_, 12, 0);
     preview_image_ = lv_image_create(preview_container_);
     // 9:20 placeholder until the first frame lands; the preview then resizes the
-    // image to each frame's aspect-fitted size. Top-centered so a narrower frame
-    // (very tall source hitting the height cap, or a landscape-rotated device)
-    // stays centered in the 360-wide column.
+    // image to each frame's aspect-fitted size.
     lv_obj_set_size(preview_image_, width, width / 9 * 20);
-    lv_obj_set_align(preview_image_, LV_ALIGN_TOP_MID);
     lv_obj_set_style_bg_color(preview_image_, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(preview_image_, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(preview_image_, 12, 0);
@@ -321,6 +326,64 @@ void ADBDeviceScreen::createPreviewContainer() {
     lv_obj_add_event_fn(preview_image_, LV_EVENT_CLICKED, [this](lv_event_t *) {
         onPreviewTapped();
     });
+
+    createNavBar();
+}
+
+void ADBDeviceScreen::createNavBar() {
+    // [ Back | Home | Recents | Power ] directly under the preview, rendered as
+    // one bordered bar with thin separators between the four flat icon buttons.
+    // Back/Home/Recents grow to share the width evenly; Power is a fixed narrow
+    // button pinned to the right. These are agent-independent (work in Limited
+    // mode too), so they go over plain `adb shell input keyevent` — the slight
+    // latency is fine for discrete taps, unlike the mirror overlay's low-latency
+    // INPUT channel. Gesture-nav devices still get the 3 nav keys (KEYCODE_BACK/
+    // HOME/APP_SWITCH work regardless of nav mode), same as the mirror overlay.
+    auto nav = lv_obj_create(preview_container_);
+    lv_obj_set_size(nav, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(nav, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(nav, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(nav, 0, 0);
+    lv_obj_set_style_pad_column(nav, 0, 0);
+
+    // Android KeyEvent.KEYCODE_* (also the `input keyevent` numbers).
+    auto nav_button = [nav](const char *icon, bool grow, int keycode) {
+        auto b = lv_button_create(nav);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_height(b, 64);
+        if (grow) {
+            lv_obj_set_flex_grow(b, 1);  // Back/Home/Recents share the row evenly
+        } else {
+            lv_obj_set_width(b, 64);     // Power: fixed, narrow, right end
+        }
+        lv_obj_add_event_fn(b, LV_EVENT_CLICKED, [keycode](lv_event_t *) {
+            if (auto *c = app::adb_client())
+                c->exec("input keyevent " + std::to_string(keycode),
+                        [](adb::Error, const std::string &) {});
+        });
+        lv_obj_set_style_bg_color(b, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+        auto lbl = lv_label_create(b);
+        lv_label_set_text(lbl, icon);
+        lv_obj_set_style_text_font(lbl, R.font.lucide_40, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x444444), 0);
+        lv_obj_center(lbl);
+    };
+    auto separator = [nav]() {
+        auto sep = lv_obj_create(nav);
+        lv_obj_remove_style_all(sep);
+        lv_obj_set_size(sep, 1, LV_PCT(100));
+        lv_obj_set_style_bg_color(sep, lv_color_hex(0xc0c0c0), 0);
+        lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+        lv_obj_set_style_margin_ver(sep, 8, 0);
+    };
+    nav_button(LUCIDE_ARROW_LEFT, /*grow=*/true, 4);    // Back
+    separator();
+    nav_button(LUCIDE_CIRCLE, /*grow=*/true, 3);        // Home
+    separator();
+    nav_button(LUCIDE_SQUARE, /*grow=*/true, 187);      // Recents (KEYCODE_APP_SWITCH)
+    separator();
+    nav_button(LUCIDE_POWER, /*grow=*/false, 26);       // Power
 }
 
 void ADBDeviceScreen::createToolsContainer() {
