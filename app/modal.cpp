@@ -51,10 +51,16 @@ lv_obj_t *modal_open(lv_obj_t *parent) {
     auto scrim = lv_obj_create(parent);
     lv_obj_remove_style_all(scrim);
     // The parent is typically a flex-layout screen root: take the scrim out of
-    // the layout and pin it over the whole screen.
+    // the layout and pin it over the whole screen. Children are placed in the
+    // parent's *content area*, so if the root has padding/border (e.g.
+    // ADBDeviceScreen's pad_all), a LV_PCT(100)/pos(0,0) scrim is inset by it and
+    // the padding band shows through. Cover the full parent box instead: offset
+    // back over the left/top space (pad+border) and size to the whole parent.
     lv_obj_add_flag(scrim, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_set_size(scrim, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_pos(scrim, 0, 0);
+    lv_obj_update_layout(parent);
+    lv_obj_set_pos(scrim, -lv_obj_get_style_space_left(parent, LV_PART_MAIN),
+                  -lv_obj_get_style_space_top(parent, LV_PART_MAIN));
+    lv_obj_set_size(scrim, lv_obj_get_width(parent), lv_obj_get_height(parent));
     lv_obj_set_style_bg_color(scrim, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scrim, LV_OPA_50, 0);
     lv_obj_add_flag(scrim, LV_OBJ_FLAG_CLICKABLE);  // absorb taps behind the card
