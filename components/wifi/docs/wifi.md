@@ -85,11 +85,14 @@ bool on = manager().enabled();           // false == State::Off
 ```
 
 `set_enabled()` is **non-blocking** (enqueues to the worker; On brings the stack up
-itself if needed, so no prior `start()` is required) and idempotent. The optional
-`done` callback fires on the **worker thread** once the op is applied (always, even
-for a no-op toggle) — the UI uses it to re-enable the switch + rescan. It notifies
-the `Listener` with the new state. Turning Off drops any live connection and
-completes a pending `connect()` with `Failed`. On device it is `esp_wifi_stop()` /
+itself if needed, so no prior `start()` is required) and idempotent. Turning **On
+also rejoins the saved network** (phone-like — the worker runs the same connect
+path as boot's `autoconnect_saved()`, a no-op if none is saved), so flipping the
+switch back on reconnects without a manual tap. The optional `done` callback fires
+on the **worker thread** once the op is applied (always, even for a no-op toggle) —
+the UI uses it to re-enable the switch + rescan. It notifies the `Listener` with the
+new state. Turning Off drops any live connection and completes a pending `connect()`
+with `Failed`. On device it is `esp_wifi_stop()` /
 `esp_wifi_start()` (the initialized stack is kept); the `esp_wifi_stop` disconnect
 event is not read as a drop-to-idle (state stays Off).
 

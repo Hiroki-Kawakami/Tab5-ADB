@@ -83,10 +83,10 @@ public:
     // set_enabled() done callback fires on the worker thread. Marshalling to LVGL
     // is the app's job either way.
 
-    // Register the persistent listener + bring the radio up (On). Idempotent. The
-    // bring-up is enqueued to the worker, so this returns immediately. Does NOT
-    // auto-connect — call connect()/connect_saved(). On device the bring-up is
-    // where esp_netif/esp_event/esp_wifi_init/esp_wifi_start happen.
+    // Register the persistent listener + bring the radio up (On) and rejoin the
+    // saved network (same path as set_enabled(true)). Idempotent. The work is
+    // enqueued to the worker, so this returns immediately. On device the bring-up
+    // is where esp_netif/esp_event/esp_wifi_init/esp_wifi_start happen.
     void start(std::weak_ptr<Listener> listener);
 
     // Register/replace the persistent listener only — cheap and synchronous, no
@@ -129,12 +129,13 @@ public:
     void connect_saved(ConnectCb cb, int timeout_ms = 15000);
 
     // Turn the radio on/off (the Wi-Fi enable switch). Non-blocking: the blocking
-    // bring-up (On) / esp_wifi_stop (Off) runs on the worker. Off drops any
-    // live/in-flight connection and moves to State::Off (no scanning/connecting
-    // until back On); On brings the stack up and returns to State::Disconnected.
-    // Notifies the Listener with the new state; a pending connect() completes
-    // (Failed) when turned Off. `done` (optional) fires on the worker thread once
-    // the op has been applied (always fires, even for a no-op toggle).
+    // work runs on the worker. Off drops any live/in-flight connection and moves
+    // to State::Off (no scanning/connecting until back On); On brings the stack up
+    // AND rejoins the saved network (phone-like — same connect path as boot's
+    // autoconnect_saved(); a no-op connect if none is saved). Notifies the Listener
+    // with the new state; a pending connect() completes (Failed) when turned Off.
+    // `done` (optional) fires on the worker thread once the op has been applied
+    // (always fires, even for a no-op toggle).
     void set_enabled(bool on, std::function<void()> done = {});
     bool enabled() const;  // false == State::Off (radio down)
 

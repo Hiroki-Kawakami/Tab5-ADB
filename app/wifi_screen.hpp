@@ -41,8 +41,11 @@ private:
     bool busy_ = false;                 // a bring-up/teardown task is in flight
                                         // (LVGL thread only); switch is disabled
     bool scanning_ = false;             // a scan is in flight (spinner up, list hidden)
+    bool want_scan_ = false;            // a scan is deferred until the link settles
+                                        // (esp_wifi can't scan mid-association)
 
     void start_scan();
+    void maybe_scan();                  // scan now, or defer past a Connecting state
     void rebuild_list();
     void update_list_visibility();      // spinner vs list, per scanning_/enabled()
     void update_status(const wifi::Status &s);

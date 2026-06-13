@@ -1,0 +1,12 @@
+# Empty scan result shows a "No networks found" label instead of a blank box.
+settle 2500
+tap 589 1171
+settle 1200
+tap 360 195
+settle 1500
+# No APs in range (arg has no valid entries -> empty list); rescan shows the label.
+wifi-aps none
+tap 663 58
+wait 800
+capture simulator/verify/out/wifi_empty.jpg
+quit

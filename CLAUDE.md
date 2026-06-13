@@ -944,7 +944,9 @@ HomeScreen "Wireless (TCP/IP)" card only shows a live
 status line. The switch drives `wifi::manager().set_enabled()` (radio
 `esp_wifi_stop`/`start`, keeping the stack); Off → `State::Off`, the screen hides
 the spinner, clears the AP list, and `start_scan()`/`rebuild_list()` no-op while
-off. **The screen does NOT bring the radio up on entry** — `onEnter` only registers
+off. **On also rejoins the saved network** (the worker runs the same connect path
+as the boot `autoconnect_saved()`), so flipping the switch back on reconnects
+without a manual tap. **The screen does NOT bring the radio up on entry** — `onEnter` only registers
 the (weak) listener cheaply via `wifi::manager().set_listener()` (no bring-up).
 Flipping the switch gives immediate UI feedback (switch state + spinner +
 "Turning on…", and the switch is disabled for the transition), then calls the
@@ -952,7 +954,12 @@ Flipping the switch gives immediate UI feedback (switch state + spinner +
 does the blocking esp_wifi work and fires `done` on the worker thread, which the
 screen marshals to LVGL (`lv_async_call`) to re-enable the switch + rescan. So there
 is no screen-owned task; the blocking work and the boot auto-connect both run on the
-single manager worker. **Boot auto-connect:** `adb_app()` calls
+single manager worker. Because enabling **also rejoins the saved network**, the
+screen does NOT scan immediately (esp_wifi can't scan mid-association — the scan
+would be aborted on connect, yielding an empty list): `maybe_scan()` defers while
+`State::Connecting` (`want_scan_`), and `on_wifi_state` runs the scan once the link
+settles (Connected/Disconnected). The refresh button / `onAppear` go through
+`maybe_scan()` too. **Boot auto-connect:** `adb_app()` calls
 `wifi::manager().autoconnect_saved()` (non-blocking — enqueues to the worker) so by
 the time the user opens the screen it usually opens *On* + connected (the switch
 reflects `enabled()`). The screen IS the `wifi::Listener`;

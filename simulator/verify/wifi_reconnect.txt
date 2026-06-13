@@ -1,0 +1,16 @@
+# Toggling Wi-Fi off then on should rejoin the saved network (OfficeWiFi),
+# just like the boot auto-connect.
+settle 2500
+tap 589 1171
+settle 1200
+tap 360 195
+settle 1500
+# Switch Off.
+tap 640 182
+wait 800
+capture simulator/verify/out/wifi_reconnect_off.jpg
+# Switch On -> rejoins OfficeWiFi (connect + scan).
+tap 640 182
+wait 1600
+capture simulator/verify/out/wifi_reconnect_on.jpg
+quit

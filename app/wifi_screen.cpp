@@ -116,7 +116,7 @@ void WiFiScreen::build() {
     lv_obj_set_style_radius(refresh, 12, 0);
     lv_obj_set_style_bg_color(refresh, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(refresh, LV_OPA_COVER, LV_STATE_PRESSED);
-    lv_obj_add_event_fn(refresh, LV_EVENT_CLICKED, [this](lv_event_t *) { start_scan(); });
+    lv_obj_add_event_fn(refresh, LV_EVENT_CLICKED, [this](lv_event_t *) { maybe_scan(); });
     lv_obj_t *refresh_label = lv_label_create(refresh);
     lv_label_set_text(refresh_label, LUCIDE_REFRESH_CW);
     lv_obj_set_style_text_font(refresh_label, R.font.lucide_40, 0);
@@ -224,7 +224,7 @@ void WiFiScreen::onEnter() {
     update_status(wifi::manager().status());
 }
 
-void WiFiScreen::onAppear() { start_scan(); }  // no-op while off (guarded inside)
+void WiFiScreen::onAppear() { maybe_scan(); }  // no-op while off (guarded inside)
 
 void WiFiScreen::set_enabled(bool on) {
     // LVGL thread. Give immediate feedback, then hand the blocking radio work to
@@ -247,6 +247,7 @@ void WiFiScreen::set_enabled(bool on) {
         }
     } else {
         scanning_ = false;
+        want_scan_ = false;
         aps_.clear();
         if (list_) lv_obj_clean(list_);
         if (status_label_) {
@@ -265,7 +266,7 @@ void WiFiScreen::set_enabled(bool on) {
             busy_ = false;
             if (enable_switch_) lv_obj_remove_state(enable_switch_, LV_STATE_DISABLED);
             if (on) {
-                start_scan();  // keeps the spinner up; list shown on completion
+                maybe_scan();  // scan once any saved-network rejoin settles
             } else {
                 scanning_ = false;
                 update_list_visibility();
@@ -275,8 +276,24 @@ void WiFiScreen::set_enabled(bool on) {
     });
 }
 
+void WiFiScreen::maybe_scan() {
+    if (!wifi::manager().enabled()) return;  // off: no scanning
+    // Enabling Wi-Fi also rejoins the saved network; esp_wifi can't scan during
+    // association (a scan started then would be aborted on connect, returning an
+    // empty list). Defer until the link settles — on_wifi_state runs the scan once
+    // the state leaves Connecting.
+    if (wifi::manager().status().state == wifi::State::Connecting) {
+        want_scan_ = true;
+        scanning_ = true;          // keep the spinner up while connecting
+        update_list_visibility();
+        return;
+    }
+    start_scan();
+}
+
 void WiFiScreen::start_scan() {
     if (!wifi::manager().enabled()) return;  // off: no scanning
+    want_scan_ = false;
     scanning_ = true;
     update_list_visibility();  // spinner up, list hidden during the scan
     int gen = ++scan_gen_;
@@ -309,6 +326,16 @@ void WiFiScreen::update_list_visibility() {
 void WiFiScreen::rebuild_list() {
     lv_obj_clean(list_);
     if (!wifi::manager().enabled()) return;  // off: list stays empty
+    if (aps_.empty()) {  // scanned but nothing found — say so instead of a blank box
+        lv_obj_t *empty = lv_label_create(list_);
+        lv_label_set_text(empty, "No networks found");
+        lv_obj_set_width(empty, LV_PCT(100));
+        lv_obj_set_style_pad_all(empty, 20, 0);
+        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(empty, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(empty, lv_color_hex(0x90a4ae), 0);
+        return;
+    }
     std::string connected = (wifi::manager().status().state == wifi::State::Connected)
                                 ? wifi::manager().status().ssid
                                 : std::string();
@@ -418,12 +445,17 @@ void WiFiScreen::update_status(const wifi::Status &s) {
     }
 }
 
-void WiFiScreen::on_wifi_state(const wifi::Status &status) {
-    lv_async_call([self = shared_from_this(), this, status]() {
+void WiFiScreen::on_wifi_state(const wifi::Status & /*status*/) {
+    // Query live status in the async (robust to lv_async reordering).
+    lv_async_call([self = shared_from_this(), this]() {
         if (exited()) return;
-        update_status(status);
+        auto st = wifi::manager().status();
+        update_status(st);
         rebuild_list();  // recolor the connected row
         update_list_visibility();
+        // Run a deferred scan once the saved-network rejoin has settled (the link
+        // left Connecting): now esp_wifi can scan without aborting the connect.
+        if (want_scan_ && st.state != wifi::State::Connecting) start_scan();
     });
 }
 

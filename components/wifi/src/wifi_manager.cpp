@@ -229,7 +229,10 @@ void Manager::worker_loop() {
         WorkItem* it = nullptr;
         if (xQueueReceive(p_->cmd_q, &it, portMAX_DELAY) != pdTRUE || !it) continue;
         switch (it->op) {
-            case Op::Enable:      bring_up(); apply_enabled(true);  break;
+            // Enabling the radio also rejoins the saved network (phone-like): the
+            // switch On and the boot auto-connect share the same connect path.
+            case Op::Enable:      bring_up(); apply_enabled(true);
+                                  do_autoconnect(it->timeout_ms); break;
             case Op::Disable:     apply_enabled(false);             break;
             case Op::Autoconnect: bring_up(); do_autoconnect(it->timeout_ms); break;
         }
@@ -368,7 +371,8 @@ void Manager::connect_saved(ConnectCb cb, int timeout_ms) {
 }
 
 void Manager::set_enabled(bool on, std::function<void()> done) {
-    enqueue(p_->cmd_q, new WorkItem{on ? Op::Enable : Op::Disable, 0, std::move(done)});
+    // 15 s connect timeout for the On path's saved-network rejoin (unused by Off).
+    enqueue(p_->cmd_q, new WorkItem{on ? Op::Enable : Op::Disable, 15000, std::move(done)});
 }
 
 // Worker thread. Apply the radio on/off state transition (Enable runs bring_up()
