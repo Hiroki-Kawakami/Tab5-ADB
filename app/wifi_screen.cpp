@@ -10,6 +10,32 @@
 
 namespace {
 
+// A "Caption ............ value" detail row (grey caption left, value right).
+// Returns the row; the value label is handed back via *value_out.
+lv_obj_t *make_detail_row(lv_obj_t *parent, const char *caption, lv_obj_t **value_out) {
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *cap = lv_label_create(row);
+    lv_label_set_text(cap, caption);
+    lv_obj_set_style_text_font(cap, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(cap, lv_color_hex(0x90a4ae), 0);
+
+    lv_obj_t *val = lv_label_create(row);
+    lv_obj_set_style_text_font(val, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(val, lv_color_hex(0x37474f), 0);
+    lv_obj_set_flex_grow(val, 1);
+    lv_obj_set_style_text_align(val, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_text(val, "");
+    *value_out = val;
+    return row;
+}
+
 const char *result_message(wifi::Result r) {
     switch (r) {
         case wifi::Result::ApNotFound:  return "Network not found. It may be out of range.";
@@ -127,13 +153,20 @@ void WiFiScreen::build() {
     lv_obj_set_style_bg_color(sep, lv_color_hex(0xe0e0e0), 0);
     lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
 
-    // Status line.
+    // Status line (connection state).
     status_label_ = lv_label_create(status_card);
     lv_label_set_long_mode(status_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(status_label_, LV_PCT(100));
     lv_obj_set_style_text_font(status_label_, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(status_label_, lv_color_hex(0x607d8b), 0);
     lv_label_set_text(status_label_, "Wi-Fi off");
+
+    // Detail rows: SSID is the status line above; IP shows only when connected,
+    // MAC whenever known. update_status() fills + shows/hides them.
+    ip_row_ = make_detail_row(status_card, "IP Address", &ip_value_);
+    lv_obj_add_flag(ip_row_, LV_OBJ_FLAG_HIDDEN);
+    mac_row_ = make_detail_row(status_card, "MAC Address", &mac_value_);
+    lv_obj_add_flag(mac_row_, LV_OBJ_FLAG_HIDDEN);
 
     // Scanning spinner (hidden when results are in).
     spinner_ = lv_spinner_create(body);
@@ -289,8 +322,7 @@ void WiFiScreen::update_status(const wifi::Status &s) {
             lv_obj_set_style_text_color(status_label_, lv_color_hex(0x90a4ae), 0);
             break;
         case wifi::State::Connected:
-            lv_label_set_text_fmt(status_label_, "Connected to %s\nIP %s",
-                                  s.ssid.c_str(), s.ip.c_str());
+            lv_label_set_text_fmt(status_label_, "Connected to %s", s.ssid.c_str());
             lv_obj_set_style_text_color(status_label_, lv_color_hex(0x2e7d32), 0);
             break;
         case wifi::State::Connecting:
@@ -305,6 +337,25 @@ void WiFiScreen::update_status(const wifi::Status &s) {
                 lv_label_set_text(status_label_, "Not connected");
             lv_obj_set_style_text_color(status_label_, lv_color_hex(0x607d8b), 0);
             break;
+        }
+    }
+
+    // IP only when connected; MAC whenever the radio is up enough to report it.
+    if (ip_row_ && ip_value_) {
+        if (s.state == wifi::State::Connected && !s.ip.empty()) {
+            lv_label_set_text(ip_value_, s.ip.c_str());
+            lv_obj_remove_flag(ip_row_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(ip_row_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (mac_row_ && mac_value_) {
+        std::string mac = wifi::manager().mac_address();
+        if (!mac.empty()) {
+            lv_label_set_text(mac_value_, mac.c_str());
+            lv_obj_remove_flag(mac_row_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(mac_row_, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }

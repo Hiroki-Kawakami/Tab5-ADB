@@ -924,7 +924,9 @@ or an explicit `wifi::sim::set_next_connect_result()`; the sim harness exposes
 `wifi-aps` / `wifi-connect-result` / `wifi-delay` / `wifi-drop` script commands and
 `SIMULATOR_WIFI_CONNECT` for non-scripted runs. The **Settings → Wi-Fi** button
 pushes `WiFiScreen` (a top **status card** = a Wi-Fi on/off `lv_switch` + separator
-+ the connection status line, then the scan list + secured-network password modal +
++ the connection status line (SSID when connected) + detail rows `IP Address`
+(connected only) and `MAC Address` (`wifi::manager().mac_address()`, shown whenever
+known), then the scan list + secured-network password modal +
 connect progress/error); the HomeScreen "Wireless (TCP/IP)" card only shows a live
 status line. The switch drives `wifi::manager().set_enabled()` (radio
 `esp_wifi_stop`/`start`, keeping the stack); Off → `State::Off`, the screen hides
@@ -943,9 +945,11 @@ the time the user opens the screen it usually opens *On* + connected (the switch
 reflects `enabled()`). The screen IS the `wifi::Listener`;
 verified headless via `./run.sh simverify simulator/verify/wifi.txt` (scan →
 connect open → password modal → forced auth-fail error),
-`simulator/verify/wifi_onoff.txt` (switch off clears the list → on rescans), and
+`simulator/verify/wifi_onoff.txt` (switch off clears the list + IP row, MAC row
+stays → on rescans),
 `simulator/verify/wifi_autoconnect.txt` (boot auto-connect → HomeScreen line turns
-green, no tap). The password
+green, no tap), and `simulator/verify/wifi_home_off.txt` (HomeScreen shows "Wi-Fi
+off" when disabled). The password
 **`lv_keyboard` is anchored to the screen bottom (a child of `root_`,
 `IGNORE_LAYOUT` + `ALIGN_BOTTOM_MID`), NOT inside the modal card** (where it
 overflowed) — created after the scrim so taps reach it, and torn down by

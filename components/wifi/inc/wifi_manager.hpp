@@ -107,6 +107,10 @@ public:
     // Current connection snapshot. Callable from any thread.
     Status status() const;
 
+    // STA interface MAC ("aa:bb:cc:dd:ee:ff"), or empty if the radio is not up
+    // yet. A device property (does not change with the connection). Any thread.
+    std::string mac_address() const;
+
     // One-shot scan for nearby APs (deduped by SSID, strongest RSSI kept, sorted
     // by RSSI desc). cb fires once on the event thread. A second scan before the
     // first completes supersedes it (the earlier cb fires with an empty list).

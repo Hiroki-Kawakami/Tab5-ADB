@@ -137,6 +137,8 @@ public:
         std::lock_guard<std::mutex> lk(fake().mtx);
         return fake().cur_rssi;
     }
+
+    std::string mac() override { return "02:00:5e:c0:ff:ee"; }  // fixed fake STA MAC
 };
 
 }  // namespace

@@ -9,6 +9,7 @@
 // Modeled on the reference NetworkManager but recast as a wifi::Backend: events
 // are translated and pushed up through BackendHost; all policy lives in the
 // portable Manager.
+#include <cstdio>
 #include <cstring>
 #include <unordered_map>
 #include <algorithm>
@@ -102,6 +103,15 @@ public:
     int8_t rssi() override {
         wifi_ap_record_t info;
         return esp_wifi_sta_get_ap_info(&info) == ESP_OK ? info.rssi : 0;
+    }
+
+    std::string mac() override {
+        uint8_t m[6];
+        if (esp_wifi_get_mac(WIFI_IF_STA, m) != ESP_OK) return {};
+        char buf[18];
+        std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
+                      m[0], m[1], m[2], m[3], m[4], m[5]);
+        return buf;
     }
 
 private:

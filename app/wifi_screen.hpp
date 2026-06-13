@@ -23,7 +23,11 @@ public:
 
 private:
     lv_obj_t *enable_switch_ = nullptr; // Wi-Fi on/off
-    lv_obj_t *status_label_ = nullptr;
+    lv_obj_t *status_label_ = nullptr;  // connection state line in the status card
+    lv_obj_t *ip_row_ = nullptr;        // "IP Address" detail row (connected only)
+    lv_obj_t *ip_value_ = nullptr;
+    lv_obj_t *mac_row_ = nullptr;       // "MAC Address" detail row (when known)
+    lv_obj_t *mac_value_ = nullptr;
     lv_obj_t *list_ = nullptr;          // AP rows container
     lv_obj_t *spinner_ = nullptr;       // shown while scanning
     lv_obj_t *pw_modal_ = nullptr;      // password entry dialog (card only)

@@ -19,7 +19,9 @@ user-visible edges are `Connecting` (on `connect()`) → `Connected` (on IP) or
 (no separate edge).
 
 `Status` is `{ state, ssid, ip, rssi }`. `ip` is valid only in `Connected`;
-`rssi` is the live AP RSSI in `Connected`, else 0.
+`rssi` is the live AP RSSI in `Connected`, else 0. `mac_address()` is a separate
+query (the STA MAC is a device property, not connection state) — `"aa:bb:..:ff"`
+or empty if the radio isn't up yet.
 
 ## Lifecycle — the worker task
 

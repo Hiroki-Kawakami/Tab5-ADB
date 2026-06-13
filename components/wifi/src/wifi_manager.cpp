@@ -313,6 +313,11 @@ Status Manager::status() const {
     return p_->snapshot_locked();
 }
 
+std::string Manager::mac_address() const {
+    std::lock_guard<std::mutex> lk(p_->mtx);
+    return p_->backend ? p_->backend->mac() : std::string();
+}
+
 void Manager::scan(ScanCb cb) {
     ScanCb superseded;
     {

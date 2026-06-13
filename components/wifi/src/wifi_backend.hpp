@@ -49,6 +49,9 @@ public:
 
     // Current associated-AP RSSI (dBm), or 0 if unavailable.
     virtual int8_t rssi() = 0;
+
+    // STA interface MAC as "aa:bb:cc:dd:ee:ff", or empty if unavailable.
+    virtual std::string mac() = 0;
 };
 
 // Per-target factory.
