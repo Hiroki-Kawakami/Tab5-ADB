@@ -11,6 +11,7 @@
 #include "bsp.h"
 #include "display_manager.hpp"
 #include "lvgl.hpp"
+#include "modal.hpp"
 #include "screen_manager.hpp"
 #include "home_screen.hpp"
 #include "settings.hpp"
@@ -31,6 +32,12 @@ std::shared_ptr<adb::Client> g_client;
 // is fine — apply_usb_host_power() only flips an I2C load switch.
 bool g_adb_online = false;
 
+// Set by adb_disconnect() (the Disconnect button) so the reader-thread Closed
+// handler can tell a user-initiated disconnect from an unexpected one (cable
+// pulled, device rebooted). Only the unexpected case shows the "Disconnected"
+// notice and unwinds to the home screen; the button already navigates itself.
+bool g_user_disconnect = false;
+
 class Holder : public adb::ClientListener {
 public:
     void start(std::weak_ptr<adb::ClientListener> self,
@@ -46,6 +53,7 @@ public:
             apply_usb_host_power();  // keep VBUS on for the live link
             report(true);
         } else if (s == adb::ConnectionState::Closed) {
+            bool was_online = g_adb_online;
             g_adb_online = false;
             apply_usb_host_power();  // cut VBUS when the Connected policy is set
             report(false);  // closed before/without ever reaching Online
@@ -53,6 +61,18 @@ public:
             // down (a later feature use re-launches it). on_state is on the reader
             // thread; AgentClient marshals its own cleanup.
             agent_client().on_adb_disconnected();
+            // An unexpected mid-session drop (cable pulled, device reset): unwind to
+            // the home screen and tell the user. A connect-time failure (never
+            // reached Online) is reported via on_result instead, and a user-driven
+            // Disconnect navigates itself — skip both. Marshal to LVGL.
+            if (was_online && !g_user_disconnect) {
+                lv_async_call([]() {
+                    screen_manager.load(std::make_shared<HomeScreen>());
+                    app::modal_message(lv_screen_active(), "Disconnected",
+                                       "The device was disconnected.");
+                });
+            }
+            g_user_disconnect = false;
         }
     }
 
@@ -87,6 +107,9 @@ std::shared_ptr<adb::Client> adb_client_shared() { return g_client; }
 
 void adb_disconnect() {
     if (!g_client) return;
+    // Mark this as a user-initiated disconnect so the Closed handler doesn't show
+    // the "Disconnected" notice / navigate home — the caller does that itself.
+    g_user_disconnect = true;
     // close() blocks until the reader task exits; on the way out it fires
     // on_state(Closed) on the reader thread, which tears down the agent link
     // (Holder::on_state -> agent_client().on_adb_disconnected()).
