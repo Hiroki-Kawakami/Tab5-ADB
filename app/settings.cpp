@@ -14,6 +14,7 @@ constexpr const char* kMasterVolKey = "master_vol";
 constexpr const char* kSpeakerModeKey = "speaker_mode";
 constexpr const char* kEqEnabledKey = "eq_enabled";
 constexpr const char* kAndroidModeKey = "android_mode";
+constexpr const char* kUsbPowerKey = "usb_power";
 
 // nvs_flash is initialised at boot (the BSP / the adb keystore), but a settings
 // access could in principle precede those, so ensure it once here too. Idempotent
@@ -175,6 +176,27 @@ void set_android_mode(AndroidMode mode) {
     nvs_handle_t h;
     if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_u8(h, kAndroidModeKey, static_cast<uint8_t>(mode));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+UsbHostPower usb_host_power() {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READONLY, &h) != ESP_OK)
+        return UsbHostPower::Always;  // no namespace yet = default
+    uint8_t v = 0;  // missing key -> 0 -> Always
+    nvs_get_u8(h, kUsbPowerKey, &v);
+    nvs_close(h);
+    return v == static_cast<uint8_t>(UsbHostPower::Connected) ? UsbHostPower::Connected
+                                                              : UsbHostPower::Always;
+}
+
+void set_usb_host_power(UsbHostPower mode) {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, kUsbPowerKey, static_cast<uint8_t>(mode));
     nvs_commit(h);
     nvs_close(h);
 }

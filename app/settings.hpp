@@ -70,4 +70,17 @@ enum class AndroidMode : uint8_t {
 AndroidMode android_mode();
 void set_android_mode(AndroidMode mode);
 
+// Whether the USB host port keeps VBUS (5V) powered while ADB is disconnected.
+// Always leaves the port powered at boot/idle (a plugged phone charges); Connected
+// cuts VBUS whenever ADB is not connected and powers it only for the live link
+// (saves power; connecting still re-powers the port via the transport reset hook).
+// Default Always (zero / unset key). Consumed by adb_app: it picks the boot VBUS
+// state and re-applies on connect/disconnect via apply_usb_host_power().
+enum class UsbHostPower : uint8_t {
+    Always    = 0,  // default — VBUS on at boot and while idle
+    Connected = 1,  // VBUS off while disconnected; on only for the live link
+};
+UsbHostPower usb_host_power();
+void set_usb_host_power(UsbHostPower mode);
+
 }  // namespace app

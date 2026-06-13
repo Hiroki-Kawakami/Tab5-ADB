@@ -31,6 +31,14 @@ adb::Client* adb_client();
 // need this rather than the raw pointer.
 std::shared_ptr<adb::Client> adb_client_shared();
 
+// Re-apply the USB host VBUS power policy (settings.hpp UsbHostPower) for the
+// current connection state: VBUS stays on when the policy is Always or ADB is
+// connected, and is cut when the policy is Connected and ADB is disconnected.
+// Called on connect/disconnect and when the Settings toggle changes; the boot
+// VBUS state is set directly from the policy in adb_app(). No-op effect on the
+// simulator (bsp_usb_host_set_power is a no-op there).
+void apply_usb_host_power();
+
 // Tear down the active connection: close the Client (which stops the reader task
 // and, via on_state(Closed), the tab5adb-agent link too) and release the holder's
 // shared_ptr, so adb_client() is null again. Idempotent; call on the LVGL thread.

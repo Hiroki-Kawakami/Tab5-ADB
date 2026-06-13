@@ -25,6 +25,11 @@ namespace {
 // listener weakly, so the holder is owned by a shared_ptr it hands in.
 std::shared_ptr<adb::Client> g_client;
 
+// Tracks whether ADB is currently connected, so apply_usb_host_power() can decide
+// the VBUS state. Written from the reader thread (Holder::on_state); a plain bool
+// is fine — apply_usb_host_power() only flips an I2C load switch.
+bool g_adb_online = false;
+
 class Holder : public adb::ClientListener {
 public:
     void start(std::weak_ptr<adb::ClientListener> self,
@@ -36,8 +41,12 @@ public:
 
     void on_state(adb::Client* /*c*/, adb::ConnectionState s) override {
         if (s == adb::ConnectionState::Online) {
+            g_adb_online = true;
+            apply_usb_host_power();  // keep VBUS on for the live link
             report(true);
         } else if (s == adb::ConnectionState::Closed) {
+            g_adb_online = false;
+            apply_usb_host_power();  // cut VBUS when the Connected policy is set
             report(false);  // closed before/without ever reaching Online
             // The adb link is gone, so the tab5adb-agent connection is too: tear it
             // down (a later feature use re-launches it). on_state is on the reader
@@ -64,6 +73,11 @@ std::shared_ptr<Holder> g_holder = std::make_shared<Holder>();
 
 void adb_connect_async(std::function<void(bool)> on_result) {
     g_holder->start(g_holder, std::move(on_result));
+}
+
+void apply_usb_host_power() {
+    bool on = usb_host_power() == UsbHostPower::Always || g_adb_online;
+    bsp_usb_host_set_power(on);
 }
 
 adb::Client* adb_client() { return g_client.get(); }
@@ -95,7 +109,12 @@ void adb_app() {
         (app::display_color_depth() == app::ColorDepth::Color16)
             ? BSP_PIXEL_FORMAT_RGB565
             : BSP_PIXEL_FORMAT_RGB888;
-    config.usb.usb5v_en = true;
+    // Boot VBUS follows the persisted USB host power policy: Always powers the host
+    // port at boot; Connected leaves it off (we boot disconnected) and only powers
+    // it for a live link. Connecting re-powers the port via the transport reset hook
+    // regardless, so a device plugged before Connect still enumerates on the rising
+    // VBUS edge.
+    config.usb.usb5v_en = (app::usb_host_power() == app::UsbHostPower::Always);
     // Enable the touch controller INT so the DisplayManager touch task can block on
     // it (interrupt-driven wake) and idle when untouched instead of polling forever.
     config.touch.interrupt = true;

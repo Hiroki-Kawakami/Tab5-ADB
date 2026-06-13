@@ -104,13 +104,13 @@ void SettingsScreen::build() {
         lv_obj_set_flex_flow(obj, LV_FLEX_FLOW_COLUMN);
         return obj;
     };
-    auto separator = [this](){
-        auto sep = lv_obj_create(body_);
+    // A thin horizontal divider line between the rows of a block body.
+    auto separator = [](lv_obj_t *parent) {
+        auto sep = lv_obj_create(parent);
         lv_obj_remove_style_all(sep);
-        lv_obj_set_style_bg_color(sep, lv_color_hex(0xc0c0c0), 0);
-        lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
         lv_obj_set_size(sep, LV_PCT(100), 1);
-        lv_obj_set_style_margin_hor(sep, 24, 0);
+        lv_obj_set_style_bg_color(sep, lv_color_hex(0xdddddd), 0);
+        lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
     };
 
     // A settings row: a title, then any trailing control the caller appends sits
@@ -232,12 +232,7 @@ void SettingsScreen::build() {
             app::set_display_brightness(lv_slider_get_value(slider));
         });
 
-        // thin divider
-        auto sep = lv_obj_create(display_block);
-        lv_obj_remove_style_all(sep);
-        lv_obj_set_size(sep, LV_PCT(100), 1);
-        lv_obj_set_style_bg_color(sep, lv_color_hex(0xdddddd), 0);
-        lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+        separator(display_block);
 
         // -- Color depth (16-bit / 24-bit segmented toggle) --
         auto color_head = setting_row(display_block, "Color Mode");
@@ -261,15 +256,6 @@ void SettingsScreen::build() {
         auto audio_block = block("Audio");
         lv_obj_set_style_pad_all(audio_block, 20, 0);
         lv_obj_set_style_pad_row(audio_block, 16, 0);
-
-        // A thin in-block divider between rows.
-        auto divider = [](lv_obj_t *parent) {
-            auto d = lv_obj_create(parent);
-            lv_obj_remove_style_all(d);
-            lv_obj_set_size(d, LV_PCT(100), 1);
-            lv_obj_set_style_bg_color(d, lv_color_hex(0xdddddd), 0);
-            lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
-        };
 
         // -- Master Volume (header row + slider 0..150, 100 = unity) --
         auto vol = lv_obj_create(audio_block);
@@ -305,7 +291,7 @@ void SettingsScreen::build() {
             app::set_master_volume(lv_slider_get_value(vslider));
         });
 
-        divider(audio_block);
+        separator(audio_block);
 
         // -- Speaker Output (Auto / Off; "always on" is intentionally not shown) --
         auto spk_head = setting_row(audio_block, "Speaker Output");
@@ -319,7 +305,7 @@ void SettingsScreen::build() {
                                            : BSP_AUDIO_SPEAKER_MODE_AUTO);
         });
 
-        divider(audio_block);
+        separator(audio_block);
 
         // -- Equalizer (audio_dsp EQ stage on/off) --
         auto eq_head = setting_row(audio_block, "Equalizer");
@@ -331,7 +317,7 @@ void SettingsScreen::build() {
             bsp_audio_set_eq_enabled(on);
         });
 
-        divider(audio_block);
+        separator(audio_block);
 
         // -- Sound Playback: which device plays the mirrored phone audio. The
         // option labels are long, so a dropdown keeps it on one row. --
@@ -375,5 +361,19 @@ void SettingsScreen::build() {
             "next connection.");
         lv_obj_set_style_text_font(desc, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(desc, lv_color_hex(0x808080), 0);
+
+        separator(android_block);
+
+        // -- USB Power (VBUS always on / only while ADB is connected) --
+        auto usb_head = setting_row(android_block, "USB Power");
+        segmented(usb_head, {"Always", "When Connected"},
+                  app::usb_host_power() == app::UsbHostPower::Connected ? 1 : 0,
+                  [](int idx) {
+            app::set_usb_host_power(idx == 1 ? app::UsbHostPower::Connected
+                                             : app::UsbHostPower::Always);
+            // Reflect the choice now: cut VBUS immediately if we just switched to
+            // When Connected while disconnected (or re-power it for Always).
+            app::apply_usb_host_power();
+        });
     }
 }

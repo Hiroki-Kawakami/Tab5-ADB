@@ -626,9 +626,16 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   transport calls it once after install (the libusb/sim transport never does).
   *What* a reset is lives in `adb_app` (the integrator): the registered hook
   composes the VBUS power-cycle out of the BSP primitive
-  `bsp_usb_host_set_power(bool)` (tab5 = PI4IO USB5V_EN, sim = no-op). VBUS is **on
-  at boot** (`config.usb.usb5v_en = true`); embedded_adb has no VBUS/on-off concept
-  and no embedded_adb → bsp dependency.
+  `bsp_usb_host_set_power(bool)` (tab5 = PI4IO USB5V_EN, sim = no-op). The boot VBUS
+  state follows the persisted **USB Power** setting (`app::usb_host_power()`,
+  Settings → Android Device → USB Power): **Always** (default) = `config.usb.usb5v_en = true`
+  (VBUS on at boot/idle, a plugged phone charges); **Connected** = VBUS off while ADB
+  is disconnected, powered only for the live link. `adb_app::apply_usb_host_power()`
+  re-applies the policy for the current connection state (on at `on_state(Online)`,
+  off at `on_state(Closed)` when the policy is Connected, and on the Settings toggle);
+  connecting still re-powers the port via the reset hook regardless, so a device
+  plugged before Connect enumerates on the rising VBUS edge either way. embedded_adb
+  has no VBUS/on-off concept and no embedded_adb → bsp dependency.
   **Fourth gotcha — teardown must fully uninstall or a reconnect fails
   `usb_host_install: ESP_ERR_INVALID_STATE`:** the transport runs two background
   event tasks (`lib_task` = `usb_host_lib_handle_events`, `client_task` =
