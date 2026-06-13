@@ -940,8 +940,9 @@ both painted blue. The whole list is **hidden while Wi-Fi is off or a scan is in
 flight** (`scanning_` + `update_list_visibility()`); while scanning a matching
 bordered **"Searching…" block** (`scan_block_` = circular spinner + label) is shown
 in its place. The
-HomeScreen "Wireless (TCP/IP)" card only shows a live
-status line. The switch drives `wifi::manager().set_enabled()` (radio
+HomeScreen "Wireless (TCP/IP)" card shows a live status line plus the recent
+ADB-over-TCP targets list (see the HomeScreen section). The switch drives
+`wifi::manager().set_enabled()` (radio
 `esp_wifi_stop`/`start`, keeping the stack); Off → `State::Off`, the screen hides
 the spinner, clears the AP list, and `start_scan()`/`rebuild_list()` no-op while
 off. **On also rejoins the saved network** (the worker runs the same connect path
@@ -1104,7 +1105,8 @@ layout: a full-bleed dark hero (title + the manually-bumped version constant in
 `app/app_version.hpp`) over a light card body matching the rest of the app. The
 body is a **USB card** (just the big Connect button; the Connect center stays at
 (360, 420) — the verify scripts tap by coordinate), a **Wireless (TCP/IP) card**
-that shows only a live Wi-Fi status line — `HomeScreen` **is** a `wifi::Listener`,
+that shows a live Wi-Fi status line plus a **recent-targets list** — `HomeScreen`
+**is** a `wifi::Listener`,
 re-registering itself (cheaply, via `wifi::manager().set_listener()` — no bring-up)
 on `onAppear` and refreshing the line both then (`refresh_wifi_status()`) and live
 on `on_wifi_state` (so the boot auto-connect completing turns the line green
@@ -1112,7 +1114,17 @@ without a tap) — Wi-Fi setup is opened from **Settings → Wi-Fi** (the
 `WiFiScreen` scan/connect UI; see the `wifi` component section), not the
 HomeScreen; the phone-IP
 `Connect` row below stays `LV_STATE_DISABLED` (ADB-over-TCP lands later, on top of
-this Wi-Fi link), and a bottom
+this Wi-Fi link). Under the input row, `rebuild_tcp_history()` renders the
+**recent ADB-over-TCP targets** from `app::tcp_history` (NVS-persisted
+`host:port` list, most-recent-first, `kCap` entries, newline-separated under
+`tab5adb/tcp_history`): a "Recent" heading + one tappable, separator-divided row
+per target (lucide history glyph + `host:port`), or a "No recent connections"
+placeholder when empty. Tapping a row calls `select_tcp_target()` (fills the
+address field today; wires the connect flow once `connect_tcp` lands). Rebuilt on
+`build` and `onAppear` (a later connect may have added an entry). Seed the list
+for simverify by writing `tab5adb/tcp_history` into the gitignored `nvs_data.json`
+(newline-joined `host:port`, hex+trailing-NUL — the sim NVS stores values as hex);
+`simulator/verify/tcp_history.txt` then renders it + taps a row. A bottom
 row of three nav cards: **About** (placeholder) and **Settings** and
 **Files** at (360, 1170), which pushes `SDFileBrowserScreen`
 directly — the local browser (and its previews / APK info) needs no adb

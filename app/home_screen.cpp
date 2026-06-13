@@ -13,6 +13,7 @@
 #include "sd_file_browser_screen.hpp"
 #include "settings.hpp"
 #include "settings_screen.hpp"
+#include "tcp_history.hpp"
 #include "wifi_manager.hpp"
 
 namespace {
@@ -119,6 +120,7 @@ void HomeScreen::build_body() {
     // onto a LAN); the phone-IP connect row is still a placeholder — ADB-over-TCP
     // (the embedded_adb TCP transport) lands later, on top of this Wi-Fi link. ----
     lv_obj_t *tcp_card = make_card(body);
+    lv_obj_set_flex_grow(tcp_card, 1);
     card_title(make_row(tcp_card), LUCIDE_WIFI, "Wireless (TCP/IP)");
 
     wifi_status_ = lv_label_create(tcp_card);
@@ -127,13 +129,13 @@ void HomeScreen::build_body() {
     refresh_wifi_status();  // Wi-Fi is set up from Settings; this card just shows status
 
     lv_obj_t *input_row = make_row(tcp_card);
-    lv_obj_t *addr = lv_textarea_create(input_row);
-    lv_textarea_set_one_line(addr, true);
-    lv_textarea_set_placeholder_text(addr, "192.168.1.100:5555");
-    lv_obj_set_style_text_font(addr, &lv_font_montserrat_20, 0);
-    lv_obj_set_height(addr, 60);
-    lv_obj_set_flex_grow(addr, 1);
-    lv_obj_add_state(addr, LV_STATE_DISABLED);
+    tcp_addr_ = lv_textarea_create(input_row);
+    lv_textarea_set_one_line(tcp_addr_, true);
+    lv_textarea_set_placeholder_text(tcp_addr_, "192.168.1.100:5555");
+    lv_obj_set_style_text_font(tcp_addr_, &lv_font_montserrat_20, 0);
+    lv_obj_set_height(tcp_addr_, 60);
+    lv_obj_set_flex_grow(tcp_addr_, 1);
+    lv_obj_add_state(tcp_addr_, LV_STATE_DISABLED);
     lv_obj_t *tcp_btn = lv_button_create(input_row);
     lv_obj_set_size(tcp_btn, 160, 60);
     lv_obj_t *tcp_btn_label = lv_label_create(tcp_btn);
@@ -142,10 +144,15 @@ void HomeScreen::build_body() {
     lv_obj_center(tcp_btn_label);
     lv_obj_add_state(tcp_btn, LV_STATE_DISABLED);
 
-    lv_obj_t *spacer = lv_obj_create(body);
-    lv_obj_remove_style_all(spacer);
-    lv_obj_set_width(spacer, LV_PCT(100));
-    lv_obj_set_flex_grow(spacer, 1);
+    // Recent targets. Filled from NVS (tab5adb/tcp_history); a tap selects an
+    // entry. Shows a "No recent connections" placeholder while empty.
+    tcp_history_box_ = lv_obj_create(tcp_card);
+    lv_obj_remove_style_all(tcp_history_box_);
+    lv_obj_set_width(tcp_history_box_, LV_PCT(100));
+    lv_obj_set_height(tcp_history_box_, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(tcp_history_box_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(tcp_history_box_, 2, 0);
+    rebuild_tcp_history();
 
     // ---- Bottom navigation cards ----
     lv_obj_t *nav = lv_obj_create(body);
@@ -193,6 +200,7 @@ void HomeScreen::onAppear() {
         shared_from_this(), static_cast<wifi::Listener *>(this)));
     wifi::manager().set_listener(wl);
     refresh_wifi_status();
+    rebuild_tcp_history();  // a connect since we last appeared may have added one
 }
 
 void HomeScreen::on_wifi_state(const wifi::Status & /*status*/) {
@@ -226,6 +234,72 @@ void HomeScreen::refresh_wifi_status() {
     else
         lv_label_set_text(wifi_status_, "Wi-Fi: not configured");
     lv_obj_set_style_text_color(wifi_status_, lv_color_hex(0x90a4ae), 0);
+}
+
+void HomeScreen::rebuild_tcp_history() {
+    if (!tcp_history_box_) return;
+    lv_obj_clean(tcp_history_box_);  // drop the old rows
+
+    std::vector<std::string> targets = app::tcp_history::load();
+    if (targets.empty()) {
+        // No connections yet: keep the list area, show a placeholder in its place.
+        lv_obj_t *empty = lv_label_create(tcp_history_box_);
+        lv_label_set_text(empty, "No recent connections");
+        lv_obj_set_style_text_font(empty, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(empty, lv_color_hex(0xb0bec5), 0);
+        lv_obj_set_style_margin_top(empty, 12, 0);
+        return;
+    }
+
+    lv_obj_t *heading = lv_label_create(tcp_history_box_);
+    lv_label_set_text(heading, "Recent");
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(heading, lv_color_hex(0x90a4ae), 0);
+    lv_obj_set_style_margin_top(heading, 12, 0);
+
+    bool first = true;
+    for (const std::string &target : targets) {
+        if (!first) {  // thin divider between rows (WiFiScreen / Settings style)
+            lv_obj_t *sep = lv_obj_create(tcp_history_box_);
+            lv_obj_remove_style_all(sep);
+            lv_obj_set_size(sep, LV_PCT(100), 1);
+            lv_obj_set_style_bg_color(sep, lv_color_hex(0xdddddd), 0);
+            lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+        }
+        first = false;
+
+        lv_obj_t *row = lv_obj_create(tcp_history_box_);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_ver(row, 10, 0);
+        lv_obj_set_style_pad_column(row, 12, 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t *icon = lv_label_create(row);
+        lv_label_set_text(icon, LUCIDE_HISTORY);
+        lv_obj_set_style_text_font(icon, R.font.lucide_40, 0);
+        lv_obj_set_style_text_color(icon, lv_color_hex(0x607d8b), 0);
+
+        lv_obj_t *label = lv_label_create(row);
+        lv_label_set_text(label, target.c_str());
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(0x37474f), 0);
+
+        lv_obj_add_event_fn(row, LV_EVENT_CLICKED,
+                            [this, target](lv_event_t *) { select_tcp_target(target); });
+    }
+}
+
+void HomeScreen::select_tcp_target(const std::string &target) {
+    if (tcp_addr_) lv_textarea_set_text(tcp_addr_, target.c_str());
+    // TODO(tcp-transport): once adb_connect_tcp_async exists, parse host:port and
+    // start the connect flow here (open_progress + adb_connect_tcp_async).
 }
 
 void HomeScreen::start_connect() {
