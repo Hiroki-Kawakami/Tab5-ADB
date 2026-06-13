@@ -691,6 +691,21 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   network). Host test: `TAB5ADB_TCP_TARGET=host:port TEST=test_connect_tcp nix
   develop -c components/embedded_adb/test/run.sh` (env-supplied target → no IP in git;
   classic and wireless ports both pass).
+  **Throughput tuning (mirror over WiFi):** on a high-RTT WiFi link TCP throughput is
+  `window/RTT`, and the IDF default lwip window (5760 B) caps the mirror hard (the bulk
+  direction is receive). `esp32p4/sdkconfig.defaults` widens it: window scaling
+  (`LWIP_WND_SCALE` + `LWIP_TCP_RCV_SCALE=2`) with `LWIP_TCP_WND_DEFAULT=128000`,
+  `LWIP_TCP_SND_BUF_DEFAULT=65535`, recv mboxes 64, OOSEQ queueing. **Gotcha:**
+  `LWIP_WND_SCALE` `depends on SPIRAM_TRY_ALLOCATE_WIFI_LWIP` — without that the scale
+  option is silently absent and a >65535 `WND_DEFAULT` is rejected back to 5760, so
+  `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` is set too (lwip/WiFi buffers in PSRAM, fine
+  on the 32MB part). `sdkconfig` is gitignored, so after editing `sdkconfig.defaults`
+  you must `rm esp32p4/sdkconfig && idf.py -C esp32p4 reconfigure` (defaults are applied
+  only when sdkconfig is absent) — `grep LWIP_TCP_WND_DEFAULT esp32p4/sdkconfig` to
+  confirm it took. The remaining ADB-layer ceiling is the **classic per-OKAY
+  stop-and-wait** (one A_WRTE per RTT); removing it needs the `delayed_ack` feature
+  (banner feature + A_OPEN.arg1=window + 4-byte acked-bytes in A_OKAY) — not yet done.
+  TCP tuning is a config-only change, **still pending a real-HW flash-and-check.**
 - `adb_connection` / `adb_stream` — CNXN handshake + AUTH state machine, and
   `A_OPEN/OKAY/WRTE/CLSE` stream multiplexing (`open_stream()` + `run_service()`
   for one-shot commands, classic per-OKAY flow control). The packet read loop is
