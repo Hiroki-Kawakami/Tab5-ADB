@@ -951,7 +951,22 @@ transport: `esp_wifi` is too large to reimplement on the host, so it is an
 `ESP_PLATFORM`-branched backend (`backend_espwifi.cpp` = esp_wifi/esp_netif/
 esp_event; `backend_sim.cpp` = a deterministic scriptable fake), **not** an
 `idf_compat` esp_wifi shim. simverify must stay deterministic (no real
-host-network access), which the fake provides.
+host-network access), which the fake provides. **C6-firmware crash gotcha:**
+updated ESP32-C6 esp-hosted firmware fires the STA `WIFI_EVENT_STA_START`/`STOP`
+events **redundantly (or while the netif is already up)**, and IDF's default
+`wifi_default_action_sta_start` (= `wifi_start`, registered by
+`esp_netif_create_default_wifi_sta()`) crashes on the second invocation (double
+`esp_netif_action_start` / rxcb re-register). So `backend_espwifi.cpp` does **not**
+call `esp_netif_create_default_wifi_sta()`: it creates the STA netif manually
+(`esp_netif_new(ESP_NETIF_DEFAULT_WIFI_STA())` + `esp_netif_attach_wifi_station`)
+and registers its own **idempotent** start/stop handlers (a `wifi_start` copy
+guarded by `s_sta_netif_started || esp_netif_is_netif_up`), a connected handler
+(rxcb register when `!esp_wifi_is_if_ready_when_started`), and IDF's public
+`esp_netif_action_disconnected`/`esp_netif_action_got_ip` for the rest. This is the
+STA analogue of M5Tab5-UserDemo's `fix wifi init crash with updated c6 firmware`
+(which patched the AP path only — that demo is SoftAP-only). Host esp_hosted stays
+1.4.0 / esp_wifi_remote 0.8.5 (same as M5); the fix is C-side only. **Device-only —
+not reproducible in the sim fake; needs a real Tab5 + C6 flash check.**
 
 **API (`inc/wifi_manager.hpp`, see README + docs/wifi.md).** `wifi::manager()` is a
 leaked singleton (like `app::agent_client()`). The blocking radio ops (bring-up,

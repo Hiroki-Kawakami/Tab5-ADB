@@ -9,6 +9,7 @@
 // Modeled on the reference NetworkManager but recast as a wifi::Backend: events
 // are translated and pushed up through BackendHost; all policy lives in the
 // portable Manager.
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -18,6 +19,9 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_wifi_default.h"
+#include "esp_wifi_netif.h"
+#include "esp_private/wifi.h"
 
 #include "wifi_backend.hpp"
 
@@ -26,6 +30,94 @@ namespace wifi {
 static const char* TAG = "wifi.esp";
 
 namespace {
+
+// The updated ESP32-C6 esp-hosted firmware fires the STA START/STOP events
+// redundantly (or while the netif is already up), and IDF's default
+// wifi_default_action_sta_start (= wifi_start) crashes on the second
+// invocation (double esp_netif_action_start / rxcb re-register). So instead of
+// esp_netif_create_default_wifi_sta() — whose default handlers are internal and
+// can't be guarded — we create the STA netif manually and register our own
+// idempotent start/stop handlers (the rest of the lifecycle uses IDF's public
+// action functions). Mirrors M5Tab5-UserDemo's "fix wifi init crash with
+// updated c6 firmware" (which patched the AP path; this is its STA analogue).
+
+bool s_sta_netif_started = false;
+
+void sta_start_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
+    auto* netif = static_cast<esp_netif_t*>(arg);
+    if (s_sta_netif_started || esp_netif_is_netif_up(netif)) {
+        ESP_LOGW(TAG, "ignore duplicate Wi-Fi STA start event");
+        return;
+    }
+    auto driver = static_cast<wifi_netif_driver_t>(esp_netif_get_io_driver(netif));
+    uint8_t mac[6];
+    esp_err_t ret = esp_wifi_get_if_mac(driver, mac);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_get_if_mac failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    if (esp_wifi_is_if_ready_when_started(driver)) {
+        ret = esp_wifi_register_if_rxcb(driver, esp_netif_receive, netif);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "esp_wifi_register_if_rxcb failed: %s", esp_err_to_name(ret));
+            return;
+        }
+    }
+    ret = esp_wifi_internal_reg_netstack_buf_cb(esp_netif_netstack_buf_ref,
+                                                esp_netif_netstack_buf_free);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "netstack cb register failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    esp_netif_set_mac(netif, mac);
+    esp_netif_action_start(netif, base, id, data);
+    s_sta_netif_started = true;
+}
+
+void sta_stop_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
+    auto* netif = static_cast<esp_netif_t*>(arg);
+    if (!s_sta_netif_started && !esp_netif_is_netif_up(netif)) {
+        ESP_LOGW(TAG, "ignore duplicate Wi-Fi STA stop event");
+        return;
+    }
+    esp_netif_action_stop(netif, base, id, data);
+    s_sta_netif_started = false;
+}
+
+void sta_connected_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
+    auto* netif = static_cast<esp_netif_t*>(arg);
+    auto driver = static_cast<wifi_netif_driver_t>(esp_netif_get_io_driver(netif));
+    if (!esp_wifi_is_if_ready_when_started(driver)) {
+        // interface not ready at start → register the rxcb on connection
+        esp_err_t ret = esp_wifi_register_if_rxcb(driver, esp_netif_receive, netif);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "esp_wifi_register_if_rxcb failed: %s", esp_err_to_name(ret));
+            return;
+        }
+    }
+    esp_netif_action_connected(netif, base, id, data);
+}
+
+esp_netif_t* create_wifi_remote_sta_netif() {
+    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_WIFI_STA();
+    esp_netif_t* netif = esp_netif_new(&cfg);
+    assert(netif);
+    ESP_ERROR_CHECK(esp_netif_attach_wifi_station(netif));
+    // The netif-plumbing handlers (separate from the app-level wifi_event/
+    // ip_event handlers EspWifiBackend registers). disconnected/got_ip use IDF's
+    // public action functions verbatim; start/stop/connected are guarded copies.
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_EVENT, WIFI_EVENT_STA_START, sta_start_handler, netif));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_EVENT, WIFI_EVENT_STA_STOP, sta_stop_handler, netif));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, sta_connected_handler, netif));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, esp_netif_action_disconnected, netif));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, esp_netif_action_got_ip, netif));
+    return netif;
+}
 
 Result reason_to_result(uint8_t reason, bool was_associated) {
     if (was_associated) return Result::IpFailed;  // joined then dropped pre-IP
@@ -54,7 +146,7 @@ public:
         ESP_ERROR_CHECK(esp_netif_init());
         esp_err_t e = esp_event_loop_create_default();
         if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(e);
-        esp_netif_create_default_wifi_sta();
+        create_wifi_remote_sta_netif();
 
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         ESP_ERROR_CHECK(esp_wifi_init(&cfg));
