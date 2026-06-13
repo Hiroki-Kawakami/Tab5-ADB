@@ -52,6 +52,12 @@ enum class Result {
 
 const char* result_str(Result r);  // for logs / UI
 
+// Wi-Fi modem power-save mode. Default == the esp-idf default (WIFI_PS_MIN_MODEM,
+// the radio sleeps between DTIM beacons). None == WIFI_PS_NONE (radio always on)
+// for the lowest latency / highest throughput — used while an ADB-over-TCP link is
+// live so screen mirroring isn't throttled by modem sleep.
+enum class PowerSave { Default, None };
+
 struct AP {
     std::string ssid;
     int8_t rssi;    // dBm (negative)
@@ -138,6 +144,13 @@ public:
     // (always fires, even for a no-op toggle).
     void set_enabled(bool on, std::function<void()> done = {});
     bool enabled() const;  // false == State::Off (radio down)
+
+    // Set the Wi-Fi modem power-save mode. Applied immediately if the radio is up,
+    // else a no-op (no ADB-over-TCP link exists without Wi-Fi). Callable from any
+    // thread (esp_wifi_set_ps is a quick, thread-safe driver call). The mode is NOT
+    // persisted across a radio off/on — the caller re-asserts it as needed (the ADB
+    // holder re-applies None on each TCP connect, Default on close).
+    void set_power_save(PowerSave mode);
 
     // Disconnect from the current AP (stays up / idle). Notifies the Listener.
     void disconnect();

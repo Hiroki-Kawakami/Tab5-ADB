@@ -192,6 +192,11 @@ public:
 
     void disconnect() override { esp_wifi_disconnect(); }
 
+    void set_power_save(PowerSave mode) override {
+        if (!started_) return;
+        esp_wifi_set_ps(mode == PowerSave::None ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
+    }
+
     int8_t rssi() override {
         wifi_ap_record_t info;
         return esp_wifi_sta_get_ap_info(&info) == ESP_OK ? info.rssi : 0;

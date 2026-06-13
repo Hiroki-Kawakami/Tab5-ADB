@@ -47,6 +47,9 @@ public:
     virtual void connect(const std::string& ssid, const std::string& password) = 0;
     virtual void disconnect() = 0;
 
+    // Set the modem power-save mode (esp_wifi_set_ps on device; no-op in the sim).
+    virtual void set_power_save(PowerSave mode) = 0;
+
     // Current associated-AP RSSI (dBm), or 0 if unavailable.
     virtual int8_t rssi() = 0;
 

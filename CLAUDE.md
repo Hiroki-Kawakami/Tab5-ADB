@@ -996,7 +996,13 @@ backend's **event thread**, never LVGL — marshalling is the app's job; the
 listener is held **weakly** (drop the shared_ptr to detach). `Status` =
 `{state, ssid, ip, rssi}`; `Result` adds `Timeout` to the reference's granularity.
 Credentials persist to NVS (namespace `wifi`) so `configured()`/`saved_ssid()`/
-`connect_saved()` work. **Sim control** (`inc/wifi_sim.hpp`): the fake picks a
+`connect_saved()` work. **Modem power-save** (`set_power_save(PowerSave)`,
+`PowerSave::{Default,None}`) maps to `esp_wifi_set_ps(WIFI_PS_MIN_MODEM|WIFI_PS_NONE)`
+through the backend (device) / no-op (sim); callable from any thread, a no-op until
+the radio is up. `adb_app`'s connection holder asserts `None` on an **ADB-over-TCP**
+link reaching Online and `Default` on its Close (a USB link leaves Wi-Fi PS untouched),
+so modem sleep doesn't throttle the mirror over Wi-Fi. The mode is not persisted across
+a radio off/on — the holder re-asserts it per connect. **Sim control** (`inc/wifi_sim.hpp`): the fake picks a
 connect outcome from the SSID (`fail-auth`/`fail-notfound`/`fail-assoc`/`timeout`)
 or an explicit `wifi::sim::set_next_connect_result()`; the sim harness exposes
 `wifi-aps` / `wifi-connect-result` / `wifi-delay` / `wifi-drop` script commands and

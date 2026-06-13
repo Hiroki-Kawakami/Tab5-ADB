@@ -62,11 +62,18 @@ public:
         if (s == adb::ConnectionState::Online) {
             g_adb_online = true;
             apply_usb_host_power();  // keep VBUS on for the live link
+            // An ADB-over-TCP link rides Wi-Fi, so disable modem power-save while it
+            // is up — modem sleep otherwise throttles the mirror over Wi-Fi. (A USB
+            // link doesn't touch Wi-Fi PS.)
+            if (!g_connection_is_usb)
+                wifi::manager().set_power_save(wifi::PowerSave::None);
             report(true);
         } else if (s == adb::ConnectionState::Closed) {
             bool was_online = g_adb_online;
             g_adb_online = false;
             apply_usb_host_power();  // cut VBUS when the Connected policy is set
+            if (!g_connection_is_usb)
+                wifi::manager().set_power_save(wifi::PowerSave::Default);  // restore modem sleep
             report(false);  // closed before/without ever reaching Online
             // The adb link is gone, so the tab5adb-agent connection is too: tear it
             // down (a later feature use re-launches it). on_state is on the reader

@@ -411,6 +411,15 @@ bool Manager::enabled() const {
     return p_->state != State::Off;
 }
 
+void Manager::set_power_save(PowerSave mode) {
+    Backend* b;
+    {
+        std::lock_guard<std::mutex> lk(p_->mtx);
+        b = p_->backend;  // null until bring_up() — no ADB-over-TCP link without Wi-Fi
+    }
+    if (b) b->set_power_save(mode);
+}
+
 void Manager::disconnect() {
     Status s;
     {

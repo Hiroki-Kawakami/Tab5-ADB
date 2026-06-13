@@ -79,6 +79,7 @@ public:
     }
 
     void radio_on() override {}  // no real radio; the Manager owns the state
+    void set_power_save(PowerSave) override {}  // no real modem to put to sleep
     void radio_off() override {
         std::lock_guard<std::mutex> lk(fake().mtx);
         fake().connected = false;
