@@ -1,0 +1,14 @@
+# Connected/saved SSID is pinned to the top of the list regardless of signal, and
+# the strength glyph sits on the LEFT of each row.
+settle 2500
+tap 589 1171
+settle 1200
+tap 360 195
+settle 1500
+# OfficeWiFi (the connected/saved net) is weak and NOT first in the scan order;
+# it must still render at the top.
+wifi-aps AlphaNet:-40:1,BetaNet:-50:0,OfficeWiFi:-85:1,GammaNet:-60:1
+tap 663 58
+wait 800
+capture simulator/verify/out/wifi_list_pinned.jpg
+quit

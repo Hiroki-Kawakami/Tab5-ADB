@@ -1,0 +1,20 @@
+# Wi-Fi list改善: bordered blocks (SettingsScreen style), per-row separators,
+# signal shown as a Wi-Fi glyph (no number), list sized to AP count + body-level
+# scroll, and list hidden while off / scanning.
+settle 2500
+tap 589 1171
+settle 1200
+tap 360 195
+settle 1500
+# Connected: bordered status + list blocks, 3 APs with separators + strength icons.
+capture simulator/verify/out/wifi_list_connected.jpg
+# Many APs of varied strength -> content-sized list, body scrolls.
+wifi-aps Strong:-42:1,Good:-58:1,OkayNet:-65:0,Weak:-74:1,Faint:-80:0,Distant:-86:1,Edge:-90:0,Fringe:-93:1
+# Slow the next scan so we can capture the scanning state (list hidden, spinner).
+wifi-delay 1500
+tap 663 58
+wait 600
+capture simulator/verify/out/wifi_list_scanning.jpg
+wait 1600
+capture simulator/verify/out/wifi_list_many.jpg
+quit

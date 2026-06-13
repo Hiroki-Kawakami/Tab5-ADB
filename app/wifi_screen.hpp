@@ -29,7 +29,8 @@ private:
     lv_obj_t *mac_row_ = nullptr;       // "MAC Address" detail row (when known)
     lv_obj_t *mac_value_ = nullptr;
     lv_obj_t *list_ = nullptr;          // AP rows container
-    lv_obj_t *spinner_ = nullptr;       // shown while scanning
+    lv_obj_t *scan_block_ = nullptr;    // "Searching…" block (spinner + label), shown
+                                        // in place of the list while scanning
     lv_obj_t *pw_modal_ = nullptr;      // password entry dialog (card only)
     lv_obj_t *pw_keyboard_ = nullptr;   // its keyboard — anchored to the screen
                                         // bottom, OUTSIDE the modal card
@@ -39,9 +40,11 @@ private:
     int scan_gen_ = 0;                  // drops stale scan completions
     bool busy_ = false;                 // a bring-up/teardown task is in flight
                                         // (LVGL thread only); switch is disabled
+    bool scanning_ = false;             // a scan is in flight (spinner up, list hidden)
 
     void start_scan();
     void rebuild_list();
+    void update_list_visibility();      // spinner vs list, per scanning_/enabled()
     void update_status(const wifi::Status &s);
     void set_enabled(bool on);          // toggle the radio via the manager worker
     void select_ap(const std::string &ssid, bool secured);

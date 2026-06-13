@@ -10,6 +10,23 @@
 
 namespace {
 
+// Signal strength shown as a Lucide Wi-Fi glyph (more arcs = stronger); no number.
+const char *wifi_icon_for_rssi(int8_t rssi) {
+    if (rssi >= -55) return LUCIDE_WIFI;        // strong (3 arcs)
+    if (rssi >= -67) return LUCIDE_WIFI_HIGH;   // good   (2 arcs)
+    if (rssi >= -78) return LUCIDE_WIFI_LOW;    // weak   (1 arc)
+    return LUCIDE_WIFI_ZERO;                     // very weak (dot)
+}
+
+// A thin horizontal divider between block rows (SettingsScreen style).
+void add_separator(lv_obj_t *parent) {
+    lv_obj_t *sep = lv_obj_create(parent);
+    lv_obj_remove_style_all(sep);
+    lv_obj_set_size(sep, LV_PCT(100), 1);
+    lv_obj_set_style_bg_color(sep, lv_color_hex(0xdddddd), 0);
+    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+}
+
 // A "Caption ............ value" detail row (grey caption left, value right).
 // Returns the row; the value label is handed back via *value_out.
 lv_obj_t *make_detail_row(lv_obj_t *parent, const char *caption, lv_obj_t **value_out) {
@@ -105,26 +122,24 @@ void WiFiScreen::build() {
     lv_obj_set_style_text_font(refresh_label, R.font.lucide_40, 0);
     lv_obj_set_style_text_color(refresh_label, lv_color_hex(0x455a64), 0);
 
-    // ---- Body ----
+    // ---- Body (scrolls as a whole; blocks size to content) ----
     lv_obj_t *body = lv_obj_create(root_);
     lv_obj_remove_style_all(body);
     lv_obj_set_width(body, LV_PCT(100));
     lv_obj_set_flex_grow(body, 1);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(body, 24, 0);
-    lv_obj_set_style_pad_row(body, 16, 0);
+    lv_obj_set_style_pad_row(body, 24, 0);
+    lv_obj_set_scroll_dir(body, LV_DIR_VER);
 
-    // Status card: a Wi-Fi on/off switch row, then the connection status line.
+    // Status card: a bordered block (SettingsScreen style) — a Wi-Fi on/off switch
+    // row, separator, connection status line, then IP/MAC detail rows.
     lv_obj_t *status_card = lv_obj_create(body);
-    lv_obj_remove_style_all(status_card);
     lv_obj_set_width(status_card, LV_PCT(100));
     lv_obj_set_height(status_card, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(status_card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(status_card, 16, 0);
+    lv_obj_set_style_pad_all(status_card, 20, 0);
     lv_obj_set_style_pad_row(status_card, 12, 0);
-    lv_obj_set_style_bg_color(status_card, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(status_card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(status_card, 12, 0);
     lv_obj_remove_flag(status_card, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *switch_row = lv_obj_create(status_card);
@@ -146,12 +161,7 @@ void WiFiScreen::build() {
         set_enabled(lv_obj_has_state(enable_switch_, LV_STATE_CHECKED));
     });
 
-    // Separator.
-    lv_obj_t *sep = lv_obj_create(status_card);
-    lv_obj_remove_style_all(sep);
-    lv_obj_set_size(sep, LV_PCT(100), 1);
-    lv_obj_set_style_bg_color(sep, lv_color_hex(0xe0e0e0), 0);
-    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+    add_separator(status_card);
 
     // Status line (connection state).
     status_label_ = lv_label_create(status_card);
@@ -168,22 +178,38 @@ void WiFiScreen::build() {
     mac_row_ = make_detail_row(status_card, "MAC Address", &mac_value_);
     lv_obj_add_flag(mac_row_, LV_OBJ_FLAG_HIDDEN);
 
-    // Scanning spinner (hidden when results are in).
-    spinner_ = lv_spinner_create(body);
-    lv_obj_set_size(spinner_, 56, 56);
-    lv_obj_add_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+    // Scanning block: a bordered block (matching the list) shown in its place
+    // while scanning / bringing up — a circular spinner + a "Searching…" label.
+    scan_block_ = lv_obj_create(body);
+    lv_obj_set_width(scan_block_, LV_PCT(100));
+    lv_obj_set_height(scan_block_, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(scan_block_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(scan_block_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(scan_block_, 20, 0);
+    lv_obj_set_style_pad_column(scan_block_, 20, 0);
+    lv_obj_remove_flag(scan_block_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(scan_block_, LV_OBJ_FLAG_HIDDEN);
 
-    // AP list (scrollable column of row buttons).
+    lv_obj_t *spinner = lv_spinner_create(scan_block_);
+    lv_obj_set_size(spinner, 40, 40);
+
+    lv_obj_t *scan_label = lv_label_create(scan_block_);
+    lv_label_set_text(scan_label, "Searching for networks...");
+    lv_obj_set_style_text_font(scan_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(scan_label, lv_color_hex(0x607d8b), 0);
+
+    // AP list: a bordered block (SettingsScreen style) sized to the number of
+    // networks found; the body scrolls as a whole. Rows are separated by thin
+    // dividers. Hidden while Wi-Fi is off or a scan is in flight.
     list_ = lv_obj_create(body);
-    lv_obj_remove_style_all(list_);
     lv_obj_set_width(list_, LV_PCT(100));
-    lv_obj_set_flex_grow(list_, 1);
+    lv_obj_set_height(list_, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(list_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(list_, 8, 0);
-    lv_obj_set_style_bg_color(list_, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(list_, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(list_, 12, 0);
-    lv_obj_set_style_pad_all(list_, 8, 0);
+    lv_obj_set_style_pad_all(list_, 0, 0);
+    lv_obj_set_style_pad_row(list_, 0, 0);
+    lv_obj_remove_flag(list_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(list_, LV_OBJ_FLAG_HIDDEN);
 }
 
 void WiFiScreen::onEnter() {
@@ -214,13 +240,13 @@ void WiFiScreen::set_enabled(bool on) {
     }
     ++scan_gen_;  // drop any in-flight scan completion across the transition
     if (on) {
-        if (spinner_) lv_obj_remove_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+        scanning_ = true;  // turning on, then scanning — spinner up, list hidden
         if (status_label_) {
             lv_label_set_text(status_label_, "Turning on Wi-Fi...");
             lv_obj_set_style_text_color(status_label_, lv_color_hex(0x607d8b), 0);
         }
     } else {
-        if (spinner_) lv_obj_add_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+        scanning_ = false;
         aps_.clear();
         if (list_) lv_obj_clean(list_);
         if (status_label_) {
@@ -228,6 +254,7 @@ void WiFiScreen::set_enabled(bool on) {
             lv_obj_set_style_text_color(status_label_, lv_color_hex(0x90a4ae), 0);
         }
     }
+    update_list_visibility();
 
     // The done callback fires on the manager's worker thread once the radio op is
     // applied; capture a strong self so the screen outlives an in-flight toggle,
@@ -238,9 +265,10 @@ void WiFiScreen::set_enabled(bool on) {
             busy_ = false;
             if (enable_switch_) lv_obj_remove_state(enable_switch_, LV_STATE_DISABLED);
             if (on) {
-                start_scan();  // shows the spinner, repopulates on completion
-            } else if (spinner_) {
-                lv_obj_add_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+                start_scan();  // keeps the spinner up; list shown on completion
+            } else {
+                scanning_ = false;
+                update_list_visibility();
             }
             update_status(wifi::manager().status());
         });
@@ -249,17 +277,33 @@ void WiFiScreen::set_enabled(bool on) {
 
 void WiFiScreen::start_scan() {
     if (!wifi::manager().enabled()) return;  // off: no scanning
-    if (spinner_) lv_obj_remove_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+    scanning_ = true;
+    update_list_visibility();  // spinner up, list hidden during the scan
     int gen = ++scan_gen_;
     wifi::manager().scan(
         [self = shared_from_this(), this, gen](wifi::Result, std::vector<wifi::AP> aps) {
             lv_async_call([self, this, gen, aps = std::move(aps)]() mutable {
                 if (exited() || gen != scan_gen_) return;
-                if (spinner_) lv_obj_add_flag(spinner_, LV_OBJ_FLAG_HIDDEN);
+                scanning_ = false;
                 aps_ = std::move(aps);
                 rebuild_list();
+                update_list_visibility();
             });
         });
+}
+
+void WiFiScreen::update_list_visibility() {
+    // The "Searching…" block while a scan/bring-up is in flight; the list only
+    // when Wi-Fi is on and idle (hidden while off or scanning).
+    if (scan_block_) {
+        if (scanning_) lv_obj_remove_flag(scan_block_, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(scan_block_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (list_) {
+        bool show = wifi::manager().enabled() && !scanning_;
+        if (show) lv_obj_remove_flag(list_, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(list_, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void WiFiScreen::rebuild_list() {
@@ -268,33 +312,51 @@ void WiFiScreen::rebuild_list() {
     std::string connected = (wifi::manager().status().state == wifi::State::Connected)
                                 ? wifi::manager().status().ssid
                                 : std::string();
+    // Pin the connected network (or, if not connected, the saved one) to the top;
+    // the rest stay in the scan's RSSI-desc order.
+    std::string pinned = !connected.empty() ? connected : wifi::manager().saved_ssid();
+    std::vector<const wifi::AP *> order;
+    order.reserve(aps_.size());
+    const wifi::AP *pinned_ap = nullptr;
     for (const auto &ap : aps_) {
+        if (!pinned_ap && !pinned.empty() && ap.ssid == pinned) pinned_ap = &ap;
+        else order.push_back(&ap);
+    }
+    if (pinned_ap) order.insert(order.begin(), pinned_ap);
+
+    bool first = true;
+    for (const wifi::AP *apptr : order) {
+        const wifi::AP &ap = *apptr;
+        if (!first) add_separator(list_);  // divider between rows (SettingsScreen style)
+        first = false;
         bool secured = ap.secured;
         std::string ssid = ap.ssid;
+        bool is_connected = (ssid == connected);
 
         lv_obj_t *row = lv_button_create(list_);
         lv_obj_remove_style_all(row);
         lv_obj_set_size(row, LV_PCT(100), 72);
         lv_obj_set_style_bg_color(row, lv_color_hex(0xeceff1), LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_STATE_PRESSED);
-        lv_obj_set_style_radius(row, 8, 0);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_hor(row, 12, 0);
+        lv_obj_set_style_pad_hor(row, 16, 0);
         lv_obj_set_style_pad_column(row, 14, 0);
         lv_obj_add_event_fn(row, LV_EVENT_CLICKED,
                             [this, ssid, secured](lv_event_t *) { select_ap(ssid, secured); });
 
+        // Leading signal-strength Wi-Fi glyph (no number); blue when connected.
         lv_obj_t *icon = lv_label_create(row);
-        lv_label_set_text(icon, LUCIDE_WIFI);
+        lv_label_set_text(icon, wifi_icon_for_rssi(ap.rssi));
         lv_obj_set_style_text_font(icon, R.font.lucide_40, 0);
-        lv_obj_set_style_text_color(icon, lv_color_hex(0x455a64), 0);
+        lv_obj_set_style_text_color(
+            icon, is_connected ? lv_color_hex(0x2196f3) : lv_color_hex(0x455a64), 0);
 
         lv_obj_t *name = lv_label_create(row);
         lv_label_set_text(name, ssid.c_str());
         lv_obj_set_style_text_font(name, &lv_font_montserrat_20, 0);
         lv_obj_set_flex_grow(name, 1);
-        if (ssid == connected)
+        if (is_connected)
             lv_obj_set_style_text_color(name, lv_color_hex(0x2196f3), 0);
 
         if (secured) {
@@ -303,10 +365,6 @@ void WiFiScreen::rebuild_list() {
             lv_obj_set_style_text_font(lock, R.font.lucide_40, 0);
             lv_obj_set_style_text_color(lock, lv_color_hex(0x90a4ae), 0);
         }
-        lv_obj_t *rssi = lv_label_create(row);
-        lv_label_set_text_fmt(rssi, "%d", ap.rssi);
-        lv_obj_set_style_text_font(rssi, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(rssi, lv_color_hex(0x90a4ae), 0);
     }
 }
 
@@ -365,6 +423,7 @@ void WiFiScreen::on_wifi_state(const wifi::Status &status) {
         if (exited()) return;
         update_status(status);
         rebuild_list();  // recolor the connected row
+        update_list_visibility();
     });
 }
 

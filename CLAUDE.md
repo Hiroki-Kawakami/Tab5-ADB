@@ -927,7 +927,20 @@ pushes `WiFiScreen` (a top **status card** = a Wi-Fi on/off `lv_switch` + separa
 + the connection status line (SSID when connected) + detail rows `IP Address`
 (connected only) and `MAC Address` (`wifi::manager().mac_address()`, shown whenever
 known), then the scan list + secured-network password modal +
-connect progress/error); the HomeScreen "Wireless (TCP/IP)" card only shows a live
+connect progress/error). Both the status card and the AP list are **bordered
+blocks (SettingsScreen-style — a plain `lv_obj` keeping the theme card border/
+radius)**; the **body scrolls as a whole** (`LV_DIR_VER`) and the list is
+`LV_SIZE_CONTENT` (sized to the AP count, no inner scroll). List rows are divided
+by thin separators (`add_separator`); each row is **leading** signal glyph + SSID
++ trailing lock (secured). Signal is a Lucide Wi-Fi glyph (`wifi_icon_for_rssi`:
+full/`WIFI_HIGH`/`WIFI_LOW`/`WIFI_ZERO` by RSSI, **no number**). The connected
+(else saved) SSID is **pinned to the top** of the list regardless of signal (the
+rest keep the scan's RSSI-desc order); the connected row's signal glyph + SSID are
+both painted blue. The whole list is **hidden while Wi-Fi is off or a scan is in
+flight** (`scanning_` + `update_list_visibility()`); while scanning a matching
+bordered **"Searching…" block** (`scan_block_` = circular spinner + label) is shown
+in its place. The
+HomeScreen "Wireless (TCP/IP)" card only shows a live
 status line. The switch drives `wifi::manager().set_enabled()` (radio
 `esp_wifi_stop`/`start`, keeping the stack); Off → `State::Off`, the screen hides
 the spinner, clears the AP list, and `start_scan()`/`rebuild_list()` no-op while
@@ -948,8 +961,10 @@ connect open → password modal → forced auth-fail error),
 `simulator/verify/wifi_onoff.txt` (switch off clears the list + IP row, MAC row
 stays → on rescans),
 `simulator/verify/wifi_autoconnect.txt` (boot auto-connect → HomeScreen line turns
-green, no tap), and `simulator/verify/wifi_home_off.txt` (HomeScreen shows "Wi-Fi
-off" when disabled). The password
+green, no tap), `simulator/verify/wifi_home_off.txt` (HomeScreen shows "Wi-Fi
+off" when disabled), and `simulator/verify/wifi_list.txt` (bordered blocks,
+row separators, glyph signal strength, content-sized list, list hidden while
+scanning). The password
 **`lv_keyboard` is anchored to the screen bottom (a child of `root_`,
 `IGNORE_LAYOUT` + `ALIGN_BOTTOM_MID`), NOT inside the modal card** (where it
 overflowed) — created after the scrim so taps reach it, and torn down by
