@@ -10,6 +10,7 @@
 #include "resources/resources.h"
 #include "screen_manager.hpp"
 #include "sd_file_browser_screen.hpp"
+#include "settings.hpp"
 #include "settings_screen.hpp"
 
 namespace {
@@ -220,7 +221,10 @@ void HomeScreen::start_connect() {
             lv_label_set_text(status_label_, "Connection failed. Tap Connect to retry.");
             return;
         }
-        lv_label_set_text(status_label_, "Starting agent on the phone...");
+        // In Limited mode ensure_connected short-circuits (no agent is started),
+        // so don't show the misleading "starting agent" status for that path.
+        if (app::android_mode() != app::AndroidMode::Limited)
+            lv_label_set_text(status_label_, "Starting agent on the phone...");
         app::agent_client().ensure_connected([this](bool /*agent_ok*/) {
             screen_manager.push(std::make_shared<ADBDeviceScreen>());
         });

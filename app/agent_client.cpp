@@ -12,6 +12,7 @@
 #include "agent/agent_jar.h"    // agent_jar, agent_jar_len
 #include "esp_timer.h"          // esp_timer_get_time (the retry deadline clock)
 #include "lvgl.hpp"             // lv_async_call(std::function<void()>)
+#include "settings.hpp"         // app::android_mode() — the user's Normal/Limited choice
 
 namespace app {
 
@@ -59,6 +60,13 @@ void AgentClient::ensure_connected(std::function<void(bool)> cb) {
         if (s == State::Ready) {
             fire_now = std::move(cb);
             fire_now_ok = true;
+        } else if (android_mode() == AndroidMode::Limited) {
+            // The user forced Limited mode in Settings: never start the agent.
+            // Stamp the mode and fail the callback (fire_now_ok stays false) so
+            // every feature degrades to its adb-only path. Takes effect on the
+            // next bring-up attempt; an already-Ready agent above is honored.
+            mode_.store(Mode::Limited);
+            fire_now = std::move(cb);
         } else {
             waiters_.push_back(std::move(cb));
             if (s == State::Disconnected) {

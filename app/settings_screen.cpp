@@ -349,4 +349,31 @@ void SettingsScreen::build() {
                                            : app::AudioOutputMode::Tab5Only);
         });
     }
+
+    // ---- Android Device block ----
+    {
+        auto android_block = block("Android Device");
+        lv_obj_set_style_pad_all(android_block, 20, 0);
+        lv_obj_set_style_pad_row(android_block, 16, 0);
+
+        // -- Agent Mode (Normal uses tab5adb-agent / Limited is adb-only) --
+        auto mode_head = setting_row(android_block, "Agent Mode");
+        segmented(mode_head, {"Normal", "Limited"},
+                  app::android_mode() == app::AndroidMode::Limited ? 1 : 0,
+                  [](int idx) {
+            app::set_android_mode(idx == 1 ? app::AndroidMode::Limited
+                                           : app::AndroidMode::Normal);
+        });
+
+        // Explanatory caption (the option labels alone don't convey the trade-off).
+        auto desc = lv_label_create(android_block);
+        lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(desc, LV_PCT(100));
+        lv_label_set_text(desc,
+            "Normal runs tab5adb-agent on the phone for screen mirroring, the "
+            "live preview, and app icons. Limited uses ADB only. Applies on the "
+            "next connection.");
+        lv_obj_set_style_text_font(desc, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(desc, lv_color_hex(0x808080), 0);
+    }
 }

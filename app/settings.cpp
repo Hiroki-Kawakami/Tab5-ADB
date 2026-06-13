@@ -13,6 +13,7 @@ constexpr const char* kColorDepthKey = "color_depth";
 constexpr const char* kMasterVolKey = "master_vol";
 constexpr const char* kSpeakerModeKey = "speaker_mode";
 constexpr const char* kEqEnabledKey = "eq_enabled";
+constexpr const char* kAndroidModeKey = "android_mode";
 
 // nvs_flash is initialised at boot (the BSP / the adb keystore), but a settings
 // access could in principle precede those, so ensure it once here too. Idempotent
@@ -153,6 +154,27 @@ void set_equalizer_enabled(bool enabled) {
     nvs_handle_t h;
     if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_u8(h, kEqEnabledKey, enabled ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+AndroidMode android_mode() {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READONLY, &h) != ESP_OK)
+        return AndroidMode::Normal;  // no namespace yet = default
+    uint8_t v = 0;  // missing key -> 0 -> Normal
+    nvs_get_u8(h, kAndroidModeKey, &v);
+    nvs_close(h);
+    return v == static_cast<uint8_t>(AndroidMode::Limited) ? AndroidMode::Limited
+                                                           : AndroidMode::Normal;
+}
+
+void set_android_mode(AndroidMode mode) {
+    ensure_nvs();
+    nvs_handle_t h;
+    if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, kAndroidModeKey, static_cast<uint8_t>(mode));
     nvs_commit(h);
     nvs_close(h);
 }

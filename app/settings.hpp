@@ -57,4 +57,17 @@ void set_speaker_mode(SpeakerMode mode);
 bool equalizer_enabled();
 void set_equalizer_enabled(bool enabled);
 
+// Whether the app uses the tab5adb-agent on the Android device. Normal starts the
+// agent and enables the agent-backed features (screen mirroring, the live preview,
+// app icons); Limited never starts it and runs adb-only. Default Normal.
+// Consumed by AgentClient::ensure_connected, which short-circuits to Limited mode
+// (the agent is never brought up) when this is Limited. Mirrors AgentClient::Mode
+// but is the user's *choice*, not the runtime outcome.
+enum class AndroidMode : uint8_t {
+    Normal  = 0,  // default — start the tab5adb-agent
+    Limited = 1,  // never start the agent; adb-only features
+};
+AndroidMode android_mode();
+void set_android_mode(AndroidMode mode);
+
 }  // namespace app
