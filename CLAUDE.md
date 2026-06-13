@@ -693,13 +693,22 @@ Layering (one concern per pair, all portable C++ **except the transport**):
   classic and wireless ports both pass).
   **Throughput tuning (mirror over WiFi):** on a high-RTT WiFi link TCP throughput is
   `window/RTT`, and the IDF default lwip window (5760 B) caps the mirror hard (the bulk
-  direction is receive). `esp32p4/sdkconfig.defaults` widens it: window scaling
-  (`LWIP_WND_SCALE` + `LWIP_TCP_RCV_SCALE=2`) with `LWIP_TCP_WND_DEFAULT=128000`,
-  `LWIP_TCP_SND_BUF_DEFAULT=65535`, recv mboxes 64, OOSEQ queueing. **Gotcha:**
-  `LWIP_WND_SCALE` `depends on SPIRAM_TRY_ALLOCATE_WIFI_LWIP` — without that the scale
-  option is silently absent and a >65535 `WND_DEFAULT` is rejected back to 5760, so
-  `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` is set too (lwip/WiFi buffers in PSRAM, fine
-  on the 32MB part). `sdkconfig` is gitignored, so after editing `sdkconfig.defaults`
+  direction is receive). `esp32p4/sdkconfig.defaults` widens it to Espressif's
+  esp-hosted P4 reference values: `LWIP_TCP_WND_DEFAULT=65534` /
+  `LWIP_TCP_SND_BUF_DEFAULT=65534` (the max non-scaled 16-bit window — no
+  `LWIP_WND_SCALE` needed), `LWIP_TCP_RECVMBOX_SIZE=32`, `LWIP_TCPIP_RECVMBOX_SIZE=64`.
+  **`LWIP_IRAM_OPTIMIZATION` is deliberately OFF** (the reference sets it, but it moves
+  ~15 KB of LWIP code from flash into internal SRAM, and esp-hosted 2.x already eats
+  most internal RAM at init — enabling it makes the boot-time FreeRTOS timer-task stack
+  alloc fail with `vApplicationGetTimerTaskMemory ... pxStackBufferTemp != NULL`.
+  Internal RAM is the binding constraint, not LWIP code locality).
+  `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`
+  stays (lwip/WiFi buffers in PSRAM, fine on the 32MB part; it also drives the
+  `WIFI_RMT` static-TX buffer design). **Gotcha:** a `>65535` `WND_DEFAULT` would
+  require `LWIP_WND_SCALE` (which `depends on SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, else it's
+  silently absent and the window is rejected back to 5760) — the earlier 128000+scaling
+  config did that, but the 65534 reference window sidesteps scaling entirely.
+  `sdkconfig` is gitignored, so after editing `sdkconfig.defaults`
   you must `rm esp32p4/sdkconfig && idf.py -C esp32p4 reconfigure` (defaults are applied
   only when sdkconfig is absent) — `grep LWIP_TCP_WND_DEFAULT esp32p4/sdkconfig` to
   confirm it took. The remaining ADB-layer ceiling is the **classic per-OKAY
