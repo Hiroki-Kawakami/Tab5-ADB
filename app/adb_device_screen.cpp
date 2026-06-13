@@ -19,6 +19,7 @@
 #include "home_screen.hpp"
 #include "modal.hpp"
 #include "screen_manager.hpp"
+#include "settings_screen.hpp"
 #include "resources/resources.h"
 
 namespace {
@@ -438,6 +439,9 @@ void ADBDeviceScreen::createToolsContainer() {
         screen_manager.push(std::make_shared<ADBLogcatScreen>());
     });
     tool_button(LUCIDE_POWER, "Power Menu", [](lv_event_t*){});
+    tool_button(LUCIDE_SETTINGS, "Settings", [](lv_event_t*){
+        screen_manager.push(std::make_shared<SettingsScreen>());
+    });
     tool_button(LUCIDE_UNPLUG, "Disconnect", [this](lv_event_t*){
         app::modal_confirm(
             root_, "Disconnect", "Disconnect from this device?", "Disconnect",
