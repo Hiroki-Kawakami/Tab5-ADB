@@ -1249,7 +1249,14 @@ the reader-thread `on_state` callbacks to the LVGL thread with `lv_async_call`
 Online it pushes `ADBDeviceScreen`. The app pulls in no
 protocol/transport details, only the `adb` component's typed surface. On `Closed`
 the holder also calls `app::agent_client().on_adb_disconnected()` so the
-tab5adb-agent connection is torn down with the adb link. `ADBDeviceScreen`'s
+tab5adb-agent connection is torn down with the adb link. **Transport seam:** the
+holder tracks USB vs TCP (`g_connection_is_usb`) and exposes it generically via
+**`app::connection_transport()`** (`-> Transport::{Usb,Tcp}`) + the
+`app::connection_is_tcp()` convenience (`adb_app.hpp`, callable from any thread) —
+the general-purpose hook for any feature that must branch on the link kind (not just
+the VBUS/Wi-Fi-PS policy that motivated the original flag). First consumer: the
+mirror tunes JPEG params down for the slower TCP/Wi-Fi link (see
+`ADBMirroringScreen`). `ADBDeviceScreen`'s
 **Disconnect** tool button (confirm modal) calls `app::adb_disconnect()` —
 `g_client->close()` (which fires `on_state(Closed)` → the agent teardown above) +
 drops the holder's `shared_ptr` so `adb_client()` is null — then
@@ -1618,7 +1625,12 @@ app-global **`app::AgentClient`** (see the AgentClient section). `onEnter()` che
 `ensure_connected(cb)` (cb on the LVGL thread). On success `start_mirror_ui()` drops
 the label, enters DM overlay mode, registers the screen as the link's video listener
 (`link()->set_video_listener(self)`), and calls `link()->start_mirror()` (720×1280
-fit, video). `onExit()` calls `link()->stop_mirror()` + `set_video_listener({})` —
+fit, video). The `MirrorConfig` is built by **`mirror_config_for(mode)`**, which also
+**branches on `app::connection_is_tcp()`**: over USB it keeps the agent defaults
+(quality 80 / uncapped fps / 4 strips), but over the slower, higher-latency TCP/Wi-Fi
+link it drops to **`jpeg_quality=40`, `max_fps=15`, `split_count=16`** (smaller
+per-strip JPEGs = less head-of-line latency per frame; 1280/16 = 80px strips, still
+16-aligned). `onExit()` calls `link()->stop_mirror()` + `set_video_listener({})` —
 **the agent link stays connected** so re-entering resumes instantly — then joins the
 decode task and exits overlay. **Rendering bypasses LVGL
 entirely** (the draw cost of compositing UI over a video stream is what we're

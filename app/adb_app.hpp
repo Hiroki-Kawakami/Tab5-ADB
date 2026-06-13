@@ -20,6 +20,19 @@ namespace adb { class Client; }
 // library leaves UI marshalling to the app).
 namespace app {
 
+// The transport carrying the live (or most recent) ADB connection. USB by default
+// before any connect. A general-purpose seam for features that must branch on the
+// link kind — e.g. the mirror uses lighter JPEG params over the higher-latency,
+// bandwidth-limited TCP/Wi-Fi link than over USB.
+enum class Transport { Usb, Tcp };
+
+// The transport of the live (or most recent) connection. Callable from any thread
+// (a plain read). Returns Transport::Usb before the first connect.
+Transport connection_transport();
+
+// Convenience: true when the live (or most recent) connection is over ADB-over-TCP.
+inline bool connection_is_tcp() { return connection_transport() == Transport::Tcp; }
+
 // Connect to the first USB device in the background. `on_result` runs on the LVGL
 // thread: true once Online, false on failure. (Single-device: one connection.)
 void adb_connect_async(std::function<void(bool ok)> on_result);

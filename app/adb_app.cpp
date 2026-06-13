@@ -131,6 +131,10 @@ void apply_usb_host_power() {
     bsp_usb_host_set_power(on);
 }
 
+Transport connection_transport() {
+    return g_connection_is_usb ? Transport::Usb : Transport::Tcp;
+}
+
 adb::Client* adb_client() { return g_client.get(); }
 
 std::shared_ptr<adb::Client> adb_client_shared() { return g_client; }

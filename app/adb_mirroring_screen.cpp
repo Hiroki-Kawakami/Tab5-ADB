@@ -171,6 +171,15 @@ agent_link::MirrorConfig ADBMirroringScreen::mirror_config_for(int mode) const {
     // Keep AUDIO in the streams across DispMode restarts so the audio stream isn't
     // dropped when only the video scale/size changes (§6.1 Tab5Only).
     cfg.streams = agent_link::kCapVideo | (audio_on_ ? agent_link::kCapAudio : 0);
+    // The TCP/Wi-Fi link is far slower and higher-latency than USB, so over TCP the
+    // mirror is painful at the agent defaults: drop quality + frame rate and split
+    // each frame into more strips (smaller JPEGs → less head-of-line latency per
+    // frame). USB keeps the agent defaults (0 = quality 80 / uncapped / 4 strips).
+    if (app::connection_is_tcp()) {
+        cfg.jpeg_quality = 40;
+        cfg.max_fps = 15;
+        cfg.split_count = 16;
+    }
     return cfg;
 }
 
