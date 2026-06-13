@@ -7,6 +7,7 @@
 #include "adb_device_screen.hpp"
 #include "agent_client.hpp"
 #include "app_version.hpp"
+#include "modal.hpp"
 #include "resources/resources.h"
 #include "screen_manager.hpp"
 #include "sd_file_browser_screen.hpp"
@@ -113,15 +114,6 @@ void HomeScreen::build_body() {
     lv_obj_add_event_fn(connect_btn_, LV_EVENT_CLICKED,
                         [this](lv_event_t *) { start_connect(); });
 
-    // Fixed two-line slot so connect-progress text never shifts the layout
-    // (the verify scripts tap by coordinate).
-    status_label_ = lv_label_create(usb_card);
-    lv_obj_set_size(status_label_, LV_PCT(100), 48);
-    lv_label_set_text(status_label_, "");
-    lv_label_set_long_mode(status_label_, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(status_label_, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(status_label_, lv_color_hex(0x607d8b), 0);
-
     // ---- TCP/IP connection card (placeholder — wireless adb lands later;
     // the widgets exist now so the layout and tap coordinates are final) ----
     lv_obj_t *tcp_card = make_card(body);
@@ -207,8 +199,9 @@ void HomeScreen::build_body() {
 }
 
 void HomeScreen::start_connect() {
-    lv_obj_add_state(connect_btn_, LV_STATE_DISABLED);
-    lv_label_set_text(status_label_, "Connecting... allow USB debugging on the phone");
+    // A modal scrim covers the cards for the whole connect flow, so the user
+    // can't navigate away (or kick off TCP/IP) mid-connect.
+    open_progress("Connecting...\nAllow USB debugging on the phone");
 
     // Two stages, both completing on the LVGL thread: the adb link, then the eager
     // tab5adb-agent bring-up that decides Normal vs Limited mode (AgentClient
@@ -217,16 +210,54 @@ void HomeScreen::start_connect() {
     // features — so every screen can read a settled mode at build time.
     app::adb_connect_async([this](bool ok) {
         if (!ok) {
-            lv_obj_remove_state(connect_btn_, LV_STATE_DISABLED);
-            lv_label_set_text(status_label_, "Connection failed. Tap Connect to retry.");
+            close_progress();
+            app::modal_message(root_, "Connection failed",
+                               "Could not reach the device. Check the USB cable and "
+                               "that USB debugging is allowed, then tap Connect again.");
             return;
         }
         // In Limited mode ensure_connected short-circuits (no agent is started),
         // so don't show the misleading "starting agent" status for that path.
         if (app::android_mode() != app::AndroidMode::Limited)
-            lv_label_set_text(status_label_, "Starting agent on the phone...");
+            set_progress("Starting agent on the phone...");
         app::agent_client().ensure_connected([this](bool /*agent_ok*/) {
+            close_progress();
             screen_manager.push(std::make_shared<ADBDeviceScreen>());
         });
     });
+}
+
+void HomeScreen::open_progress(const char *message) {
+    if (progress_card_) return;
+    progress_card_ = app::modal_open(root_);
+
+    auto header = lv_obj_create(progress_card_);
+    lv_obj_remove_style_all(header);
+    lv_obj_set_size(header, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(header, 24, 0);
+    auto spinner = lv_spinner_create(header);
+    lv_obj_set_size(spinner, 64, 64);
+    lv_obj_set_style_align(spinner, LV_ALIGN_CENTER, 0);
+    auto title_label = lv_label_create(header);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
+    lv_label_set_text(title_label, "Connecting");
+
+    progress_label_ = lv_label_create(progress_card_);
+    lv_obj_set_width(progress_label_, LV_PCT(100));
+    lv_label_set_long_mode(progress_label_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(progress_label_, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(progress_label_, lv_color_hex(0x444444), 0);
+    lv_label_set_text(progress_label_, message);
+}
+
+void HomeScreen::set_progress(const char *message) {
+    if (progress_label_) lv_label_set_text(progress_label_, message);
+}
+
+void HomeScreen::close_progress() {
+    if (progress_card_) app::modal_close(progress_card_);
+    progress_card_ = nullptr;
+    progress_label_ = nullptr;
 }

@@ -987,21 +987,28 @@ process; the device firmware never exits so nothing actually leaks.
 `app/` drives the connection from the LVGL UI. `HomeScreen` is a two-tone
 layout: a full-bleed dark hero (title + the manually-bumped version constant in
 `app/app_version.hpp`) over a light card body matching the rest of the app. The
-body is a **USB card** (big Connect button + a fixed two-line status slot so
-progress text never shifts the layout — the verify scripts tap by coordinate, so
-the Connect center stays at (360, 420)), a **Wireless (TCP/IP) card** that is a
+body is a **USB card** (just the big Connect button; the Connect center stays at
+(360, 420) — the verify scripts tap by coordinate), a **Wireless (TCP/IP) card**
+that is a
 fully-built but `LV_STATE_DISABLED` placeholder ("Coming soon" — wireless adb
 lands later; the widgets exist now so tap coordinates are final), and a bottom
 row of three nav cards: **About** and **Settings** (placeholders, screens land
 later) and **Files** at (360, 1170), which pushes `SDFileBrowserScreen`
 directly — the local browser (and its previews / APK info) needs no adb
-connection (`simulator/verify/home_sd.txt`). The hero/status fonts pulled
+connection (`simulator/verify/home_sd.txt`). The hero fonts pulled
 montserrat 18 + 48 into the device sdkconfig (the sim's `lv_conf.h` enables all
-sizes). Tapping Connect calls `app::adb_connect_async()`, then — on adb
-Online — chains `app::agent_client().ensure_connected()` ("Starting agent on
-the phone...") and pushes `ADBDeviceScreen` only once the agent mode settled
+sizes). Tapping Connect opens a **connect-progress modal** (spinner + message
+over a `modal_open` scrim, `HomeScreen::open_progress`/`set_progress`/`close_progress`):
+the scrim covers the cards for the whole connect flow so the user can't navigate
+away or kick off TCP/IP mid-connect (the reason the old inline `status_label_`
+status slot was replaced — and what unblocks the coming wireless path). The flow
+calls `app::adb_connect_async()`, then — on adb
+Online — chains `app::agent_client().ensure_connected()` (updates the modal to
+"Starting agent on the phone...") and `close_progress()` + pushes `ADBDeviceScreen`
+only once the agent mode settled
 (success and failure both proceed; Limited mode just hides the agent-backed
-features). The holder is a small app-global in
+features). An adb-stage failure closes the modal and shows a
+`modal_message("Connection failed", …)` error instead. The holder is a small app-global in
 `app/adb_app.cpp` that owns the single `std::shared_ptr<adb::Client>` (it must
 outlive the transient screens) and implements `adb::ClientListener`. The `Client`
 owns the connection lifecycle + reader task; the holder's only job is to marshal
