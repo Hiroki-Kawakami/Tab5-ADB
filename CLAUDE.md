@@ -1279,7 +1279,15 @@ the **recent ADB-over-TCP targets** from `app::tcp_history` (NVS-persisted
 `tab5adb/tcp_history`): a "Recent" heading + one tappable, separator-divided row
 per target (lucide history glyph + `host:port`), or a "No recent connections"
 placeholder when empty. Tapping a row (`select_tcp_target()`) fills the address
-field and connects to that target. Rebuilt on
+field and connects to that target. The whole Wireless connect surface (the address
+field, its Connect button, and the recent-target rows) is **gated on a live Wi-Fi
+AP connection** — `update_tcp_controls_enabled()` (called from `rebuild_tcp_history`,
+`on_wifi_state`, so it tracks the link live) adds `LV_STATE_DISABLED` (which this
+LVGL build gates press/click on, so it both greys *and* blocks the tap) to the
+field/button and dims the history box to `LV_OPA_50` + disables each clickable row
+whenever `wifi::State` is not `Connected` (ADB-over-TCP needs a LAN, so offering
+these offline was misleading). The USB `Connect` button is independent of Wi-Fi and
+stays enabled. Rebuilt on
 `build` and `onAppear` (a later connect may have added an entry). Seed the list
 for simverify by writing `tab5adb/tcp_history` into the gitignored `nvs_data.json`
 (newline-joined `host:port`, hex+trailing-NUL — the sim NVS stores values as hex);

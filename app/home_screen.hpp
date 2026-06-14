@@ -22,6 +22,7 @@ private:
     lv_obj_t *progress_label_ = nullptr;  // its message line
     lv_obj_t *wifi_status_ = nullptr;     // Wireless card status line
     lv_obj_t *tcp_addr_ = nullptr;        // Wireless card target input (host:port)
+    lv_obj_t *tcp_connect_btn_ = nullptr; // Wireless card connect button
     lv_obj_t *tcp_history_box_ = nullptr; // recent-targets list; placeholder when empty
     lv_obj_t *tcp_keyboard_ = nullptr;    // on-screen keyboard for the address; null when hidden
 
@@ -32,6 +33,10 @@ private:
     // Shared post-adb continuation (agent bring-up -> push device screen, or error).
     void proceed_after_connect(bool ok, const char *fail_msg);
     void refresh_wifi_status();
+    // Enable the Wireless (TCP/IP) connect button, address field, and history rows
+    // only while connected to a Wi-Fi AP; greyed + non-tappable otherwise (ADB-over-
+    // TCP needs a LAN, so offering them when offline is misleading).
+    void update_tcp_controls_enabled();
 
     // (Re)populate the recent ADB-over-TCP targets list from NVS. Called on build
     // and onAppear (a connect may have added an entry). Shows a placeholder when

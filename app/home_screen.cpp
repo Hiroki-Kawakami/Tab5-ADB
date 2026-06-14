@@ -134,6 +134,10 @@ void HomeScreen::build_body() {
     lv_textarea_set_placeholder_text(tcp_addr_, "192.168.1.100:5555");
     lv_obj_set_style_text_font(tcp_addr_, &lv_font_montserrat_20, 0);
     lv_obj_set_height(tcp_addr_, 60);
+    // One-line textarea places its label at pad_top, so the default padding leaves
+    // the text top-aligned in the fixed 60px box; symmetric vertical padding sized
+    // to the line height centers it (60 - ~26 line height) / 2 ≈ 17.
+    lv_obj_set_style_pad_ver(tcp_addr_, 17, 0);
     lv_obj_set_flex_grow(tcp_addr_, 1);
     // Focusing the field raises the on-screen keyboard; lv_keyboard drops
     // CLICK_FOCUSABLE, so a re-tap of the already-focused field sends no FOCUSED —
@@ -143,13 +147,13 @@ void HomeScreen::build_body() {
     lv_obj_add_event_fn(tcp_addr_, LV_EVENT_CLICKED,
                         [this](lv_event_t *) { show_tcp_keyboard(); });
 
-    lv_obj_t *tcp_btn = lv_button_create(input_row);
-    lv_obj_set_size(tcp_btn, 160, 60);
-    lv_obj_t *tcp_btn_label = lv_label_create(tcp_btn);
+    tcp_connect_btn_ = lv_button_create(input_row);
+    lv_obj_set_size(tcp_connect_btn_, 160, 60);
+    lv_obj_t *tcp_btn_label = lv_label_create(tcp_connect_btn_);
     lv_label_set_text(tcp_btn_label, "Connect");
     lv_obj_set_style_text_font(tcp_btn_label, &lv_font_montserrat_20, 0);
     lv_obj_center(tcp_btn_label);
-    lv_obj_add_event_fn(tcp_btn, LV_EVENT_CLICKED, [this](lv_event_t *) {
+    lv_obj_add_event_fn(tcp_connect_btn_, LV_EVENT_CLICKED, [this](lv_event_t *) {
         start_connect_tcp(lv_textarea_get_text(tcp_addr_));
     });
 
@@ -216,6 +220,7 @@ void HomeScreen::on_wifi_state(const wifi::Status & /*status*/) {
     lv_async_call([self = shared_from_this(), this]() {
         if (exited()) return;
         refresh_wifi_status();
+        update_tcp_controls_enabled();
     });
 }
 
@@ -257,6 +262,7 @@ void HomeScreen::rebuild_tcp_history() {
         lv_obj_set_style_text_font(empty, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xb0bec5), 0);
         lv_obj_set_style_margin_top(empty, 12, 0);
+        update_tcp_controls_enabled();
         return;
     }
 
@@ -302,6 +308,31 @@ void HomeScreen::rebuild_tcp_history() {
 
         lv_obj_add_event_fn(row, LV_EVENT_CLICKED,
                             [this, target](lv_event_t *) { select_tcp_target(target); });
+    }
+    update_tcp_controls_enabled();
+}
+
+void HomeScreen::update_tcp_controls_enabled() {
+    const bool connected = wifi::manager().status().state == wifi::State::Connected;
+    auto set_enabled = [connected](lv_obj_t *o) {
+        if (!o) return;
+        if (connected)
+            lv_obj_remove_state(o, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(o, LV_STATE_DISABLED);
+    };
+    set_enabled(tcp_addr_);
+    set_enabled(tcp_connect_btn_);
+
+    // Recent-target rows: disable (block taps) + dim the whole list when offline.
+    // The "No recent connections" placeholder isn't clickable, so it's left alone.
+    if (tcp_history_box_) {
+        lv_obj_set_style_opa(tcp_history_box_, connected ? LV_OPA_COVER : LV_OPA_50, 0);
+        uint32_t n = lv_obj_get_child_count(tcp_history_box_);
+        for (uint32_t i = 0; i < n; i++) {
+            lv_obj_t *child = lv_obj_get_child(tcp_history_box_, i);
+            if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) set_enabled(child);
+        }
     }
 }
 
