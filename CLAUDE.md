@@ -553,6 +553,39 @@ on both targets.
 Keep NVS as the C API on both sides. A C++ convenience layer, if wanted, belongs
 in a shared component on top of the C API — not as a per-target file.
 
+### System clock set from the phone (`app::sysclock`)
+
+The Tab5 has **no battery-backed RTC** (the same reason the wireless-debugging TLS
+cert uses a fixed wide validity), so the system clock starts unset every boot.
+`app/sysclock.{hpp,cpp}` sets it **once per adb link, from the connected phone**, so
+captures/logs get real dated filenames instead of an RTC-less sequence number.
+
+- **Sync point.** `Holder::on_state(Online)` in `adb_app.cpp` calls
+  `sync_clock_from_device(c)` (fire-and-forget) which runs `exec("date +'%s %z'")`;
+  the completion is on the adb reader thread (no LVGL marshalling) and applies the
+  time. It uses the `adb::Client*` from the callback (not the file-scope `g_client`,
+  which may not be assigned yet when the reader thread fires Online). A parse failure
+  just leaves the clock unset.
+- **Pure functions (host-tested, `app/test/test_sysclock.cpp`).** `parse_date_z`
+  ("1718337600 +0900" → UTC epoch + offset-minutes-east), `posix_tz_from_offset`
+  (offset → POSIX `TZ` string, sign **inverted** vs ISO: +0900 → `UTC-9`), and
+  `format_stamp` (`time_t` → "YYYYMMDD_HHMMSS"). No I/O / LVGL / adb deps, so
+  `run.sh` compiles `sysclock.cpp` straight in.
+- **`apply(epoch, off)`** = `settimeofday()` (UTC) + `setenv("TZ", …)` + `tzset()`,
+  so `localtime_r` returns the phone's local wall clock (TZ follows the phone's
+  current UTC offset — DST transition rules aren't carried, fine for a filename).
+  Works unchanged on both targets (`settimeofday`/`setenv` are libc; no idf_compat
+  shim). `is_set()` = the clock is past 2024-01-01.
+- **`dated_path(dir, prefix, ext)`** is the filename builder every capture/log
+  reuses: `<dir>/<prefix>_YYYYMMDD_HHMMSS.<ext>` when synced (a numeric suffix on
+  the rare same-second collision), else the fallback `<dir>/<prefix>_NNN.<ext>`
+  (first free, the old logcat behaviour). First consumer: the logcat **Save** (see
+  the Logcat screen); the planned SD screenshot save calls the same function.
+
+This is **not** the `idf_compat` pattern (`settimeofday` is plain libc, not an
+Espressif API) nor a BSP seam (no hardware behind it) — it's a small shared
+app-layer module, like `device_info`/`apk_info`.
+
 ### The `embedded_adb` component (ADB host-side client — work in progress)
 
 Tab5 plays the **ADB host** (like WebADB / ya-webadb): it drives a USB-connected
@@ -1584,9 +1617,11 @@ stops too; `expected_closes_` tells our own closes from a dying logcat);
 **resume** reopens with `-T '<last timestamp>'` so the paused span backfills
 (same-ms lines may duplicate; logcat re-emits its `--------- beginning of ...`
 buffer headers mid-stream). **Save** snapshots the ring into a PSRAM buffer on
-the LVGL thread and a one-shot FreeRTOS task writes `/sd/logcat_NNN.txt`
-(no RTC → sequence number, not a date; the job owns the buffer, InstallJob
-style). Verified E2E headless against a real Android device
+the LVGL thread and a one-shot FreeRTOS task writes
+`/sd/logcat_YYYYMMDD_HHMMSS.txt` (the filename is built by
+`app::sysclock::dated_path` — see the system-clock section; it falls back to
+`logcat_NNN.txt` when the clock isn't synced yet; the job owns the buffer,
+InstallJob style). Verified E2E headless against a real Android device
 (`./run.sh simverify simulator/verify/logcat.txt` — live tail, both filters via
 on-screen-keyboard taps, pause/resume backfill, scrollback + jump, modal, and a
 real save into `simulator/sdcard/`; delete the `logcat_*.txt` it leaves there).

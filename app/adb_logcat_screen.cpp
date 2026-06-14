@@ -19,6 +19,7 @@
 #include "lvgl.hpp"
 #include "modal.hpp"
 #include "screen_manager.hpp"
+#include "sysclock.hpp"
 #include "resources/resources.h"
 
 namespace {
@@ -744,15 +745,10 @@ void ADBLogcatScreen::save_to_sd() {
             return;
         }
     }
-    // No RTC: pick the first free logcat_NNN.txt instead of a date name.
-    char path[40];
-    int i = 0;
-    for (; i < 1000; ++i) {
-        snprintf(path, sizeof(path), "%s/logcat_%03d.txt", kMountPoint, i);
-        struct stat st;
-        if (stat(path, &st) != 0) break;
-    }
-    if (i == 1000) {
+    // logcat_YYYYMMDD_HHMMSS.txt once the clock is synced from the phone, else
+    // the RTC-less logcat_NNN.txt fallback.
+    std::string path = app::sysclock::dated_path(kMountPoint, "logcat", "txt");
+    if (path.empty()) {
         app::modal_message(root_, "Save failed", "Too many log files.");
         return;
     }
@@ -782,7 +778,7 @@ void ADBLogcatScreen::save_to_sd() {
     lv_label_set_text(title, "Saving log");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     auto text = lv_label_create(save_card_);
-    lv_label_set_text(text, path);
+    lv_label_set_text(text, path.c_str());
     lv_obj_set_style_text_font(text, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(text, lv_color_hex(0x444444), 0);
     auto spinner = lv_spinner_create(save_card_);

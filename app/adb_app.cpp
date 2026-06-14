@@ -15,6 +15,7 @@
 #include "screen_manager.hpp"
 #include "home_screen.hpp"
 #include "settings.hpp"
+#include "sysclock.hpp"
 #include "wifi_manager.hpp"
 
 namespace app {
@@ -42,6 +43,21 @@ bool g_connection_is_usb = true;
 // notice and unwinds to the home screen; the button already navigates itself.
 bool g_user_disconnect = false;
 
+// The Tab5 has no RTC, so set the system clock from the phone once per link.
+// Fire-and-forget: the exec completion is on the reader thread (no LVGL), parses
+// `date +'%s %z'` and applies the time. A parse failure just leaves the clock
+// unset (filenames fall back to a sequence number).
+void sync_clock_from_device(adb::Client* c) {
+    if (!c) return;
+    c->exec("date +'%s %z'", [](adb::Error err, const std::string& out) {
+        if (err != adb::Error::Ok) return;
+        time_t epoch;
+        int off;
+        if (sysclock::parse_date_z(out, &epoch, &off))
+            sysclock::apply(epoch, off);
+    });
+}
+
 class Holder : public adb::ClientListener {
 public:
     void start_usb(std::weak_ptr<adb::ClientListener> self,
@@ -58,7 +74,7 @@ public:
         g_client = adb::Client::connect_tcp(host, port, std::move(self));
     }
 
-    void on_state(adb::Client* /*c*/, adb::ConnectionState s) override {
+    void on_state(adb::Client* c, adb::ConnectionState s) override {
         if (s == adb::ConnectionState::Online) {
             g_adb_online = true;
             apply_usb_host_power();  // keep VBUS on for the live link
@@ -67,6 +83,7 @@ public:
             // link doesn't touch Wi-Fi PS.)
             if (!g_connection_is_usb)
                 wifi::manager().set_power_save(wifi::PowerSave::None);
+            sync_clock_from_device(c);
             report(true);
         } else if (s == adb::ConnectionState::Closed) {
             bool was_online = g_adb_online;
