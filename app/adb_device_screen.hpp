@@ -54,4 +54,5 @@ private:
     void startPreview();   // pick + start the mode's preview (LVGL thread)
     void stopPreview();
     void onPreviewTapped();
+    void openPowerMenu();  // power off / reboot / sleep actions on the device
 };

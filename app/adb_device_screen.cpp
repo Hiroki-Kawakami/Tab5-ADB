@@ -26,6 +26,14 @@ namespace {
 
 namespace devinfo = app::devinfo;
 
+// Fire-and-forget a device-side shell command (power actions, key events).
+// Reboot/shutdown drop the link, so the completion may never arrive — that is
+// expected; the adb holder resets the UI to HomeScreen on Closed.
+void run_device_command(const std::string &cmd) {
+    if (auto *c = app::adb_client())
+        c->exec(cmd, [](adb::Error, const std::string &) {});
+}
+
 // Extract a value from a banner "device::key=val;key=val;..." string.
 std::string banner_field(const std::string &banner, const std::string &key) {
     auto sep = banner.find("::");
@@ -438,7 +446,7 @@ void ADBDeviceScreen::createToolsContainer() {
     tool_button(LUCIDE_LOGS, "Logcat", [](lv_event_t*){
         screen_manager.push(std::make_shared<ADBLogcatScreen>());
     });
-    tool_button(LUCIDE_POWER, "Power Menu", [](lv_event_t*){});
+    tool_button(LUCIDE_POWER, "Power Menu", [this](lv_event_t*){ openPowerMenu(); });
     tool_button(LUCIDE_SETTINGS, "Settings", [](lv_event_t*){
         screen_manager.push(std::make_shared<SettingsScreen>());
     });
@@ -452,4 +460,93 @@ void ADBDeviceScreen::createToolsContainer() {
                 screen_manager.load(std::make_shared<HomeScreen>());
             });
     }, /*danger=*/true);
+}
+
+void ADBDeviceScreen::openPowerMenu() {
+    // A vertical list of power actions sent to the device over plain `adb shell`
+    // (agent-independent, work in both Normal and Limited mode). Reboot/shutdown
+    // confirm first (and drop the link); sleep/wake fire immediately.
+    auto card = app::modal_open(root_);
+    auto title = lv_label_create(card);
+    lv_label_set_text(title, "Power Menu");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    // One tappable row: icon + label. `confirm` gates the command behind a
+    // destructive confirmation (reboot/shutdown); otherwise it runs immediately.
+    auto action = [this, card](const char *icon, const char *text,
+                               const char *confirm_text, std::string cmd,
+                               bool confirm, bool destructive) {
+        auto b = lv_button_create(card);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_size(b, LV_PCT(100), 72);
+        lv_obj_set_style_radius(b, 12, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0xf0f0f0), 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+        lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(b, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_hor(b, 20, 0);
+        lv_obj_set_style_pad_column(b, 16, 0);
+
+        lv_color_t fg = destructive ? lv_color_hex(0xd32f2f) : lv_color_black();
+        auto icon_label = lv_label_create(b);
+        lv_label_set_text(icon_label, icon);
+        lv_obj_set_style_text_font(icon_label, R.font.lucide_40, 0);
+        lv_obj_set_style_text_color(icon_label, fg, 0);
+        auto text_label = lv_label_create(b);
+        lv_label_set_text(text_label, text);
+        lv_obj_set_style_text_font(text_label, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(text_label, fg, 0);
+
+        lv_obj_t *parent = root_;
+        lv_obj_add_event_fn(b, LV_EVENT_CLICKED,
+                            [parent, card, text, confirm_text, cmd, confirm,
+                             destructive](lv_event_t*) {
+            // modal_close deletes the card tree — including THIS button, whose
+            // lvgl++ DELETE cleanup frees this very lambda. So copy everything we
+            // still need (incl. the parent ptr; `this`/captures become dangling)
+            // onto the stack before closing.
+            lv_obj_t *p = parent;
+            std::string c = cmd;
+            const char *t = text;
+            const char *ct = confirm_text;
+            bool needs_confirm = confirm, danger = destructive;
+            app::modal_close(card);
+            if (needs_confirm) {
+                app::modal_confirm(p, t, ct, t, danger,
+                                   [c]{ run_device_command(c); });
+            } else {
+                run_device_command(c);
+            }
+        });
+    };
+
+    action(LUCIDE_POWER_OFF, "Power off",
+           "Power the device off now? The ADB connection will drop.",
+           "reboot -p", /*confirm=*/true, /*destructive=*/true);
+    action(LUCIDE_REFRESH_CW, "Restart",
+           "Reboot the device now? The ADB connection will drop.",
+           "reboot", /*confirm=*/true, /*destructive=*/true);
+    action(LUCIDE_WRENCH, "Reboot to Recovery",
+           "Reboot the device into recovery? The ADB connection will drop.",
+           "reboot recovery", /*confirm=*/true, /*destructive=*/true);
+    action(LUCIDE_HARD_DRIVE, "Reboot to Bootloader",
+           "Reboot the device into the bootloader? The ADB connection will drop.",
+           "reboot bootloader", /*confirm=*/true, /*destructive=*/true);
+    action(LUCIDE_MOON, "Sleep (screen off)", nullptr,
+           "input keyevent 223", /*confirm=*/false, /*destructive=*/false);
+    action(LUCIDE_SUN, "Wake (screen on)", nullptr,
+           "input keyevent 224", /*confirm=*/false, /*destructive=*/false);
+
+    auto cancel = lv_button_create(card);
+    lv_obj_set_size(cancel, LV_PCT(100), 72);
+    lv_obj_set_style_radius(cancel, 12, 0);
+    lv_obj_set_style_bg_color(cancel, lv_color_hex(0xe0e0e0), 0);
+    auto cancel_label = lv_label_create(cancel);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_set_style_text_color(cancel_label, lv_color_black(), 0);
+    lv_obj_center(cancel_label);
+    lv_obj_add_event_fn(cancel, LV_EVENT_CLICKED,
+                        [card](lv_event_t*){ app::modal_close(card); });
 }
