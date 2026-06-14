@@ -101,6 +101,7 @@ void HomeScreen::build_body() {
     lv_obj_set_flex_grow(body, 1);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(body, 24, 0);
+    lv_obj_set_style_pad_bottom(body, 22, 0);
     lv_obj_set_style_pad_row(body, 24, 0);
 
     // ---- USB connection card ----
@@ -173,6 +174,8 @@ void HomeScreen::build_body() {
     lv_obj_set_size(nav, LV_PCT(100), 170);
     lv_obj_set_flex_flow(nav, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(nav, 16, 0);
+    lv_obj_remove_flag(nav, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_bottom(nav, 2, 0);
 
     auto nav_card = [&nav](const char *icon, const char *title,
                            std::function<void(lv_event_t *)> callback) {
@@ -180,7 +183,13 @@ void HomeScreen::build_body() {
         lv_obj_set_height(card, LV_PCT(100));
         lv_obj_set_flex_grow(card, 1);
         lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(card, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(0x444444), 0);
+        lv_obj_set_style_radius(card, 12, 0);
         lv_obj_set_style_bg_color(card, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+        lv_obj_set_style_translate_y(card, 2, LV_STATE_PRESSED);
         lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
