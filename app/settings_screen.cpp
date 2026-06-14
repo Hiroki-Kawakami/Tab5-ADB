@@ -65,6 +65,8 @@ void SettingsScreen::build() {
     lv_obj_set_style_pad_row(body_, 24, 0);
 
     // ---- Wi-Fi settings button (opens the scan/connect screen) ----
+    // Disabled (greyed, non-clickable) when opened during an active ADB session
+    // — changing Wi-Fi mid-link would disrupt the connection.
     auto wifi_button = lv_button_create(body_);
     lv_obj_remove_style_all(wifi_button);
     lv_obj_set_size(wifi_button, LV_PCT(100), 80);
@@ -79,9 +81,16 @@ void SettingsScreen::build() {
     lv_obj_set_flex_align(wifi_button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_hor(wifi_button, 32, 0);
     lv_obj_set_style_pad_column(wifi_button, 24, 0);
-    lv_obj_add_event_fn(wifi_button, LV_EVENT_CLICKED, [](lv_event_t*) {
-        screen_manager.push(std::make_shared<WiFiScreen>());
-    });
+    if (wifi_enabled_) {
+        lv_obj_add_event_fn(wifi_button, LV_EVENT_CLICKED, [](lv_event_t*) {
+            screen_manager.push(std::make_shared<WiFiScreen>());
+        });
+    } else {
+        // Non-clickable + greyed out for the duration of the ADB session
+        // (drop CLICKABLE so there's no press feedback either).
+        lv_obj_remove_flag(wifi_button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_opa(wifi_button, LV_OPA_50, 0);
+    }
     auto wifi_icon = lv_label_create(wifi_button);
     lv_label_set_text(wifi_icon, LUCIDE_WIFI);
     lv_obj_set_style_text_font(wifi_icon, R.font.lucide_40, 0);

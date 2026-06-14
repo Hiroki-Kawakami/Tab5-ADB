@@ -452,7 +452,9 @@ void ADBDeviceScreen::createToolsContainer() {
     });
     tool_button(LUCIDE_POWER, "Power Menu", [this](lv_event_t*){ openPowerMenu(); });
     tool_button(LUCIDE_SETTINGS, "Settings", [](lv_event_t*){
-        screen_manager.push(std::make_shared<SettingsScreen>());
+        // Wi-Fi entry disabled while an ADB session is live — changing the
+        // link's Wi-Fi mid-connection would disrupt it.
+        screen_manager.push(std::make_shared<SettingsScreen>(false));
     });
     tool_button(LUCIDE_UNPLUG, "Disconnect", [this](lv_event_t*){
         app::modal_confirm(
