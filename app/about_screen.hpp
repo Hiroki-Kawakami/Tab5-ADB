@@ -18,3 +18,11 @@ private:
     // be opened on a phone (the Tab5 has no browser).
     void show_link_qr(const char *title, const char *url);
 };
+
+// Open-source acknowledgements / third-party license screen — a nav bar plus a
+// scrollable view of the full consolidated license text (app::kThirdPartyLicenses
+// in third_party_licenses.hpp). Pushed from the AboutScreen Acknowledgements row.
+class AcknowledgementsScreen : public Screen {
+public:
+    void build() override;
+};

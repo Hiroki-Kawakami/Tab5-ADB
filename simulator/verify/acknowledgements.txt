@@ -1,0 +1,22 @@
+# About -> Acknowledgements: open the consolidated third-party license screen.
+settle
+# Tap the About nav card (bottom-left of the three nav cards).
+tap 130 1180
+settle
+# Scroll the body up to reveal the Acknowledgements button at the bottom.
+down 360 1000
+wait 200
+move 360 700
+wait 100
+move 360 400
+wait 100
+move 360 300
+wait 100
+up
+settle
+capture simulator/verify/out/about_scrolled.jpg
+# Tap the Acknowledgements button.
+tap 360 900
+settle
+capture simulator/verify/out/acknowledgements.jpg
+quit

@@ -7,6 +7,7 @@
 #include "modal.hpp"
 #include "resources/resources.h"
 #include "screen_manager.hpp"
+#include "third_party_licenses.hpp"
 
 // ---- Editable about-page content ------------------------------------------
 namespace {
@@ -237,10 +238,8 @@ void AboutScreen::build() {
         lv_obj_set_style_text_font(ack_chevron, &lv_font_montserrat_28, 0);
         lv_obj_set_style_text_color(ack_chevron, lv_color_hex(0xc0c0c0), 0);
 
-        // TODO: push the open-source licenses screen once it exists.
-        lv_obj_add_event_fn(ack, LV_EVENT_CLICKED, [this](lv_event_t *) {
-            app::modal_message(root_, "Acknowledgements",
-                               "Open-source license information is coming soon.");
+        lv_obj_add_event_fn(ack, LV_EVENT_CLICKED, [](lv_event_t *) {
+            screen_manager.push(std::make_shared<AcknowledgementsScreen>());
         });
     }
 }
@@ -280,4 +279,61 @@ void AboutScreen::show_link_qr(const char *title, const char *url) {
     lv_obj_center(close_label);
     lv_obj_add_event_fn(close, LV_EVENT_CLICKED,
                         [card](lv_event_t *) { app::modal_close(card); });
+}
+
+void AcknowledgementsScreen::build() {
+    lv_obj_set_size(root_, PANEL_W, PANEL_H);
+    lv_obj_set_style_bg_color(root_, lv_color_hex(0xeeeeee), 0);
+    lv_obj_set_flex_flow(root_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(root_, LV_OBJ_FLAG_SCROLLABLE);
+
+    // ---- Navigation bar (back + title) — matches the AboutScreen 120px bar ----
+    lv_obj_t *navigation = lv_obj_create(root_);
+    lv_obj_remove_style_all(navigation);
+    lv_obj_set_size(navigation, LV_PCT(100), 120);
+    lv_obj_set_style_bg_color(navigation, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(navigation, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(navigation, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_side(navigation, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(navigation, 1, 0);
+    lv_obj_set_style_border_color(navigation, lv_color_hex(0xc0c0c0), 0);
+    lv_obj_set_flex_flow(navigation, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(navigation, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_hor(navigation, 24, 0);
+
+    lv_obj_t *back = lv_button_create(navigation);
+    lv_obj_remove_style_all(back);
+    lv_obj_set_flex_flow(back, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(back, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(back, 8, 0);
+    lv_obj_set_style_pad_column(back, 16, 0);
+    lv_obj_add_event_fn(back, LV_EVENT_CLICKED,
+                        [](lv_event_t *) { screen_manager.pop(); });
+    lv_obj_set_style_bg_color(back, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(back, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(back, 12, 0);
+    lv_obj_t *back_label = lv_label_create(back);
+    lv_label_set_text(back_label, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(back_label, &lv_font_montserrat_38, 0);
+    lv_obj_set_style_pad_all(back_label, 8, 0);
+    lv_obj_t *title_label = lv_label_create(back);
+    lv_label_set_text(title_label, "Acknowledgements");
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_38, 0);
+
+    // ---- Scrollable license text ----
+    lv_obj_t *body = lv_obj_create(root_);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_width(body, LV_PCT(100));
+    lv_obj_set_flex_grow(body, 1);
+    lv_obj_set_style_pad_all(body, 24, 0);
+    lv_obj_set_scroll_dir(body, LV_DIR_VER);
+
+    lv_obj_t *text = lv_label_create(body);
+    lv_label_set_text_static(text, app::kThirdPartyLicenses);
+    lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(text, LV_PCT(100));
+    lv_obj_set_style_text_font(text, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(text, lv_color_hex(0x37474f), 0);
 }
