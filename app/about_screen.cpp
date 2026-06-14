@@ -89,6 +89,7 @@ void AboutScreen::build() {
     lv_obj_set_size(root_, PANEL_W, PANEL_H);
     lv_obj_set_style_bg_color(root_, lv_color_hex(0xeeeeee), 0);
     lv_obj_set_flex_flow(root_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(root_, 0, 0);
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_SCROLLABLE);
 
     // ---- Navigation bar (back + title) — FileManager/Settings-style 120px ----
@@ -285,6 +286,7 @@ void AcknowledgementsScreen::build() {
     lv_obj_set_size(root_, PANEL_W, PANEL_H);
     lv_obj_set_style_bg_color(root_, lv_color_hex(0xeeeeee), 0);
     lv_obj_set_flex_flow(root_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(root_, 0, 0);
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_SCROLLABLE);
 
     // ---- Navigation bar (back + title) — matches the AboutScreen 120px bar ----
