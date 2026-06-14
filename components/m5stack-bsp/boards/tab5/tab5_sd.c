@@ -2,10 +2,11 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Hiroki Kawakami
  *
- * Tab5 SD card: the TF slot is on the P4's SDMMC peripheral, routed like the
- * ESP32-P4 EV board — CLK=G43, CMD=G44, D0..D3=G39..G42 (4-bit), card power
- * from the P4's on-chip LDO channel 4 (VO4). Mounts a FAT filesystem through
- * the ESP-IDF VFS; see bsp_sd.h for the read-performance guidance.
+ * Tab5 SD card: the TF slot is on the P4's SDMMC peripheral (slot 0; slot 1 is
+ * the C6 Wi-Fi SDIO link), routed like the ESP32-P4 EV board — CLK=G43, CMD=G44,
+ * D0..D3=G39..G42 (4-bit), card power from the P4's on-chip LDO channel 4 (VO4).
+ * Mounts a FAT filesystem through the ESP-IDF VFS; see bsp_sd.h for the
+ * read-performance guidance.
  */
 
 #include "bsp_sd.h"
@@ -50,6 +51,10 @@ esp_err_t bsp_sd_mount(const char *mount_point, const bsp_sd_mount_config_t *con
     }
 
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    /* SD is on SDMMC slot 0; slot 1 is reserved for the C6 Wi-Fi SDIO link
+     * (esp_hosted). SDMMC_HOST_DEFAULT() picks slot 1, so override it — both on
+     * slot 1 collide on the shared host and reset the C6 link mid-transfer. */
+    host.slot = SDMMC_HOST_SLOT_0;
     host.max_freq_khz = config->max_freq_khz > 0 ? config->max_freq_khz
                                                  : SDMMC_FREQ_HIGHSPEED;
     host.pwr_ctrl_handle = s_pwr_ctrl;

@@ -456,9 +456,18 @@ seam). `bsp_sd_mount(mount_point, cfg)` / `bsp_sd_unmount()` /
 `bsp_sd_is_mounted()`; mount on demand, treat `ESP_ERR_INVALID_STATE` as
 "already mounted", no hot-plug detection (a failed scan unmounts so the next
 Refresh re-mounts). Device (`boards/tab5/tab5_sd.c`): the TF slot is on the
-P4's SDMMC, routed like the P4 EV board — CLK=G43, CMD=G44, D0..D3=G39..G42,
-4-bit, card power from the **on-chip LDO channel 4** (`sd_pwr_ctrl_new_on_chip_ldo`,
-kept acquired across remounts), default 40 MHz high speed;
+P4's SDMMC **slot 0** (`host.slot = SDMMC_HOST_SLOT_0`), routed like the P4 EV
+board — CLK=G43, CMD=G44, D0..D3=G39..G42, 4-bit, card power from the **on-chip
+LDO channel 4** (`sd_pwr_ctrl_new_on_chip_ldo`, kept acquired across remounts),
+default 40 MHz high speed. **Slot 1 is reserved for the C6 Wi-Fi SDIO link
+(esp_hosted), so the SD MUST be on slot 0** (the M5Tab5-UserDemo layout): the two
+SDMMC slots share one host, so putting both on the same slot collides — the SD
+mount re-routes the slot's GPIO/clock and resets the live C6 SDIO bus mid-transfer
+(`sdmmc_io_rw_extended ... 0x107` → `H_SDIO_DRV: failed to read registers` →
+host restart). `SDMMC_HOST_DEFAULT()` picks slot 1, so the slot **must** be
+overridden explicitly. (Cost a debug session: esp_hosted 1.4.0 ran the C6 on slot
+0 leaving the SD's default slot 1 free; esp_hosted 2.x moved the C6 to slot 1
+— the new default — which silently broke the SD until it too moved to slot 0.)
 `esp_vfs_fat_sdmmc_mount` (PRIV_REQUIRES `fatfs sdmmc esp_driver_sdmmc`).
 sdkconfig: `CONFIG_FATFS_LFN_HEAP` (long file names — the default LFN_NONE
 truncates to 8.3), `CONFIG_FATFS_API_ENCODING_UTF_8`, and
