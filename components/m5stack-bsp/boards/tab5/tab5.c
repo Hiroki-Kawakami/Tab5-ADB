@@ -85,14 +85,30 @@ esp_err_t bsp_init(const bsp_config_t *config) {
     }, &pi4ioe2);
     BSP_RETURN_ERR(err);
 
-    // Reset Touch Panel and LCD
-    gpio_reset_pin(GPIO_NUM_23);
+    // Reset Touch Panel and LCD. The GT911 needs the full AOSP gtp_reset_guitar
+    // INT sequence, not just a TP_RST pulse: INT is driven high across the TP_RST
+    // rising edge (selects I2C address 0x14), then driven low for 100 ms and
+    // released — that INT-low pulse is what boots the GT911's touch firmware.
+    // Skipping it leaves the chip answering chip-ID reads but never reporting a
+    // touch in 0x814E. A cold boot or full-system reset (POWERON / WDT) power-on-
+    // resets the chip so the scan engine starts on its own, hiding the omission,
+    // but esp_restart / panic (SW_CPU_RESET) keeps the touch rail powered, so the
+    // explicit INT-low boot step is required for touch to survive a warm reboot.
+    // TP_RST is a PI4IOE1 pin (not a direct GPIO), so this is driven here rather
+    // than by the esp_lcd_touch driver. INT (GPIO 23) high latches addr 0x14;
+    // harmless for the ST7123 generation (fixed address, no INT select).
+    gpio_set_direction(GPIO_NUM_23, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_23, 1);       // TP_INT = High -> selects GT911 addr 0x14
     pi4io_set_output(pi4ioe1, 4, false);  // LCD_RST = Low
-    pi4io_set_output(pi4ioe1, 5, false);  // TP_RST = Low
+    pi4io_set_output(pi4ioe1, 5, false);  // TP_RST  = Low
     vTaskDelay(pdMS_TO_TICKS(100));
     pi4io_set_output(pi4ioe1, 4, true);   // LCD_RST = High
-    pi4io_set_output(pi4ioe1, 5, true);   // TP_RST = High
-    vTaskDelay(pdMS_TO_TICKS(100));
+    pi4io_set_output(pi4ioe1, 5, true);   // TP_RST  = High (rising edge latches INT high)
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(GPIO_NUM_23, 0);       // TP_INT = Low ...
+    vTaskDelay(pdMS_TO_TICKS(100));       // ... held 100 ms boots the GT911 touch firmware
+    gpio_set_direction(GPIO_NUM_23, GPIO_MODE_INPUT);  // release INT for the touch driver
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     // Display + touch are panel-generation dependent. Probe the touch
     // controller address to pick the generation, then bring up the matching
