@@ -13,6 +13,7 @@
 #include "adb_file_browser_screen.hpp"
 #include "apk_preview_screen.hpp"
 #include "file_transfer.hpp"
+#include "image_preview_screen.hpp"
 #include "screen.hpp"
 #include "screen_manager.hpp"
 #include "sd_file_browser_screen.hpp"
@@ -299,6 +300,9 @@ std::shared_ptr<Screen> make_file_preview(const FileRef &ref) {
     std::string ext = lower_ext(ref.name());
     if (ext == ".apk" && ref.where == FileRef::Where::SD) {
         return std::make_shared<ApkPreviewScreen>(ref);
+    }
+    if (ext == ".jpg" || ext == ".jpeg" || ext == ".png") {
+        return std::make_shared<ImagePreviewScreen>(ref);
     }
     return std::make_shared<GenericFilePreviewScreen>(ref);
 }

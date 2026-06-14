@@ -12,7 +12,7 @@ tap 551 258
 settle
 tap 360 730
 settle
-tap 360 403
+tap 360 565
 settle
 capture simulator/verify/out/apk_preview_online.jpg
 tap 360 728

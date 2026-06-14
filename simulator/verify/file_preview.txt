@@ -3,7 +3,7 @@
 settle
 tap 360 1170
 settle
-tap 360 322
+tap 360 484
 settle
 capture simulator/verify/out/file_preview_generic.jpg
 tap 60 60

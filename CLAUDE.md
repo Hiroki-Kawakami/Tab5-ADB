@@ -1536,6 +1536,40 @@ empty (resources.arsc is out of scope). The **Install** action (greyed
 (offline parse, no phone) and `apk_preview_install.txt` (real install on the
 real Android device; `adb uninstall com.tab5adb.testapp` after).
 
+**Image preview** — the `.jpg`/`.jpeg`/`.png` registry entries (both **SD** and
+**Android** side). **`ImagePreviewScreen`** (`app/image_preview_screen.*`)
+decodes the picture and shows it aspect-fit in the stage (with a `WxH · size`
+caption), plus the same copy actions as the generic preview. A full-resolution
+camera photo is far too large to hand LVGL, so the decode mirrors
+`ScreencapPreview`/`ADBScreenshotScreen`: the compressed bytes are loaded off the
+SD card (16 KB `read()` chunks into a **PSRAM** `CACHE_ALIGNED` buffer — internal
+DMA RAM is too scarce here, FATFS bounces the PSRAM destination) or pulled from the
+device over the **`sync:` RECV service** (`Sync::pull`
+into a PSRAM buffer — the same proven transfer path `file_transfer` / the agent-jar
+push use on the real Tab5), then a **low-priority Core-1 decode task** turns them
+into a small RGB565 frame: PNG via the row-streaming `app::decode_png_downscale_rgb565`
+(the `png_decode` shared helper), JPEG via the **`jpeg_decode_enhanced` whole-frame
+decoder (Layer 1, `ring_count=0`)** — the HW JPEG decoder *without* the PPA pipeline
+— decoding full-res into a PSRAM buffer, then the **CPU nearest-neighbour
+downscales** into the fit buffer; `present()` flips the result onto an `lv_image` on
+the LVGL thread (the full image is never handed to LVGL at native resolution).
+**Why Layer 1 and not the PPA pipeline** (`jpeg_ppa_pipeline`, used by the mirror's
+geometry path): the IDF JPEG engine needs **internal DMA RAM** (its `rxlink`),
+critically scarce at the file-browser screen-stack depth (esp-hosted/WiFi hold most
+internal RAM), and `jpeg_ppa_pipeline_new` registers its PPA client (grabbing
+internal DMA) *before* creating the engine, so the engine alloc fails there. The
+bare whole-frame decoder matches the mirror/AgentPreview footprint (which works on
+device) — no PPA client. The SD read buffer falls back from internal to PSRAM for
+the same internal-RAM reason. Format is picked by extension then verified by magic
+bytes; an unsupported encoding (16-bit / interlaced / paletted PNG, or a JPEG the
+HW decoder rejects) shows "Cannot display this image." with the copy actions still
+available. Teardown is
+the screenshot pattern: `onExit`/dtor close the sync session (joins the Sync
+worker) + join the decode task (weak `lv_async_call` present) before the buffers
+are freed, and `abort()` the copy job. Verified headless (no phone): `simulator/verify/image_preview.txt` (SD-side
+PNG downscale + large JPEG downscale; fixtures `simulator/sdcard/photo.png` /
+`photo.jpg`).
+
 `ADBDeviceScreen`'s **Apps** button pushes **`ADBAppManagerScreen`**
 (`app/adb_app_manager_screen.*`) — the installed-app manager. Listing has two
 paths picked per refresh: in **Normal mode** (an APPINFO-capable agent link) one

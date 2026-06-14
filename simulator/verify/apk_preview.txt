@@ -4,7 +4,7 @@
 settle
 tap 360 1170
 settle
-tap 360 403
+tap 360 565
 settle
 capture simulator/verify/out/apk_preview_offline.jpg
 quit
