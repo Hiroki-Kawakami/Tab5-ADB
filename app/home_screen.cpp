@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 
+#include "about_screen.hpp"
 #include "adb_app.hpp"
 #include "adb_device_screen.hpp"
 #include "agent_client.hpp"
@@ -205,7 +206,9 @@ void HomeScreen::build_body() {
         lv_label_set_text(title_label, title);
         lv_obj_set_style_text_font(title_label, &lv_font_montserrat_20, 0);
     };
-    nav_card(LUCIDE_INFO, "About", [](lv_event_t *) {});  // AboutScreen lands later
+    nav_card(LUCIDE_INFO, "About", [](lv_event_t *) {
+        screen_manager.push(std::make_shared<AboutScreen>());
+    });
     nav_card(LUCIDE_HARD_DRIVE, "Files", [](lv_event_t *) {
         // The Tab5 SD card is browsable without an adb connection.
         screen_manager.push(std::make_shared<SDFileBrowserScreen>());

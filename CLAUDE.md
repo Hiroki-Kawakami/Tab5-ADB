@@ -1292,10 +1292,24 @@ stays enabled. Rebuilt on
 for simverify by writing `tab5adb/tcp_history` into the gitignored `nvs_data.json`
 (newline-joined `host:port`, hex+trailing-NUL — the sim NVS stores values as hex);
 `simulator/verify/tcp_history.txt` then renders it + taps a row. A bottom
-row of three nav cards: **About** (placeholder) and **Settings** and
+row of three nav cards: **About** (pushes `AboutScreen`) and **Settings** and
 **Files** at (360, 1170), which pushes `SDFileBrowserScreen`
 directly — the local browser (and its previews / APK info) needs no adb
-connection (`simulator/verify/home_sd.txt`). The hero fonts pulled
+connection (`simulator/verify/home_sd.txt`).
+**`AboutScreen`** (`app/about_screen.*`) is a Settings-style nav-bar + scrollable
+body screen showing app identity (name/tagline/`kAppVersion`), a links block
+(Repository / GitHub Profile / X), an author row, and an **Acknowledgements**
+button that will push the open-source licenses screen (a `modal_message`
+placeholder for now). Each link row taps to a centered QR-code modal
+(`lv_qrcode`) carrying the URL so it opens on a phone (the Tab5 has no browser);
+the displayed strings (app name, author, URLs) are editable constants at the top
+of `about_screen.cpp` (the GitHub handle / X account are `your-handle`
+placeholders — fill before release). QR needs `CONFIG_LV_USE_QRCODE=y`
+(`esp32p4/sdkconfig.defaults`; the sim's `lv_conf.h` already has it). The
+embedded Lucide font omits a few glyphs (e.g. `LUCIDE_GITHUB`/`LUCIDE_TWITTER`
+fall in cmap gaps), so the link rows use `LUCIDE_CODE`/`LUCIDE_USER`/
+`LUCIDE_AT_SIGN`. Verified headless: `simulator/verify/about.txt` (renders the
+screen + opens the Repository QR modal). The hero fonts pulled
 montserrat 18 + 48 into the device sdkconfig (the sim's `lv_conf.h` enables all
 sizes). Tapping Connect opens a **connect-progress modal** (spinner + message
 over a `modal_open` scrim, `HomeScreen::open_progress`/`set_progress`/`close_progress`):

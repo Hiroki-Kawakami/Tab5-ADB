@@ -1,0 +1,11 @@
+# About screen: open from HomeScreen, then open a link QR modal.
+settle
+# Tap the About nav card (bottom-left of the three nav cards).
+tap 130 1180
+settle
+capture simulator/verify/out/about.jpg
+# Tap the Repository link row to open its QR modal.
+tap 360 490
+settle
+capture simulator/verify/out/about_qr.jpg
+quit
