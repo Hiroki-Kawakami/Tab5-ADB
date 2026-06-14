@@ -1,0 +1,29 @@
+# Screenshot tool. ADBDeviceScreen -> the "Screenshot" tool button opens
+# ADBScreenshotScreen, which fires `exec:screencap -p` immediately (centered
+# spinner) and, once the PNG lands, shows a downscaled RGB565 preview plus the
+# Save to SD / Re-capture buttons. The full-resolution PNG is retained, so Save
+# writes the device-resolution image to /sd. Needs a real phone plugged into the
+# PC. Coordinates are approximate: the tool button column is x ~552 and
+# Screenshot is the 5th button (Shell / Files / Apps / Logcat / Screenshot),
+# center y ~576; the Save / Re-capture buttons sit at the bottom (y ~1180).
+settle
+tap 360 420
+wait 9000
+settle
+# open the Screenshot screen -> capturing spinner -> decoded preview
+tap 552 576
+wait 6000
+settle
+capture simulator/verify/out/screenshot_preview.jpg
+# Save to SD (left button) -> writes simulator/sdcard/screenshot_*.png, then a
+# success modal. Delete the file it leaves behind afterwards.
+tap 180 1180
+wait 3000
+settle
+capture simulator/verify/out/screenshot_saved.jpg
+# Re-capture (right button) -> spinner again, then a fresh preview
+tap 516 1180
+wait 6000
+settle
+capture simulator/verify/out/screenshot_recapture.jpg
+quit

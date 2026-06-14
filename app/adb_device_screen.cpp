@@ -12,6 +12,7 @@
 #include "adb_file_manager_screen.hpp"
 #include "adb_logcat_screen.hpp"
 #include "adb_mirroring_screen.hpp"
+#include "adb_screenshot_screen.hpp"
 #include "adb_shell_screen.hpp"
 #include "agent_client.hpp"
 #include "device_icons.hpp"
@@ -445,6 +446,9 @@ void ADBDeviceScreen::createToolsContainer() {
     });
     tool_button(LUCIDE_LOGS, "Logcat", [](lv_event_t*){
         screen_manager.push(std::make_shared<ADBLogcatScreen>());
+    });
+    tool_button(LUCIDE_CAMERA, "Screenshot", [](lv_event_t*){
+        screen_manager.push(std::make_shared<ADBScreenshotScreen>());
     });
     tool_button(LUCIDE_POWER, "Power Menu", [this](lv_event_t*){ openPowerMenu(); });
     tool_button(LUCIDE_SETTINGS, "Settings", [](lv_event_t*){

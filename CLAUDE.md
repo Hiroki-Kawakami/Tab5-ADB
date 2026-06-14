@@ -1635,6 +1635,26 @@ InstallJob style). Verified E2E headless against a real Android device
 on-screen-keyboard taps, pause/resume backfill, scrollback + jump, modal, and a
 real save into `simulator/sdcard/`; delete the `logcat_*.txt` it leaves there).
 
+`ADBDeviceScreen`'s **Screenshot** button (under Logcat) pushes
+**`ADBScreenshotScreen`** (`app/adb_screenshot_screen.*`) — a one-shot device
+screenshot. Opening it fires `exec:screencap -p` straight away (centered
+`lv_spinner` "Capturing…"); when the PNG lands it is decoded **on a low-prio
+Core-1 task** and shown as a downscaled RGB565 preview, with **Save to SD** (the
+*full-resolution* PNG) and **Re-capture** buttons. The decode is the
+ScreencapPreview split scaled to a single shot — PNG bytes accumulate on the adb
+reader thread (`adb::StreamListener`, listener held as the screen's own weak_ptr),
+the task inflates+downscales them via the shared **`app/png_decode.{hpp,cpp}`**
+(`app::decode_png_downscale_rgb565`, extracted out of `screencap_preview` so both
+share it — `PsramAllocator` now lives there too), and `present()` flips the result
+onto an `lv_image` on the LVGL thread. **The full-res PNG is never handed to LVGL**
+(a native-resolution screenshot bitmap is far too large for the P4 to render);
+only the small fitted RGB565 frame is, while the original PNG is retained so Save
+writes the device-resolution image. Save snapshots the PNG into its own PSRAM
+buffer and a one-shot writer task writes `/sd/screenshot_YYYYMMDD_HHMMSS.png`
+(`app::sysclock::dated_path`, `screenshot_NNN.png` fallback) — the logcat SaveJob
+pattern. `onExit`/dtor close the stream + join the decode task before its buffers
+are freed. Verify script (needs a phone): `simulator/verify/screenshot.txt`.
+
 `ADBDeviceScreen`'s **screen preview** (the tappable image column next to the
 tools) is mode-switched in `startPreview()`: **Normal mode** uses
 **`AgentPreview`** (`app/agent_preview.*`) — a small live mirror over the agent
