@@ -251,28 +251,29 @@ void ADBMirroringScreen::query_disp_mode_availability() {
         std::static_pointer_cast<ADBMirroringScreen>(shared_from_this());
     c->exec("wm size", [self](adb::Error e, const std::string& out) {
         // Reader thread: decide from the source's current resolution.
-        bool show = true, adapt = true;
+        bool enabled = true, adapt = true;
         if (e == adb::Error::Ok) {
             WmSize w = parse_wm_size(out);
             if (w.ok) {
                 int ew = w.has_override ? w.ov_w : w.phys_w;  // current effective size
                 int eh = w.has_override ? w.ov_h : w.phys_h;
                 if (is_panel_aspect(ew, eh)) {
-                    show = false;  // already panel-aspect: fit == fill == adapt, hide it
+                    enabled = false;  // already panel-aspect: fit == fill == adapt, grey it
                 } else if (w.has_override &&
                            (w.ov_w != w.phys_w || w.ov_h != w.phys_h)) {
                     adapt = false;  // a user `wm size` override is set: don't offer Adapt
                 }
             }
         }
-        lv_async_call([self, show, adapt] {
+        lv_async_call([self, enabled, adapt] {
             auto s = self.lock();
             if (!s || s->exited()) return;
-            bool need_rebuild = (s->dispmode_show_ != show) && s->overlay_active_;
-            s->dispmode_show_ = show;
+            bool need_rebuild = (s->dispmode_enabled_ != enabled) && s->overlay_active_;
+            s->dispmode_enabled_ = enabled;
             s->adapt_allowed_ = adapt;  // read live by the DispMode click handler
-            // Only hiding/showing the button changes the overlay layout; the cycle
-            // length is read live, so a disabled Adapt needs no rebuild.
+            // The button is always present, so the layout is unchanged; only its
+            // enabled/greyed appearance flips, so rebuild when that changes. The
+            // cycle length is read live, so a disabled Adapt needs no rebuild.
             if (need_rebuild) s->apply_overlay(s->cur_rot_, /*first=*/false);
         });
     });
@@ -353,8 +354,6 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
 
     for (int i = 0; i < kN; ++i) {
         int id = kOrder[land ? i : (kN - 1 - i)];  // portrait = reversed order
-        if (id == DISPMODE && !dispmode_show_)
-            continue;  // source already panel-aspect: no display mode to switch
         if (id == SEP) {
             // A thin line spanning the strip across its short axis.
             lv_obj_t* s = lv_obj_create(cont);
@@ -424,6 +423,14 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
                 break;
             }
             case DISPMODE:
+                if (!dispmode_enabled_) {
+                    // Source already panel-aspect (fit == fill == adapt): show the
+                    // button greyed-out and inert instead of hiding it. LV_STATE_DISABLED
+                    // blocks the press/click in this LVGL build; the grey icon signals it.
+                    lv_obj_add_state(b, LV_STATE_DISABLED);
+                    lv_obj_set_style_text_color(lbl, lv_color_hex(0x666666), 0);
+                    break;
+                }
                 // Cycle Fit -> Fill -> Adapt -> Fit, or Fit <-> Fill when Adapt is
                 // disabled (a non-default `wm size` override we must not clobber). The
                 // active mode is evident from the mirrored image, so the icon stays
