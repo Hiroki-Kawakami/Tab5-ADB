@@ -68,9 +68,10 @@ public final class Server {
     private static final int CAP_APPINFO = 0x0004;
     private static final int VIDEO_CODEC_JPEG = 0x01;
     private static final int SCALE_ASPECT = 2;  // scale_mode (§5.3)
+    private static final int SCALE_ADAPT = 3;   // scale_mode (§5.3): resize the source
 
     private static final int AGENT_VER_MAJOR = 0;
-    private static final int AGENT_VER_MINOR = 4;
+    private static final int AGENT_VER_MINOR = 5;
     private static final int AGENT_VER_PATCH = 0;
 
     // Mirror stream defaults (§5.1).
@@ -140,6 +141,11 @@ public final class Server {
         // reuses the injector for a pure binder injectInputEvent (no Looper needed).
         server.initInput();
         server.initAppInfo();
+        // Restore any Adapt-mode display override on JVM exit (SIGTERM/SIGHUP, e.g. the
+        // launch shell closing). serve() already restores on a clean disconnect; this
+        // is the backstop for an abrupt teardown that skips serve()'s finally.
+        final Server srv = server;
+        Runtime.getRuntime().addShutdownHook(new Thread(srv::clearAdaptSize));
         LocalServerSocket sock = new LocalServerSocket(SOCKET_NAME);
         while (true) {
             LocalSocket client = sock.accept();
@@ -188,6 +194,7 @@ public final class Server {
 
         // Session loop: each MIRROR_START streams until MIRROR_STOP / disconnect,
         // then we return to READY and wait for the next MIRROR_START on this link.
+        try {  // restore any adapt override (clearAdaptSize) on session exit, below
         while (!conn.closed) {
             MirrorParams mp;
             synchronized (conn.lock) {
@@ -215,6 +222,13 @@ public final class Server {
             } finally {
                 if (audio != null) audio.stop();
             }
+            // streamVideo returned: MIRROR_STOP (READY) / reconfigure / disconnect. A
+            // reconfigure's MIRROR_START already set the adapt state for the next mp;
+            // STOP or disconnect (no pendingStart) restores the device size now.
+            if (conn.pendingStart == null) clearAdaptSize();
+        }
+        } finally {
+            clearAdaptSize();  // backstop: restore the device size on any session exit
         }
         reader.join();
     }
@@ -451,6 +465,28 @@ public final class Server {
         System.out.println("tab5adb-agent: MIRROR_START target=" + mp.targetW + "x" + mp.targetH
                 + " scale=" + mp.scaleMode + " streams=0x" + Integer.toHexString(mp.streams)
                 + " max_fps=" + mp.maxFps + " q=" + mp.quality + " split=" + mp.split);
+
+        // Adapt mode (§5.3): resize the SOURCE itself (wm size) to the viewer's
+        // aspect so a plain fit fills it with no letterbox/crop (the source app
+        // reflows). We restore the device size on MIRROR_STOP / disconnect / shutdown
+        // (serve() + the shutdown hook), so the Tab5 never has to send a reset — the
+        // override can't survive a yanked cable. Switching to fit/fill restores first.
+        if (mp.scaleMode == SCALE_ADAPT) {
+            if (!adaptActive) {
+                // Natural-orientation size: `wm size`/setForcedDisplaySize take the
+                // unrotated WxH (sourceSize() is the current-rotation size, which would
+                // force a landscape size onto a portrait-natural device when rotated).
+                int[] nat = naturalSourceSize();
+                int[] sz = adaptSize(nat[0], nat[1], mp.targetW, mp.targetH);
+                applyAdaptSize(sz[0], sz[1]);
+                // Let the resize settle before the response/capture read the new size
+                // (only when it actually applied — a failure leaves adaptActive false).
+                if (adaptActive) waitForSourceSize(sz[0], sz[1], 600);
+            }
+            mp.scaleMode = 0;  // source is now viewer-aspect: stream a plain fit
+        } else if (adaptActive) {
+            clearAdaptSize();  // leaving Adapt for fit/fill: restore the device size
+        }
 
         // Aspect mode (§5.3): size the output to the source's natural aspect within
         // the requested box, then stream a plain fit into that box — a full-bleed
@@ -882,6 +918,84 @@ public final class Server {
         } catch (Throwable t) {
             System.err.println("tab5adb-agent: getRotation failed, assuming 0: " + t);
             return 0;
+        }
+    }
+
+    // --- Adapt scale mode (§5.3 kScaleAdapt) ----------------------------------
+    // Resize the SOURCE display (wm size, via IWindowManager) to the viewer's aspect
+    // so a plain fit fills it with no letterbox/crop. The agent owns the restore so a
+    // disconnect (yanked cable) can't leave the device stuck at the override: it is
+    // cleared on MIRROR_STOP / reconfigure-away / disconnect (serve()) and on JVM exit
+    // (the shutdown hook in main, covering SIGTERM/SIGHUP — not SIGKILL).
+
+    private final Object adaptLock = new Object();
+    private volatile boolean adaptActive = false;  // a forced display size is applied
+
+    /** Override size for a physW×physH source shown in a targetW×targetH viewer: keep
+     *  the device's short side, stretch the long side to the viewer aspect (portrait
+     *  vs landscape preserved). Mirrors the Tab5's old compute_adapt_size. */
+    private static int[] adaptSize(int physW, int physH, int targetW, int targetH) {
+        int shortSide = Math.min(physW, physH);
+        int tLong = Math.max(targetW, targetH), tShort = Math.min(targetW, targetH);
+        int longSide = (int) ((long) shortSide * tLong / tShort);
+        return physW <= physH ? new int[]{physW, longSide}    // portrait: keep width
+                              : new int[]{longSide, physH};   // landscape: keep height
+    }
+
+    /** IWindowManager binder (shell uid reaches it, the same privilege `wm` uses). */
+    private Object windowManager() throws Exception {
+        Class<?> sm = Class.forName("android.os.ServiceManager");
+        Class<?> ibinder = Class.forName("android.os.IBinder");
+        Object binder = sm.getMethod("getService", String.class).invoke(null, "window");
+        Class<?> stub = Class.forName("android.view.IWindowManager$Stub");
+        return stub.getMethod("asInterface", ibinder).invoke(null, binder);
+    }
+
+    /** Force display 0's size (= `wm size WxH`). */
+    private void applyAdaptSize(int w, int h) {
+        synchronized (adaptLock) {
+            try {
+                Object wm = windowManager();
+                Class.forName("android.view.IWindowManager")
+                        .getMethod("setForcedDisplaySize", int.class, int.class, int.class)
+                        .invoke(wm, 0, w, h);
+                adaptActive = true;
+                System.out.println("tab5adb-agent: adapt wm size " + w + "x" + h);
+            } catch (Throwable t) {
+                System.err.println("tab5adb-agent: adapt setForcedDisplaySize failed: " + t);
+            }
+        }
+    }
+
+    /** Restore display 0's real size (= `wm size reset`); no-op if not overridden. */
+    private void clearAdaptSize() {
+        synchronized (adaptLock) {
+            if (!adaptActive) return;
+            try {
+                Object wm = windowManager();
+                Class.forName("android.view.IWindowManager")
+                        .getMethod("clearForcedDisplaySize", int.class).invoke(wm, 0);
+                System.out.println("tab5adb-agent: adapt wm size reset");
+            } catch (Throwable t) {
+                System.err.println("tab5adb-agent: adapt clearForcedDisplaySize failed: " + t);
+            }
+            adaptActive = false;
+        }
+    }
+
+    /** Block (briefly) until sourceSize() reflects the forced size, so the capture is
+     *  built at the new resolution rather than the stale physical one. Compares the
+     *  dimensions as an unordered set — sourceSize() is rotation-dependent while the
+     *  forced (w,h) is natural-orientation, so the two may be transposed. */
+    private void waitForSourceSize(int w, int h, int timeoutMs) {
+        int wantLo = Math.min(w, h), wantHi = Math.max(w, h);
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                int[] s = sourceSize();
+                if (Math.min(s[0], s[1]) == wantLo && Math.max(s[0], s[1]) == wantHi) return;
+            } catch (Throwable ignored) { /* transient during reconfigure */ }
+            try { Thread.sleep(30); } catch (InterruptedException e) { return; }
         }
     }
 }

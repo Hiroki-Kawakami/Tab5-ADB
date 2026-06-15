@@ -171,9 +171,12 @@ void ADBMirroringScreen::start_mirror_ui() {
 
 agent_link::MirrorConfig ADBMirroringScreen::mirror_config_for(int mode) const {
     agent_link::MirrorConfig cfg;  // 720x1280 panel, video (defaults)
-    // Fill asks the agent to cover+crop; Fit and Adapt both send scale=fit (Adapt
-    // pre-resizes the source via `wm size` so fit already fills the panel).
-    cfg.scale_mode = (mode == kDispFill) ? agent_link::kScaleFill : agent_link::kScaleFit;
+    // Fit = letterbox, Fill = cover+crop, Adapt = the agent resizes the source itself
+    // (kScaleAdapt → `wm size` to the panel aspect, restored agent-side on stop /
+    // disconnect / shutdown) so a plain fit fills the panel with no letterbox/crop.
+    cfg.scale_mode = (mode == kDispFill)  ? agent_link::kScaleFill
+                   : (mode == kDispAdapt) ? agent_link::kScaleAdapt
+                                          : agent_link::kScaleFit;
     // Keep AUDIO in the streams across DispMode restarts so the audio stream isn't
     // dropped when only the video scale/size changes (§6.1 Tab5Only).
     cfg.streams = agent_link::kCapVideo | (audio_on_ ? agent_link::kCapAudio : 0);
@@ -190,16 +193,11 @@ agent_link::MirrorConfig ADBMirroringScreen::mirror_config_for(int mode) const {
 }
 
 void ADBMirroringScreen::apply_disp_mode(int mode) {
-    int old = disp_mode_;
-    if (mode == old) return;
+    if (mode == disp_mode_) return;
     disp_mode_ = mode;
-    if (mode == kDispAdapt) {
-        adapt_enter();          // `wm size` to the panel aspect, then restart fit
-    } else if (old == kDispAdapt) {
-        adapt_exit(mode);       // `wm size reset`, then restart `mode`
-    } else {
-        restart_mirror(mode);   // fit <-> fill: just reconfigure the live stream
-    }
+    // Every mode (incl. Adapt) is just a fresh MIRROR_START — the agent applies/
+    // restores the Adapt `wm size` itself (kScaleAdapt), so the Tab5 never drives it.
+    restart_mirror(mode);
 }
 
 void ADBMirroringScreen::restart_mirror(int mode) {
@@ -244,72 +242,7 @@ bool is_panel_aspect(int w, int h) {
     return std::fabs(static_cast<double>(hi) / lo - panel) < 0.02;
 }
 
-// Parse `wm size` output and compute the override resolution that matches the Tab5
-// panel aspect (long:short = PANEL_H:PANEL_W). Keeps the device's short side and
-// stretches the long side to short * PANEL_H / PANEL_W, preserving portrait vs
-// landscape. Returns false if the "Physical size:" line can't be parsed.
-bool compute_adapt_size(const std::string& wm_out, int* ow, int* oh) {
-    auto pos = wm_out.find("Physical size:");
-    if (pos == std::string::npos) return false;
-    int w = 0, h = 0;
-    if (std::sscanf(wm_out.c_str() + pos, "Physical size: %dx%d", &w, &h) != 2) return false;
-    if (w <= 0 || h <= 0) return false;
-    int short_side = std::min(w, h);
-    int long_side = static_cast<int>(static_cast<long>(short_side) * PANEL_H / PANEL_W);
-    if (w <= h) { *ow = w; *oh = long_side; }   // portrait: keep width, extend height
-    else        { *ow = long_side; *oh = h; }   // landscape natural
-    return true;
-}
 }  // namespace
-
-void ADBMirroringScreen::adapt_enter() {
-    auto* c = app::adb_client();
-    if (!c) { restart_mirror(kDispAdapt); return; }  // no adb: best-effort plain fit
-    std::weak_ptr<ADBMirroringScreen> self =
-        std::static_pointer_cast<ADBMirroringScreen>(shared_from_this());
-    // 1) Query the device's physical size (reader thread completion).
-    c->exec("wm size", [self](adb::Error e, const std::string& out) {
-        int ow = 0, oh = 0;
-        bool ok = (e == adb::Error::Ok) && compute_adapt_size(out, &ow, &oh);
-        // Marshal to LVGL: decide + issue the override (and the eventual restart).
-        lv_async_call([self, ok, ow, oh] {
-            auto s = self.lock();
-            if (!s || s->exited() || s->disp_mode_ != kDispAdapt) return;  // cancelled
-            if (!ok) { s->restart_mirror(kDispAdapt); return; }  // couldn't size: plain fit
-            char cmd[48];
-            std::snprintf(cmd, sizeof(cmd), "wm size %dx%d", ow, oh);
-            std::weak_ptr<ADBMirroringScreen> self2 = self;
-            auto* c2 = app::adb_client();
-            if (!c2) { s->restart_mirror(kDispAdapt); return; }
-            // 2) Apply the override, then restart the mirror (source is now panel-aspect).
-            c2->exec(cmd, [self2](adb::Error, const std::string&) {
-                lv_async_call([self2] {
-                    auto s2 = self2.lock();
-                    if (!s2 || s2->exited() || s2->disp_mode_ != kDispAdapt) return;
-                    s2->restart_mirror(kDispAdapt);
-                });
-            });
-        });
-    });
-}
-
-void ADBMirroringScreen::adapt_exit(int mode) {
-    std::weak_ptr<ADBMirroringScreen> self =
-        std::static_pointer_cast<ADBMirroringScreen>(shared_from_this());
-    auto restart = [self, mode] {
-        lv_async_call([self, mode] {
-            auto s = self.lock();
-            if (!s || s->exited() || s->disp_mode_ != mode) return;
-            s->restart_mirror(mode);
-        });
-    };
-    // Restore the device's resolution first (so the agent rebuilds capture at the
-    // real size), then reconfigure to the new mode.
-    if (auto* c = app::adb_client())
-        c->exec("wm size reset", [restart](adb::Error, const std::string&) { restart(); });
-    else
-        restart_mirror(mode);
-}
 
 void ADBMirroringScreen::query_disp_mode_availability() {
     auto* c = app::adb_client();
@@ -690,12 +623,9 @@ void ADBMirroringScreen::onExit() {
         agent_audio_.reset();
     }
     audio_on_ = false;
-    // If we leave while in Adapt, restore the device's resolution (we overrode it via
-    // `wm size`). Fire-and-forget — the source returns to its real size.
-    if (disp_mode_ == kDispAdapt) {
-        if (auto* c = app::adb_client())
-            c->exec("wm size reset", [](adb::Error, const std::string&) {});
-    }
+    // Leaving while in Adapt: the agent restores the device resolution itself on the
+    // MIRROR_STOP that stop_mirror() (below) sends — and on disconnect/shutdown if the
+    // link is already gone — so the Tab5 issues no `wm size reset`.
     // Stop observing touch: clear our listener so no more on_touch fires (an
     // in-flight one keeps us alive via its weak lock). UP any still-down
     // passthrough pointer first (link still alive) so the source sees no stuck finger.

@@ -80,8 +80,9 @@ private:
     // Display mode (the overlay DispMode button), how the source maps onto the panel:
     //   Fit   — aspect-preserve inscribe, letterbox (agent scale=fit).
     //   Fill  — aspect-preserve cover, crop the overflow (agent scale=fill).
-    //   Adapt — `wm size` the source to the panel aspect (so fit fills with no
-    //           letterbox/crop), then agent scale=fit. Reset on leaving Adapt / exit.
+    //   Adapt — agent resizes the source (`wm size`) to the panel aspect so fit fills
+    //           with no letterbox/crop (agent scale=adapt = kScaleAdapt). The agent
+    //           restores the device size itself on MIRROR_STOP / disconnect / shutdown.
     // Cycled by DispMode; the active mode is read off the image, so the icon is fixed.
     // LVGL-thread only.
     enum DispMode { kDispFit = 0, kDispFill = 1, kDispAdapt = 2 };
@@ -94,19 +95,14 @@ private:
     //                     clobber with Adapt's resize/reset.
     bool dispmode_show_ = true;
     bool adapt_allowed_ = true;
-    // The MIRROR_START config for `mode` (Adapt and Fit both send scale=fit).
+    // The MIRROR_START config for `mode` (Fit/Adapt send scale=fit/adapt, Fill=fill).
     agent_link::MirrorConfig mirror_config_for(int mode) const;
     // Switch to `mode`: reconfigure the live mirror (the agent restarts the stream on
-    // a fresh MIRROR_START), running the `wm size` side effects for entering/leaving
-    // Adapt. No-op if `mode` is already current.
+    // a fresh MIRROR_START). Adapt's `wm size` is applied/restored agent-side, so no
+    // Tab5-driven resize. No-op if `mode` is already current.
     void apply_disp_mode(int mode);
     // Reconfigure the running mirror to `mode` (send a new MIRROR_START). LVGL thread.
     void restart_mirror(int mode);
-    // Adapt enter: query `wm size`, set the panel-aspect override, then restart fit.
-    // Adapt exit: `wm size reset`, then restart `mode`. Both chain over adb exec
-    // completions marshalled back to the LVGL thread.
-    void adapt_enter();
-    void adapt_exit(int mode);
     // Query `wm size` at mirror start: set dispmode_show_ / adapt_allowed_ from the
     // source's current resolution (rebuilds the overlay if the DispMode button has to
     // be hidden). LVGL thread + an adb exec completion marshalled back.

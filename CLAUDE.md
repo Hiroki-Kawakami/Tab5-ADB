@@ -177,7 +177,14 @@ edge exactly, so a portrait phone streams at the full 360 preview width), then
 streamed as a plain fit into the resized box — full-bleed, with the chosen size
 returned in the response's
 appended `out_width`/`out_height` (the wire basis of the agent-based device
-preview, see `AgentPreview`). The agent also serves **GET_APP_LIST /
+preview, see `AgentPreview`). **`scale_mode=3 adapt`** is the *opposite* knob — it
+changes the **source** instead of the output: the agent `wm size`s display 0 to the
+viewer aspect (`IWindowManager.setForcedDisplaySize`, `Server.applyAdaptSize`/
+`adaptSize`) so the source app reflows and a plain fit then fills the panel with no
+letterbox/crop, and the agent **restores the device size itself** on MIRROR_STOP /
+disconnect / shutdown (`clearAdaptSize`; the mirror's DispMode **Adapt**). Unlike
+`aspect` it must not be used for a small preview — it resizes the real phone. The
+agent also serves **GET_APP_LIST /
 GET_APP_ICON** (cmd 0x20/0x21, HELLO caps bit 2 = `APPINFO`): `AppInfo.java` over
 the `PackageManager` reached via `SystemContext.java` (the scrcpy system-context
 workaround, extracted out of `Input`; both services are built once on the **main**
@@ -1842,18 +1849,24 @@ while streaming), plus **OpMode** = the touch-control toggle (**on by default**;
 icon is the LVGL theme primary blue when on, white when off).
 **DispMode cycles the display mode Fit → Fill → Adapt → Fit** (the icon is fixed —
 the active mode is read off the image): **Fit** = agent `scale=fit` (letterbox),
-**Fill** = `scale=fill` (cover + crop), **Adapt** = `wm size` the source to the
-panel aspect (long:short = `PANEL_H:PANEL_W` = 16:9, keeping the device's short
-side; `compute_adapt_size` parses `wm size`'s *Physical size*) so plain `scale=fit`
-then fills with no letterbox *or* crop. Each tap calls `apply_disp_mode` →
-`restart_mirror` = **one fresh `start_mirror(cfg)`**: the agent **reconfigures the
-live stream in place** (it breaks `streamVideo` when a new `MIRROR_START` sets
-`pendingStart`, then the session loop restarts with the new params) — no
-`stop_mirror` needed (a stop+start race could hang the agent), and the video
-listener / decode pipeline stay up. Entering Adapt runs `wm size <W>x<H>` and
-leaving it (or `onExit` while in Adapt) runs `wm size reset` to restore the device
-resolution; both chain `restart_mirror` over the `app::adb_client()->exec()`
-completion marshalled back to LVGL. **DispMode availability is gated on the source's
+**Fill** = `scale=fill` (cover + crop), **Adapt** = agent `scale=adapt`
+(`kScaleAdapt`, §5.3): the **agent** `wm size`s the source to the viewer aspect
+(long:short = `PANEL_H:PANEL_W` = 16:9, keeping the device's short side; the agent's
+`adaptSize` computes it from `target_w:target_h` + the physical source size) so a
+plain fit then fills with no letterbox *or* crop. Each tap calls `apply_disp_mode` →
+`restart_mirror` = **one fresh `start_mirror(cfg)`** for *all* modes (Adapt included):
+the agent **reconfigures the live stream in place** (it breaks `streamVideo` when a
+new `MIRROR_START` sets `pendingStart`, then the session loop restarts with the new
+params) — no `stop_mirror` needed (a stop+start race could hang the agent), and the
+video listener / decode pipeline stay up. **The `wm size` is owned entirely by the
+agent** (`Server.applyAdaptSize`/`clearAdaptSize` via `IWindowManager.
+setForcedDisplaySize`/`clearForcedDisplaySize`, shell-uid binder): it applies on the
+adapt `MIRROR_START` and restores on **MIRROR_STOP / switch-away `MIRROR_START` /
+disconnect (`serve()` finally) / JVM shutdown hook (SIGTERM/SIGHUP)** — so a yanked
+USB cable can no longer strand the device at the override (the Tab5 used to send
+`wm size`/`wm size reset` over adb exec, which couldn't reach the phone after a
+disconnect — the bug this fixed). The Tab5 sends **no** `wm size` for Adapt anymore
+(`adapt_enter`/`adapt_exit`/`compute_adapt_size` removed). **DispMode availability is gated on the source's
 `wm size` at mirror start** (`query_disp_mode_availability`, one `wm size` query whose
 result sets two LVGL-thread flags; the effective resolution = the `Override size:` if
 present, else `Physical size:`): if it is **already panel-aspect** (9:16/16:9,
@@ -1865,7 +1878,11 @@ user's `wm size`. The flags load async (the overlay is built shown/full-cycle fi
 only hiding forces a re-`apply_overlay`, the cycle length is read live). (All four
 states + the in-place reconfigure + the `wm size` restore + the
 hidden/adapt-disabled gating verified on a real Android device via
-`simulator/verify/mirror_dispmode.txt` / `mirror_hidden.txt` / `mirror_noadapt.txt`.)
+`simulator/verify/mirror_dispmode.txt` / `mirror_hidden.txt` / `mirror_noadapt.txt`
+**before** the move to agent-owned `wm size`; the agent-side apply/restore +
+disconnect/shutdown cleanup still needs a re-verify on a real phone — the headless
+simverify can't exercise `IWindowManager`/a yanked cable. The read-only
+`query_disp_mode_availability` `wm size` query stays on the Tab5 for the UI gating.)
 **Touch passthrough (§4.7):** when
 OpMode is on, the screen's `on_touch` injects touches over the mirror to the source
 as per-pointer MotionEvents via `agent_client().link()->inject_touch(action,

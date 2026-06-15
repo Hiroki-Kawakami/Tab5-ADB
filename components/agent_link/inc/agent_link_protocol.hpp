@@ -86,6 +86,12 @@ enum ScaleMode : uint8_t {
     kScaleAspect = 2,  // agent sizes the output to the source aspect within the
                        // target box (16-aligned, no letterbox/crop); the chosen
                        // size comes back as out_width/out_height
+    kScaleAdapt = 3,   // agent resizes the SOURCE itself (wm size) to the target
+                       // aspect so a plain fit fills it with no letterbox/crop (the
+                       // source app reflows); the agent restores the device size on
+                       // MIRROR_STOP / disconnect / shutdown. Streams as fit; out_*
+                       // == target. Distinct from kScaleAspect (output framing only,
+                       // never touches the device resolution).
 };
 
 // Status codes (§4.5).

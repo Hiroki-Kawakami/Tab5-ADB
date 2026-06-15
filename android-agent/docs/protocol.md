@@ -228,7 +228,7 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
 ```
  +0   u16     target_width        ビューア面の幅 [px] (LE)。全画面 mirror = 720
  +2   u16     target_height       ビューア面の高さ [px] (LE)。全画面 mirror = 1280
- +4   u8      scale_mode          スケールモード。0=fit（既定） / 1=fill / 2=aspect（§5.3）
+ +4   u8      scale_mode          スケールモード。0=fit（既定） / 1=fill / 2=aspect / 3=adapt（§5.3）
  +5   u8      streams             開始するストリームのビットマスク（§4.6 と同じ bit 割当）。映像のみ=0x01、
                                   Tab5Only 音声つき=0x03（VIDEO|AUDIO。§6）。AUDIO 単独は非対応（mirror は常に映像を伴う）
  +6   u16     reserved            0
@@ -591,6 +591,15 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
     （16px 整列が不要になるので任意の偶数サイズが許される。§5.2）。実装上は
     「アスペクト一致ボックスへの fit」と等価なので、agent はサイズ決定後は fit と同じ経路で流す
     （偶数丸めの誤差 ≤ 1px は許容）。
+  - **adapt**: agent が**ソース端末の解像度そのもの**を `wm size`（`IWindowManager.
+    setForcedDisplaySize`）でビューア面のアスペクト比に変更する — 端末の短辺を保ったまま長辺を
+    `target` のアスペクトに合わせて伸ばすので、端末アプリ側が**リフロー**し、以後は素の fit が
+    レターボックスもクロップもなくパネル全面を埋める（agent は内部的に fit 経路で流す。`out_*` =
+    `target`）。**aspect（2）が出力フレームの寸法だけを決めて実機解像度に触れないのと決定的に異なり、
+    adapt（3）は実機を物理的に変える。** よって **復元は agent が所有する**: `MIRROR_STOP`・別モードへの
+    再 `MIRROR_START`・切断・JVM 終了（shutdown hook、SIGTERM/SIGHUP）で `clearForcedDisplaySize`
+    （= `wm size reset`）する。Tab5 は `wm size` を一切送らない（**ケーブル切断で reset が届かず
+    端末が override に取り残される問題を、最後まで端末側に居る agent が自己復旧で解消する**）。
 - **更新モデル = 毎フレーム全画面**: 画像領域は毎フレーム全面が書き換わるので **前フレームの
   front→back コピーは不要**。**ブロック単位のレンダリング（領域指定デコード）は実装する**。
 - **部分更新（dirty-rect）= 今後**: 変化バンドだけ送れば帯域削減できるが、ダブルバッファだと swap 後の
