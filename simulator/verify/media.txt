@@ -1,0 +1,12 @@
+# ADBDeviceScreen now-playing card: Connect -> device screen; the bottom media
+# card fills with the active session from `dumpsys media_session` (title /
+# artist + transport controls). Needs a real phone on the PC WITH MEDIA PLAYING
+# (e.g. start a track in a music app first), else the card shows "Nothing
+# playing" with greyed controls.
+settle
+tap 360 420
+wait 9000
+settle
+wait 2500
+capture simulator/verify/out/media.jpg
+quit

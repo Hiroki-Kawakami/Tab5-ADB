@@ -1760,6 +1760,35 @@ regardless of nav mode), same as the mirror overlay. Verified on a real Android 
 `simulator/verify/device_nav.txt` (Recents tap → the phone's overview shows in
 the live preview, Home → back to the launcher).
 
+**Now-playing media card** (under the preview/tools row, full width): icon +
+title/artist + transport controls `[ ⏮ | ⏯ | ⏭ ]`, sourced **agent-free** from
+`dumpsys media_session` (so it works in **both** Normal and Limited mode). The
+pure parser is **`app/media_session.{hpp,cpp}`** (`app::mediainfo::parse_media_session`)
+— `device_info`-style host-tested (`TEST=test_media_session app/test/run.sh`,
+fixture = verbatim Pixel 10 output) — which walks the Sessions Stack picking the
+highest-ranked session that has metadata + a real state (Playing > Buffering >
+Paused; else `valid=false`) and splits the metadata `description=` line into
+`title, artist, album` (the MediaDescription join — a field containing `", "`
+would mis-split, the inherent dump ambiguity the future agent path's discrete
+MediaMetadata keys would avoid). The card rides the header's chained-exec summary
+(an extra `---SEP--- dumpsys media_session` section, parsed on the reader thread).
+When nothing is playing the labels are left **blank** (the controls keep the
+card's height), but the controls are always present: **play-pause stays enabled
+even when idle** — `dispatch` targets the system's media-button session (the last
+app to play), so a Play tap resumes/wakes it — while **Prev/Next grey out**
+without a current track (a skip with no queue context is a no-op). Each control
+taps `app::adb_client()->exec("cmd media_session dispatch <previous|play-pause|next>")`
+(targets the global media-button session) and **optimistically flips the
+play/pause glyph immediately** (play-pause toggles, next/previous imply playing) —
+a tracked one-shot ~1 s timer then `refreshMedia()`s to reconcile the glyph +
+track metadata with reality, without waiting for the 10 s summary tick.
+**Verified on a Pixel 10** (`simulator/verify/media.txt` / `media_control.txt`:
+Apple Music track + artist render, Next dispatch changes the song). **CJK caveat:**
+labels use the built-in montserrat fonts (no CJK glyphs), so a Japanese/CJK title
+renders as tofu (e.g. "ラストリゾート" → □□□); ASCII titles/artists are fine. A CJK
+font is a pending project-wide decision (binary size); the agent metadata path
+wouldn't fix it without one.
+
 Tapping the preview (Normal mode) pushes **`ADBMirroringScreen`**
 (`app/adb_mirroring_screen.*`) — the live screen-mirror viewer over `agent_link`.
 The screen **is** the `agent_link::VideoListener`; the agent lifecycle (jar push +

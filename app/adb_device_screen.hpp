@@ -3,6 +3,7 @@
 #include <string>
 
 #include "agent_preview.hpp"
+#include "media_session.hpp"
 #include "screen.hpp"
 #include "screencap_preview.hpp"
 
@@ -46,8 +47,26 @@ private:
     bool summary_inflight_{false};
     std::string model_;  // banner model, the pre-exec fallback
 
+    // Now-playing media card (under the preview/tools row). Always shown; the
+    // transport controls render disabled when nothing is playing.
+    lv_obj_t *media_card_{nullptr};
+    lv_obj_t *media_icon_{nullptr};
+    lv_obj_t *media_title_{nullptr};
+    lv_obj_t *media_artist_{nullptr};
+    lv_obj_t *media_play_icon_{nullptr};  // play/pause glyph (reflects state)
+    lv_obj_t *media_prev_btn_{nullptr};
+    lv_obj_t *media_next_btn_{nullptr};
+    lv_obj_t *media_play_btn_{nullptr};
+    bool media_inflight_{false};
+    bool media_playing_{false};  // last known play state (for the optimistic flip)
+    lv_timer_t *media_poll_timer_{nullptr};  // one-shot re-fetch after a control tap
+
     void createHeader();
     void refreshSummary();
+    void createMediaCard();
+    void applyMedia(const app::mediainfo::NowPlaying &np);  // LVGL thread
+    void refreshMedia();  // media-only fetch, for a snappy post-control update
+    void dispatchMedia(const char *key);  // cmd media_session dispatch <key>
     void createPreviewContainer();
     void createNavBar();  // Back/Home/Recents/Power row under the preview
     void createToolsContainer();

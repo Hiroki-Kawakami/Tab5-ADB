@@ -18,6 +18,7 @@
 #include "device_icons.hpp"
 #include "device_info.hpp"
 #include "home_screen.hpp"
+#include "media_session.hpp"
 #include "modal.hpp"
 #include "screen_manager.hpp"
 #include "settings_screen.hpp"
@@ -26,6 +27,7 @@
 namespace {
 
 namespace devinfo = app::devinfo;
+namespace mediainfo = app::mediainfo;
 
 // Fire-and-forget a device-side shell command (power actions, key events).
 // Reboot/shutdown drop the link, so the completion may never arrive — that is
@@ -55,7 +57,8 @@ const char *kSummaryCmd =
     "df -k /data; echo ---SEP---; "
     "cmd wifi status; echo ---SEP---; "
     "getprop gsm.sim.state; echo ---SEP---; "
-    "dumpsys telephony.registry | grep -E 'mServiceState=|mSignalStrength=' | head -4";
+    "dumpsys telephony.registry | grep -E 'mServiceState=|mSignalStrength=' | head -4; "
+    "echo ---SEP---; dumpsys media_session";
 
 struct Summary {
     std::string name;     // user-set device name ("" = fall back to model)
@@ -64,6 +67,7 @@ struct Summary {
     devinfo::Storage storage;
     devinfo::Wifi wifi;
     devinfo::Cellular cell;
+    mediainfo::NowPlaying media;
 };
 
 Summary parse_summary(const std::string &out) {
@@ -80,6 +84,7 @@ Summary parse_summary(const std::string &out) {
     s.storage = devinfo::parse_df(section(3));
     s.wifi = devinfo::parse_wifi_status(section(4));
     s.cell = devinfo::parse_cellular(section(5), section(6));
+    s.media = mediainfo::parse_media_session(section(7));
     return s;
 }
 
@@ -100,6 +105,7 @@ void ADBDeviceScreen::build() {
     lv_obj_set_style_pad_column(control_container_, 24, 0);
     createPreviewContainer();
     createToolsContainer();
+    createMediaCard();
 }
 
 void ADBDeviceScreen::onAppear() {
@@ -125,6 +131,10 @@ void ADBDeviceScreen::onDisappear() {
     if (summary_timer_) {
         lv_timer_delete(summary_timer_);
         summary_timer_ = nullptr;
+    }
+    if (media_poll_timer_) {
+        lv_timer_delete(media_poll_timer_);
+        media_poll_timer_ = nullptr;
     }
 }
 
@@ -305,6 +315,164 @@ void ADBDeviceScreen::refreshSummary() {
             } else {
                 lv_obj_add_flag(cell_icon_, LV_OBJ_FLAG_HIDDEN);
             }
+
+            applyMedia(sum->media);
+        });
+    });
+}
+
+void ADBDeviceScreen::createMediaCard() {
+    // A bordered "now playing" card filling the space under the preview/tools
+    // row: [music icon] [title / artist] [<< | play-pause | >>]. Always present;
+    // play-pause stays enabled even when idle (it resumes the last media-button
+    // session), Prev/Next grey out without a current track (see applyMedia).
+    // Media info rides the same `dumpsys media_session` section of the summary
+    // fetch, and a control tap dispatches a media key via `cmd media_session`
+    // (agent-free, so it works in Limited mode too).
+    if (media_card_) lv_obj_delete(media_card_);
+    media_card_ = lv_obj_create(root_);
+    lv_obj_set_size(media_card_, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_remove_flag(media_card_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(media_card_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(media_card_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(media_card_, 1, 0);
+    lv_obj_set_style_border_color(media_card_, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_radius(media_card_, 12, 0);
+    lv_obj_set_style_pad_all(media_card_, 16, 0);
+    lv_obj_set_flex_flow(media_card_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(media_card_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(media_card_, 16, 0);
+
+    media_icon_ = lv_label_create(media_card_);
+    lv_label_set_text(media_icon_, LUCIDE_MUSIC);
+    lv_obj_set_style_text_font(media_icon_, R.font.lucide_40, 0);
+    lv_obj_set_style_text_color(media_icon_, lv_color_hex(0x888888), 0);
+
+    auto text_box = lv_obj_create(media_card_);
+    lv_obj_remove_style_all(text_box);
+    lv_obj_remove_flag(text_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(text_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(text_box, 1);  // takes the slack between icon and controls
+    lv_obj_set_flex_flow(text_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(text_box, 2, 0);
+
+    media_title_ = lv_label_create(text_box);
+    lv_obj_set_style_text_font(media_title_, &lv_font_montserrat_20, 0);
+    lv_obj_set_width(media_title_, LV_PCT(100));
+    lv_label_set_long_mode(media_title_, LV_LABEL_LONG_DOT);
+
+    media_artist_ = lv_label_create(text_box);
+    lv_obj_set_style_text_font(media_artist_, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(media_artist_, lv_color_hex(0x888888), 0);
+    lv_obj_set_width(media_artist_, LV_PCT(100));
+    lv_label_set_long_mode(media_artist_, LV_LABEL_LONG_DOT);
+
+    auto controls = lv_obj_create(media_card_);
+    lv_obj_remove_style_all(controls);
+    lv_obj_remove_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(controls, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(controls, 8, 0);
+
+    auto ctrl_button = [controls, this](const char *icon, const char *key) {
+        auto b = lv_button_create(controls);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_size(b, 60, 60);
+        lv_obj_set_style_radius(b, 30, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_add_event_fn(b, LV_EVENT_CLICKED,
+                            [this, key](lv_event_t *) { dispatchMedia(key); });
+        auto lbl = lv_label_create(b);
+        lv_label_set_text(lbl, icon);
+        lv_obj_set_style_text_font(lbl, R.font.lucide_40, 0);
+        lv_obj_center(lbl);
+        return b;
+    };
+    media_prev_btn_ = ctrl_button(LUCIDE_SKIP_BACK, "previous");
+    media_play_btn_ = ctrl_button(LUCIDE_PLAY, "play-pause");
+    media_play_icon_ = lv_obj_get_child(media_play_btn_, 0);
+    media_next_btn_ = ctrl_button(LUCIDE_SKIP_FORWARD, "next");
+
+    applyMedia(mediainfo::NowPlaying{});  // start in the idle state
+}
+
+void ADBDeviceScreen::applyMedia(const mediainfo::NowPlaying &np) {
+    if (!media_card_) return;
+
+    if (np.valid) {
+        lv_label_set_text(media_title_,
+                          np.title.empty() ? np.package.c_str() : np.title.c_str());
+        // Prefer artist; fall back to album, then hide the second line entirely.
+        const std::string &sub = !np.artist.empty() ? np.artist : np.album;
+        lv_label_set_text(media_artist_, sub.c_str());
+        sub.empty() ? lv_obj_add_flag(media_artist_, LV_OBJ_FLAG_HIDDEN)
+                    : lv_obj_remove_flag(media_artist_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_color(media_icon_, lv_color_hex(0x444444), 0);
+        lv_label_set_text(media_play_icon_, np.playing() ? LUCIDE_PAUSE : LUCIDE_PLAY);
+    } else {
+        // Idle: leave the labels blank (the controls keep the card's height).
+        lv_label_set_text(media_title_, "");
+        lv_obj_add_flag(media_artist_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_color(media_icon_, lv_color_hex(0x888888), 0);
+        lv_label_set_text(media_play_icon_, LUCIDE_PLAY);
+    }
+    media_playing_ = np.valid && np.playing();
+
+    // Play/pause is ALWAYS enabled: `dispatch` targets the system's media-button
+    // session (the last app to play), so even with no active session a Play tap
+    // resumes/wakes it. Prev/Next only make sense against a current track, so
+    // they grey out when idle (a skip with no queue context would be a no-op).
+    lv_obj_set_style_text_color(media_play_icon_, lv_color_hex(0x222222), 0);
+    for (lv_obj_t *b : {media_prev_btn_, media_next_btn_}) {
+        lv_color_t fg = np.active() ? lv_color_hex(0x222222) : lv_color_hex(0xc0c0c0);
+        lv_obj_set_style_text_color(lv_obj_get_child(b, 0), fg, 0);
+        np.active() ? lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE)
+                    : lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    }
+}
+
+void ADBDeviceScreen::dispatchMedia(const char *key) {
+    if (auto *c = app::adb_client())
+        c->exec(std::string("cmd media_session dispatch ") + key,
+                [](adb::Error, const std::string &) {});
+
+    // Optimistic flip: a control tap almost always changes the play state, so
+    // update the play/pause glyph NOW for instant feedback instead of waiting for
+    // a re-fetch. play-pause toggles; next/previous keep playback running.
+    media_playing_ = std::string(key) == "play-pause" ? !media_playing_ : true;
+    lv_label_set_text(media_play_icon_, media_playing_ ? LUCIDE_PAUSE : LUCIDE_PLAY);
+
+    // The device updates its session state asynchronously; re-fetch shortly after
+    // so the glyph and track metadata reconcile with reality without waiting for
+    // the 10 s summary tick. The timer is tracked + cancelled in onDisappear.
+    if (media_poll_timer_) lv_timer_delete(media_poll_timer_);
+    media_poll_timer_ = lv_timer_create(
+        [](lv_timer_t *t) {
+            auto *self = static_cast<ADBDeviceScreen *>(lv_timer_get_user_data(t));
+            self->media_poll_timer_ = nullptr;  // one-shot: deletes itself below
+            lv_timer_delete(t);
+            self->refreshMedia();
+        },
+        1000, this);
+    lv_timer_set_repeat_count(media_poll_timer_, 1);
+}
+
+void ADBDeviceScreen::refreshMedia() {
+    adb::Client *client = app::adb_client();
+    if (!client || media_inflight_) return;
+    media_inflight_ = true;
+    client->exec("dumpsys media_session", [self = shared_from_this(), this](
+                                              adb::Error err, const std::string &out) {
+        auto np = std::make_shared<mediainfo::NowPlaying>();
+        if (err == adb::Error::Ok) *np = mediainfo::parse_media_session(out);
+        lv_async_call([self, this, np]() {
+            if (exited()) return;
+            media_inflight_ = false;
+            applyMedia(*np);
         });
     });
 }

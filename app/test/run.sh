@@ -30,6 +30,7 @@ g++ -std=c++17 \
     "$test_src" \
     "$app/device_info.cpp" \
     "$app/apk_info.cpp" \
+    "$app/media_session.cpp" \
     "$app/sysclock.cpp" \
     -lz \
     -o "$bin"

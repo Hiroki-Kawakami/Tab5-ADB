@@ -1,0 +1,13 @@
+# Tap the media card's Next button (~648,1098) and confirm the dispatch reaches
+# the phone: the track metadata should change after the post-tap re-fetch.
+# Needs a real phone with media playing.
+settle
+tap 360 420
+wait 9000
+settle
+capture simulator/verify/out/media_before.jpg
+tap 648 1098
+wait 2500
+settle
+capture simulator/verify/out/media_after.jpg
+quit
