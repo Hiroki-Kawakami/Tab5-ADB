@@ -32,18 +32,24 @@
 ADBMirroringScreen::ADBMirroringScreen() = default;
 
 ADBMirroringScreen::~ADBMirroringScreen() {
-    // onExit normally runs first on pop and does the orderly teardown; this is the
-    // idempotent backstop. Stop the producer (clear our video listener so no more
-    // on_video_strip arrives) before joining the consumer.
-    if (auto l = app::agent_client().link()) l->set_video_listener({});
-    release_all_pointers();
-    display_manager.set_touch_listener({});
-    if (decode_task_) {
-        decode_stop_ = true;
-        xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
-        decode_task_ = nullptr;
+    // onExit normally runs first on pop and does the orderly stream/overlay teardown.
+    // Only do it here as a backstop for the no-onExit path (the screen destroyed
+    // without a navigation — e.g. AgentClient teardown at shutdown). When onExit DID
+    // run (exited()), skip it: the screen is retired asynchronously (lv_async_call),
+    // AFTER the next screen's onAppear has already re-registered its own video/touch
+    // listeners (e.g. the device screen's AgentPreview) — clearing them here would
+    // clobber that screen, dropping all its frames (a blank device-screen preview).
+    if (!exited()) {
+        if (auto l = app::agent_client().link()) l->set_video_listener({});
+        release_all_pointers();
+        display_manager.set_touch_listener({});
+        if (decode_task_) {
+            decode_stop_ = true;
+            xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
+            decode_task_ = nullptr;
+        }
+        if (overlay_active_) { display_manager.exit_overlay(); overlay_active_ = false; }
     }
-    if (overlay_active_) { display_manager.exit_overlay(); overlay_active_ = false; }
     if (decode_done_) { vSemaphoreDelete(static_cast<SemaphoreHandle_t>(decode_done_)); decode_done_ = nullptr; }
     if (ready_q_) { vQueueDelete(static_cast<QueueHandle_t>(ready_q_)); ready_q_ = nullptr; }
     if (free_q_) { vQueueDelete(static_cast<QueueHandle_t>(free_q_)); free_q_ = nullptr; }
