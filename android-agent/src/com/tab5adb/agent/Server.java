@@ -141,6 +141,14 @@ public final class Server {
         // reuses the injector for a pure binder injectInputEvent (no Looper needed).
         server.initInput();
         server.initAppInfo();
+        // Warm up the synthetic Context on THIS (main) thread so the audio thread's
+        // AudioRecord can reuse the cached instance for its AttributionSource (the
+        // first SystemContext build needs a Looper — see FakeContext / AudioCapture).
+        try {
+            FakeContext.get();
+        } catch (Throwable t) {
+            System.err.println("tab5adb-agent: context warm-up failed: " + t);
+        }
         // Restore any Adapt-mode display override on JVM exit (SIGTERM/SIGHUP, e.g. the
         // launch shell closing). serve() already restores on a clean disconnect; this
         // is the backstop for an abrupt teardown that skips serve()'s finally.
