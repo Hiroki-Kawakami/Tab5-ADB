@@ -51,6 +51,7 @@ public final class Server {
     private static final int INPUT_TOUCH_BATCH = 0x03;  // input_type (§4.7)
     private static final int TOUCH_BATCH_RECORD_LEN = 6;  // action+ptr+x+y
     private static final int EVENT_ORIENTATION = 0x03;
+    private static final int EVENT_MEDIA = 0x04;
     private static final int FLAG_FRAME_START = 0x01;
     private static final int FLAG_FRAME_END = 0x02;
     private static final int CMD_HELLO = 0x01;
@@ -58,6 +59,9 @@ public final class Server {
     private static final int CMD_MIRROR_STOP = 0x11;
     private static final int CMD_GET_APP_LIST = 0x20;
     private static final int CMD_GET_APP_ICON = 0x21;
+    private static final int CMD_GET_MEDIA_INFO = 0x22;
+    private static final int CMD_GET_MEDIA_RENDER = 0x23;
+    private static final int CMD_MEDIA_CONTROL = 0x24;
     private static final int STATUS_OK = 0x00;
     private static final int STATUS_EINVAL = 0x01;
     private static final int STATUS_ENOTSUP = 0x02;
@@ -66,6 +70,7 @@ public final class Server {
     private static final int CAP_VIDEO = 0x0001;
     private static final int CAP_AUDIO = 0x0002;
     private static final int CAP_APPINFO = 0x0004;
+    private static final int CAP_MEDIA = 0x0008;
     private static final int VIDEO_CODEC_JPEG = 0x01;
     private static final int SCALE_ASPECT = 2;  // scale_mode (§5.3)
     private static final int SCALE_ADAPT = 3;   // scale_mode (§5.3): resize the source
@@ -99,6 +104,13 @@ public final class Server {
     // PackageManager is unreachable; the HELLO then drops the APPINFO capability
     // and the commands answer ENOTSUP.
     private AppInfo appInfo;
+
+    // Now-playing media service (§4.4 MEDIA), built once on the main thread like
+    // `appInfo` (SystemContext needs the main Looper). Null = MediaSession is
+    // unreachable; the HELLO then drops the MEDIA capability and the commands
+    // answer ENOTSUP. Its monitor thread pushes MEDIA events through a per-connection
+    // sink set in serve().
+    private MediaInfo mediaInfo;
 
     private Server(boolean testPattern, boolean testTone, int testW, int testH) {
         this.testPattern = testPattern;
@@ -141,6 +153,7 @@ public final class Server {
         // reuses the injector for a pure binder injectInputEvent (no Looper needed).
         server.initInput();
         server.initAppInfo();
+        server.initMediaInfo();
         // Warm up the synthetic Context on THIS (main) thread so the audio thread's
         // AudioRecord can reuse the cached instance for its AttributionSource (the
         // first SystemContext build needs a Looper — see FakeContext / AudioCapture).
@@ -180,7 +193,8 @@ public final class Server {
 
         // Agent-initiated HELLO request (§4.4); its response is read by the reader.
         int caps = CAP_VIDEO | (audioAvailable() ? CAP_AUDIO : 0)
-                | (appInfo != null ? CAP_APPINFO : 0);
+                | (appInfo != null ? CAP_APPINFO : 0)
+                | (mediaInfo != null ? CAP_MEDIA : 0);
         byte[] args = new byte[8];
         args[0] = (byte) PROTO_VERSION;
         args[1] = (byte) AGENT_VER_MAJOR;
@@ -198,6 +212,22 @@ public final class Server {
         // Wait for the HELLO response (or a disconnect) before serving features.
         synchronized (conn.lock) {
             while (!conn.helloOk && !conn.closed) conn.lock.wait();
+        }
+
+        // Route MEDIA events (§4.4) for this connection to the wire; the monitor
+        // thread pushes the current state immediately and on every change. Cleared
+        // below so the next connection rebinds.
+        if (mediaInfo != null) {
+            mediaInfo.setSink(data -> {
+                byte[] payload = new byte[1 + data.length];
+                payload[0] = (byte) EVENT_MEDIA;
+                System.arraycopy(data, 0, payload, 1, data.length);
+                try {
+                    conn.writeFrame(TYPE_EVENT, 0, payload);
+                } catch (IOException e) {
+                    synchronized (conn.lock) { conn.closed = true; conn.lock.notifyAll(); }
+                }
+            });
         }
 
         // Session loop: each MIRROR_START streams until MIRROR_STOP / disconnect,
@@ -237,6 +267,7 @@ public final class Server {
         }
         } finally {
             clearAdaptSize();  // backstop: restore the device size on any session exit
+            if (mediaInfo != null) mediaInfo.setSink(null);  // stop pushing to a dead conn
         }
         reader.join();
     }
@@ -270,6 +301,9 @@ public final class Server {
             else if (cmd == CMD_MIRROR_STOP) handleMirrorStop(conn, reqId);
             else if (cmd == CMD_GET_APP_LIST) handleGetAppList(conn, reqId);
             else if (cmd == CMD_GET_APP_ICON) handleGetAppIcon(conn, p, reqId);
+            else if (cmd == CMD_GET_MEDIA_INFO) handleGetMediaInfo(conn, reqId);
+            else if (cmd == CMD_GET_MEDIA_RENDER) handleGetMediaRender(conn, p, reqId);
+            else if (cmd == CMD_MEDIA_CONTROL) handleMediaControl(conn, p, reqId);
             // unknown cmd: ignore (forward compat, §4.4)
         } else if (f.type == TYPE_INPUT) {
             handleInput(conn, f.payload);
@@ -381,6 +415,19 @@ public final class Server {
         }
     }
 
+    /**
+     * Build the now-playing media service once on the MAIN thread (the caller),
+     * like {@link #initAppInfo} — SystemContext needs this thread's Looper.
+     * Best-effort: on failure the HELLO simply doesn't advertise MEDIA.
+     */
+    void initMediaInfo() {
+        try {
+            mediaInfo = MediaInfo.create();
+        } catch (Throwable t) {
+            System.err.println("tab5adb-agent: media info unavailable: " + t);
+        }
+    }
+
     // --- GET_APP_LIST / GET_APP_ICON (§4.4) — answered on the reader thread ---
 
     private void handleGetAppList(Conn conn, int reqId) throws IOException {
@@ -422,6 +469,52 @@ public final class Server {
             System.err.println("tab5adb-agent: GET_APP_ICON " + pkg + " failed: " + t);
             conn.sendControlResponse(CMD_GET_APP_ICON, reqId, STATUS_EINVAL, null);
         }
+    }
+
+    // --- GET_MEDIA_INFO / GET_MEDIA_RENDER / MEDIA_CONTROL (§4.4) ---
+
+    private void handleGetMediaInfo(Conn conn, int reqId) throws IOException {
+        if (mediaInfo == null) {
+            conn.sendControlResponse(CMD_GET_MEDIA_INFO, reqId, STATUS_ENOTSUP, null);
+            return;
+        }
+        conn.sendControlResponse(CMD_GET_MEDIA_INFO, reqId, STATUS_OK, mediaInfo.snapshotPayload());
+    }
+
+    private void handleGetMediaRender(Conn conn, byte[] p, int reqId) throws IOException {
+        if (mediaInfo == null) {
+            conn.sendControlResponse(CMD_GET_MEDIA_RENDER, reqId, STATUS_ENOTSUP, null);
+            return;
+        }
+        // args (§4.4): width_px(u16) + art_px(u16) + title_px(u8) + artist_px(u8) + reserved(u16).
+        if (p.length < 2 + 8) {
+            conn.sendControlResponse(CMD_GET_MEDIA_RENDER, reqId, STATUS_EINVAL, null);
+            return;
+        }
+        int width = readU16(p, 2);
+        int artPx = readU16(p, 4);
+        int titlePx = p[6] & 0xFF;
+        int artistPx = p[7] & 0xFF;
+        try {
+            byte[] result = mediaInfo.renderPayload(width, artPx, titlePx, artistPx);
+            conn.sendControlResponse(CMD_GET_MEDIA_RENDER, reqId, STATUS_OK, result);
+        } catch (Throwable t) {
+            System.err.println("tab5adb-agent: GET_MEDIA_RENDER failed: " + t);
+            conn.sendControlResponse(CMD_GET_MEDIA_RENDER, reqId, STATUS_EFAIL, null);
+        }
+    }
+
+    private void handleMediaControl(Conn conn, byte[] p, int reqId) throws IOException {
+        if (mediaInfo == null) {
+            conn.sendControlResponse(CMD_MEDIA_CONTROL, reqId, STATUS_ENOTSUP, null);
+            return;
+        }
+        if (p.length < 2 + 1) {
+            conn.sendControlResponse(CMD_MEDIA_CONTROL, reqId, STATUS_EINVAL, null);
+            return;
+        }
+        boolean ok = mediaInfo.control(p[2] & 0xFF);
+        conn.sendControlResponse(CMD_MEDIA_CONTROL, reqId, ok ? STATUS_OK : STATUS_EFAIL, null);
     }
 
     // --- HELLO response (§4.4) ---

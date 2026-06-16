@@ -1,0 +1,22 @@
+# Regression for "album art missing when it must load on track change": album art
+# often arrives a moment AFTER the metadata change (the app pushes the title first,
+# the bitmap later). The agent then pushes has_art 0->1 for the same track and the
+# Tab5 must re-fetch the render to pick the art up. Skip a few tracks with a wait
+# long enough for the async art load + re-fetch, and confirm the card shows art each
+# time (not just the music glyph). Needs a real phone with media playing; skipping
+# should cross into tracks whose art isn't preloaded.
+settle
+tap 360 420
+wait 9000
+settle
+wait 3000
+capture simulator/verify/out/media_art0.jpg
+tap 648 1108
+wait 5000
+settle
+capture simulator/verify/out/media_art1.jpg
+tap 648 1108
+wait 5000
+settle
+capture simulator/verify/out/media_art2.jpg
+quit

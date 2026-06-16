@@ -66,7 +66,7 @@ struct AgentInfo {
 // this) and the features Tab5 can accept. Link-only — no mirror params here.
 struct HelloConfig {
     uint32_t max_payload = 256 * 1024;
-    uint16_t capabilities = kCapVideo | kCapAppInfo;  // §4.6
+    uint16_t capabilities = kCapVideo | kCapAppInfo | kCapMedia;  // §4.6
 };
 
 // Mirror parameters Tab5 hands the agent in MIRROR_START (protocol.md §4.4 args).
@@ -112,6 +112,18 @@ struct AudioInfo {
 struct OrientationInfo {
     uint8_t rotation = 0;    // Surface.ROTATION_* (0/1/2/3 = 0/90/180/270)
     bool landscape = false;  // rotation is 90 or 270 (the panel is being viewed sideways)
+};
+
+// Now-playing media snapshot (§4.4 MEDIA event / GET_MEDIA_INFO). The agent
+// pushes this on every state/track change; the Tab5 re-fetches art + rendered
+// title/artist (GET_MEDIA_RENDER) only when content_token changes (a state-only
+// change — play<->pause — keeps the token, so no re-render).
+struct MediaState {
+    uint8_t state = 0;            // agent_link::MediaState enum (None/Playing/Paused/...)
+    bool has_art = false;         // an album-art bitmap is available
+    uint32_t content_token = 0;   // track-identity hash; 0 = no active session
+    bool playing() const { return state == 1 /*kMediaPlaying*/; }
+    bool active() const { return state == 1 || state == 2 || state == 3; }  // playing/paused/buffering
 };
 
 // One JPEG strip (§5.2): the rectangle on the Tab5 panel (x,y,w,h, all 16px
@@ -196,6 +208,23 @@ public:
     virtual void on_audio_data(Link* /*link*/, const uint8_t* /*pcm*/, size_t /*len*/) = 0;
 };
 
+// Media channel delegate — now-playing notifications (the MEDIA event, §4.4). A
+// feature (the DeviceScreen media card) registers it with Link::set_media_listener()
+// while it shows the card and clears it ({}) to detach; the link survives. Held
+// weakly (lock()ed before each dispatch). Callbacks fire on the reader thread —
+// marshal to LVGL yourself. Album art + rendered title/artist are fetched
+// on-demand with Link::request(kCmdGetMediaRender, ...); this channel only carries
+// the small state/token notification.
+class MediaListener {
+public:
+    virtual ~MediaListener() = default;
+
+    // The now-playing state changed (sent once when the link binds the sink and on
+    // every subsequent change). On a content_token change, fetch the art + rendered
+    // text; a state-only change (play<->pause) just updates the transport glyph.
+    virtual void on_media_update(Link* /*link*/, const MediaState& /*state*/) = 0;
+};
+
 class Link : public adb::StreamListener,
              public std::enable_shared_from_this<Link> {
 public:
@@ -226,6 +255,13 @@ public:
     // on_audio_started dispatched on the reader thread. The AUDIO analogue of
     // set_video_listener.
     void set_audio_listener(std::weak_ptr<AudioListener> audio);
+
+    // Register (or clear, with an empty weak_ptr) the media-channel listener. Held
+    // weakly. Callable from any thread; takes effect for the next MEDIA event
+    // dispatched on the reader thread. The agent pushes the current state right
+    // after the link binds, so registering before/around on_link_hello gets the
+    // initial state without a separate GET_MEDIA_INFO.
+    void set_media_listener(std::weak_ptr<MediaListener> media);
 
     // Start mirroring: send MIRROR_START (§4.4) with `cfg` (panel size / scale
     // mode / streams). Non-blocking — the agent's response arrives as
@@ -353,6 +389,10 @@ private:
     // any thread, read on the reader thread, guarded by audio_mtx_.
     std::weak_ptr<AudioListener> audio_;
     mutable std::mutex audio_mtx_;
+    // Media channel listener (the feature). Same model as video_/audio_: set/cleared
+    // from any thread, read on the reader thread, guarded by media_mtx_.
+    std::weak_ptr<MediaListener> media_;
+    mutable std::mutex media_mtx_;
     HelloConfig cfg_;
 
     std::vector<uint8_t> rx_;  // frame accumulator (reader thread only)

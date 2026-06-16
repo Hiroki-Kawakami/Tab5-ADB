@@ -48,6 +48,11 @@ void Link::set_audio_listener(std::weak_ptr<AudioListener> audio) {
     audio_ = std::move(audio);
 }
 
+void Link::set_media_listener(std::weak_ptr<MediaListener> media) {
+    std::lock_guard<std::mutex> lk(media_mtx_);
+    media_ = std::move(media);
+}
+
 adb::Error Link::start_mirror(const MirrorConfig& cfg) {
     if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
 
@@ -414,18 +419,36 @@ void Link::handle_event(const uint8_t* p, size_t len) {
         return;
     }
     const uint8_t event = p[0];
-    if (event != kEventOrientation) return;  // unknown event: ignore (forward compat)
-    if (len < 1 + kOrientationDataLen) {
-        fail(adb::Error::Protocol);
+    if (event == kEventOrientation) {
+        if (len < 1 + kOrientationDataLen) {
+            fail(adb::Error::Protocol);
+            return;
+        }
+        OrientationInfo info;
+        info.rotation = p[1];
+        info.landscape = rotation_is_landscape(info.rotation);
+        // p[2..4] reserved.
+        std::shared_ptr<VideoListener> v;
+        { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
+        if (v) v->on_orientation(this, info);
         return;
     }
-    OrientationInfo info;
-    info.rotation = p[1];
-    info.landscape = rotation_is_landscape(info.rotation);
-    // p[2..4] reserved.
-    std::shared_ptr<VideoListener> v;
-    { std::lock_guard<std::mutex> lk(video_mtx_); v = video_.lock(); }
-    if (v) v->on_orientation(this, info);
+    if (event == kEventMedia) {
+        if (len < 1 + kMediaInfoLen) {
+            fail(adb::Error::Protocol);
+            return;
+        }
+        MediaState ms;
+        ms.state = p[1];
+        ms.has_art = p[2] != 0;
+        // p[3..4] reserved.
+        ms.content_token = rd_u32(p + 5);
+        std::shared_ptr<MediaListener> m;
+        { std::lock_guard<std::mutex> lk(media_mtx_); m = media_.lock(); }
+        if (m) m->on_media_update(this, ms);
+        return;
+    }
+    // unknown event: ignore (forward compat)
 }
 
 // JPEG (§5.2): one strip = subheader (x,y,w,h) + JPEG bytes. The frame layer has

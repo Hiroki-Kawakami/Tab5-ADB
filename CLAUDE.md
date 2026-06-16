@@ -206,7 +206,29 @@ split stays a separate package and density values never resolve) and reads
 framework code calling `ActivityThread.currentApplication().getResources()`,
 which NPEs while `mInitialApplication` is null — `SystemContext` installs
 scrcpy's **fillAppContext** (a bare `Application` wrapping the system context).
-The Tab5-side
+The agent also serves the **now-playing media** commands **GET_MEDIA_INFO /
+GET_MEDIA_RENDER / MEDIA_CONTROL** (cmd 0x22/0x23/0x24, HELLO caps bit 3 = `MEDIA`)
+plus an agent-initiated **`MEDIA` EVENT** (event 0x04) — `MediaInfo.java` +
+`TextRender.java`, built once on the main thread like AppInfo. **Two app_process
+workarounds (Phase-0-verified on a real device, see [[agent-media-phase0]]):**
+(1) `getSystemService("media_session")` NPEs (the media framework initializer never
+ran), so the session is reached over the **binder** — `ServiceManager.getService
+("media_session")` → `ISessionManager$Stub.asInterface` → **`getSessions(null,
+userId=0, deviceId=0)`** (shell uid holds `MEDIA_CONTENT_CONTROL`) → a public
+`new MediaController(ctx, token)` per session (metadata / playback / album-art
+Bitmap / `registerCallback` / transport controls all work off it); (2) bare
+app_process has **no default Typeface** (`Typeface.DEFAULT` native instance is 0),
+so every legacy text path aborts/throws — `TextRender` builds a **self-contained**
+Typeface with the low-level `android.graphics.fonts.Font`/`FontFamily` +
+**`Typeface.nativeCreateFromArray(famPtrs, fallback=0, weight=-1, italic=0)`**
+(reflection) over Roboto + `/system/fonts/NotoSansCJK*` and sets it **explicitly**
+on the Paint, so `drawText` renders CJK with no `DEFAULT` reference. A
+`MediaInfo` monitor thread (HandlerThread) picks the top session, registers a
+`MediaController.Callback` (instant push on metadata/playback change) + polls
+`getSessions` every 1.5 s (detects app-switch); a per-connection sink writes the
+`MEDIA` event. `GET_MEDIA_RENDER` returns album art (ARGB8888, Canvas-drawn so a
+HARDWARE bitmap works) + title/artist (A8 alpha masks, ellipsized to the requested
+width). The Tab5-side
 `agent_link::Link` parses frames and hands each
 strip to a decode+framebuffer seam (`VideoListener::on_video_strip`). The headless
 harness `components/agent_link/test/test_mirror.cpp` drives the whole bring-up
@@ -275,7 +297,7 @@ simulator/                   # SIMULATOR build root (see below)
     include/  src/           #     host shims: esp_* (err/log/check/timer/heap/nvs)
                              #     + freertos/* (pthread-backed FreeRTOS API)
 android-agent/               # ANDROID  tab5adb-agent (scrcpy-style app_process server)
-  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/Projection/TestPattern/ScreenCapture + Input (key + multi-touch injection)
+  src/                       #   Java (com.tab5adb.agent): Server + FramePipeline/Projection/TestPattern/ScreenCapture + Input (key + multi-touch injection) + AppInfo + MediaInfo/TextRender (now-playing + agent-rendered text)
   test/                      #   host-JVM unit test (ProjectionTest) + run.sh — no phone
   build.sh  run.sh           #   javac+d8 -> dex jar; adb push + app_process dev loop
 ```
@@ -929,8 +951,13 @@ the app's job). The agent's **ORIENTATION `EVENT`** (TYPE=0x03, §4.4 — source
 device logical rotation, sent at stream start + on each rotation change) parses to
 `on_orientation(OrientationInfo{rotation, landscape})`; it rides the video channel
 because the consumer (the mirror screen) uses it to lay its overlay out portrait vs
-landscape — the video itself is unchanged (natural-orientation lock). Future AUDIO
-channels add the same kind of `set_*` setter.
+landscape — the video itself is unchanged (natural-orientation lock). The
+**`MediaListener`** (`Link::set_media_listener(weak)`) is the same kind of
+per-channel slice for now-playing: the agent's **`MEDIA` EVENT** (event 0x04)
+parses to `on_media_update(MediaState{state, has_art, content_token})` on the
+reader thread (the DeviceScreen media card registers it; art + rendered text come
+from `Link::request(kCmdGetMediaRender, …)` and control from `kCmdMediaControl`).
+The AUDIO channel has its own `set_audio_listener`.
 `Link::start_mirror(MirrorConfig)` sends the Tab5-initiated `MIRROR_START`
 (non-blocking; call after `on_link_hello` once the video listener is registered);
 `MirrorConfig` carries the viewer-surface size (16-aligned, not necessarily the
@@ -1760,34 +1787,60 @@ regardless of nav mode), same as the mirror overlay. Verified on a real Android 
 `simulator/verify/device_nav.txt` (Recents tap → the phone's overview shows in
 the live preview, Home → back to the launcher).
 
-**Now-playing media card** (under the preview/tools row, full width): icon +
-title/artist + transport controls `[ ⏮ | ⏯ | ⏭ ]`, sourced **agent-free** from
-`dumpsys media_session` (so it works in **both** Normal and Limited mode). The
-pure parser is **`app/media_session.{hpp,cpp}`** (`app::mediainfo::parse_media_session`)
-— `device_info`-style host-tested (`TEST=test_media_session app/test/run.sh`,
-fixture = verbatim Pixel 10 output) — which walks the Sessions Stack picking the
-highest-ranked session that has metadata + a real state (Playing > Buffering >
-Paused; else `valid=false`) and splits the metadata `description=` line into
-`title, artist, album` (the MediaDescription join — a field containing `", "`
-would mis-split, the inherent dump ambiguity the future agent path's discrete
-MediaMetadata keys would avoid). The card rides the header's chained-exec summary
-(an extra `---SEP--- dumpsys media_session` section, parsed on the reader thread).
-When nothing is playing the labels are left **blank** (the controls keep the
-card's height), but the controls are always present: **play-pause stays enabled
-even when idle** — `dispatch` targets the system's media-button session (the last
-app to play), so a Play tap resumes/wakes it — while **Prev/Next grey out**
-without a current track (a skip with no queue context is a no-op). Each control
-taps `app::adb_client()->exec("cmd media_session dispatch <previous|play-pause|next>")`
-(targets the global media-button session) and **optimistically flips the
-play/pause glyph immediately** (play-pause toggles, next/previous imply playing) —
-a tracked one-shot ~1 s timer then `refreshMedia()`s to reconcile the glyph +
-track metadata with reality, without waiting for the 10 s summary tick.
-**Verified on a Pixel 10** (`simulator/verify/media.txt` / `media_control.txt`:
-Apple Music track + artist render, Next dispatch changes the song). **CJK caveat:**
-labels use the built-in montserrat fonts (no CJK glyphs), so a Japanese/CJK title
-renders as tofu (e.g. "ラストリゾート" → □□□); ASCII titles/artists are fine. A CJK
-font is a pending project-wide decision (binary size); the agent metadata path
-wouldn't fix it without one.
+**Now-playing media card** (under the preview/tools row, full width): album art +
+title/artist + transport controls `[ ⏮ | ⏯ | ⏭ ]`, with **two paths picked by
+agent mode**:
+
+- **Normal mode (agent up, HELLO `MEDIA` cap):** the agent drives the card over
+  the **MEDIA channel** (protocol.md §4.4) — **real-time + album art + any-script
+  title/artist** (the agent renders the text to a bitmap, so the Tab5 needs **no
+  CJK font**). `ADBDeviceScreen` is an `agent_link::MediaListener`: `onAppear`
+  registers it on the link + fetches the initial `GET_MEDIA_INFO`; the agent then
+  **pushes a `MEDIA` event** on every state/track change (`on_media_update`,
+  reader thread → marshalled). A change in **`content_token`** (the track-identity
+  hash) triggers one `GET_MEDIA_RENDER` (album art as **ARGB8888** + title/artist
+  as **A8** alpha masks, sized to the card's text width, ellipsized agent-side);
+  a state-only change (play↔pause) just flips the glyph (no re-fetch).
+  **Album-art-loads-late gotcha (cost a real-device bug):** apps push the new
+  track's metadata text *before* its art bitmap loads, so the first render of a
+  changed track often returns **art-less** (`getBitmap()` still null). The agent
+  then pushes **`has_art` 0→1 for the same token** (its change detector + the 1.5 s
+  rescan both catch it), and the Tab5 **re-fetches when art becomes available** even
+  though the token is unchanged (`maybeFetchRender`, guarded by `media_art_loaded_`/
+  `media_art_tried_` so it tries once per track). Without it the art only showed
+  when already loaded at the metadata change (connect-while-playing, or skipping
+  within one album). The Tab5
+  converts each A8 mask to ARGB8888 in the fixed title/artist colors on receipt
+  (`a8_to_argb`, so no LVGL A8-recolor dependency) and shows it as an `lv_image`;
+  album art likewise (the `GET_APP_ICON` PSRAM-buffer pattern). Transport taps go
+  over **`MEDIA_CONTROL`** (`MediaController.getTransportControls()` — the right
+  session, low latency); the push reconciles the glyph, so no post-tap re-fetch
+  timer. The agent side is **`MediaInfo.java`** + **`TextRender.java`** — see the
+  android-agent section + the [[agent-media-phase0]] memory for the two
+  app_process workarounds (binder `ISessionManager.getSessions` for the session,
+  `Typeface.nativeCreateFromArray(fallback=0)` for CJK `drawText`).
+- **Limited mode (no agent):** the original **agent-free** `dumpsys media_session`
+  path — `app/media_session.{hpp,cpp}` (`app::mediainfo::parse_media_session`,
+  host-tested `TEST=test_media_session app/test/run.sh`) parses the highest-ranked
+  session (Playing > Buffering > Paused) and splits the `description=` line into
+  `title, artist, album` (the MediaDescription join can mis-split on a `", "`); it
+  rides the header chained-exec summary (`---SEP--- dumpsys media_session`). Text
+  uses the montserrat fonts, so **CJK renders as tofu** (accepted in Limited mode);
+  transport taps go over `cmd media_session dispatch …` with the optimistic
+  glyph-flip + a 1 s reconcile re-fetch (no push in this mode).
+
+Both modes: **play-pause stays enabled even when idle** (it wakes the last
+media-button session), **Prev/Next grey out** without a current track, and the
+card keeps its height when nothing plays (idle glyph + blank text). The card
+widgets overlay both sets (glyph+labels for Limited, art+text-images for Normal);
+only one shows per mode (the agent-render `lv_image_dsc_t` buffers are freed in
+`freeMediaBitmaps()` + the dtor). The music glyph and the album art share a
+**fixed `kMediaArtPx` (72) slot** (both centered in it, toggled), so the card
+height + text position don't shift when art loads in and the glyph swaps out. **Verified E2E on a Pixel 10** via
+`simulator/verify/media.txt` (album art + a CJK track title render),
+`media_control.txt` (Next → the title/artist change within ~1 s via the push,
+no 10 s tick), and `media_art_reload.txt` (skip across albums → the art for each
+new track appears after its async load, the late-art-load regression).
 
 Tapping the preview (Normal mode) pushes **`ADBMirroringScreen`**
 (`app/adb_mirroring_screen.*`) — the live screen-mirror viewer over `agent_link`.

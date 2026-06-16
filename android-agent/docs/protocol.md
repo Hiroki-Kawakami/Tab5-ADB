@@ -165,8 +165,11 @@ v1 で実際に使うのは agent 発の `HELLO`（リンク確立）と Tab5 �
 | `0x12` | `MIRROR_SET_PARAM` | T→A | **予約**: スケールモード/品質/分割数等のライブ変更 | 未定 |
 | `0x20` | `GET_APP_LIST`     | T→A | インストール済みアプリ一覧（pkg / ラベル / flags）。AppManager 用 | 下記 |
 | `0x21` | `GET_APP_ICON`     | T→A | 1 アプリのアイコン（raw ARGB8888） | 下記 |
+| `0x22` | `GET_MEDIA_INFO`   | T→A | 再生中メディアの状態スナップショット（state / content_token） | 下記 |
+| `0x23` | `GET_MEDIA_RENDER` | T→A | アルバムアート（ARGB8888）＋タイトル/アーティストを agent 描画した文字画像（A8） | 下記 |
+| `0x24` | `MEDIA_CONTROL`    | T→A | 再生操作（play-pause / next / previous） | 下記 |
 
-予約: `0x02..0x0F` 制御一般 / `0x13..0x1F` mirror 制御 / `0x22..` 拡張。
+予約: `0x02..0x0F` 制御一般 / `0x13..0x1F` mirror 制御 / `0x25..` 拡張。
 
 > v1 のフロー: **HELLO でリンクを確立 → Tab5 の `MIRROR_START` で mirror 開始 → agent が JPEG
 > ストリームを流す**。`MIRROR_START` は映像と音声の **両方**を開始するメッセージ（運ぶストリームは
@@ -181,8 +184,9 @@ v1 で実際に使うのは agent 発の `HELLO`（リンク確立）と Tab5 �
 | `0x01` | `ERROR` | エラー通知 | 未定 |
 | `0x02` | `STREAM_STOPPED` | ストリーム停止通知 | 未定 |
 | `0x03` | `ORIENTATION` | ソース端末の論理回転（向き）の通知 | 下記 |
+| `0x04` | `MEDIA` | 再生中メディアの状態/トラック変化の通知（state / content_token） | 下記 |
 
-予約: `0x04..0x0F` 一般 / `0x10..` 拡張。
+予約: `0x05..0x0F` 一般 / `0x10..` 拡張。
 
 #### HELLO (cmd = 0x01) — agent_link 接続確立
 
@@ -369,6 +373,93 @@ mirror 中、**agent が EVENT として送る**。ソース端末（ディス�
 - `rotation` が **90/270（奇数）なら横向き**、**0/180 なら縦向き**。Tab5 は overlay を縦ストリップ
   ／横ストリップに切り替える。受信前の既定は縦向き。
 
+#### メディア情報（GET_MEDIA_INFO / GET_MEDIA_RENDER / MEDIA_CONTROL / MEDIA イベント）
+
+ADBDeviceScreen の「再生中メディア」カードを agent 経由でリアルタイム更新し、アルバムアートと
+**CJK 等を含むタイトル/アーティストを agent 側で描画**して送る（Tab5 に CJK フォントを持たせず
+あらゆる文字種を表示するため。アプリアイコンと同じく「agent がビットマップ化、Tab5 は blit のみ」）。
+`MEDIA` capability（§4.6 bit 3）が前提 — agent が MediaSession に届かない環境では capability を落とす。
+agent は `android.media.session.ISessionManager`（binder）から最優先セッションの `MediaController` を得て
+メタデータ・再生状態・アルバムアートを読む（`MEDIA_CONTENT_CONTROL`、shell uid で取得可）。
+
+**設計:** 変化（再生/停止・曲送り）は agent が **`MEDIA` イベントで push**（リアルタイム）。Tab5 は
+`content_token`（タイトル＋アーティスト＋アルバム＋アート同一性のハッシュ）が変わったときだけ
+`GET_MEDIA_RENDER` でアート＋文字画像を取り直す。`state` だけの変化（play↔pause）は再描画不要。
+
+##### MEDIA イベント (event = 0x04) — 状態/トラック変化の通知
+
+リンク確立後、**agent が EVENT として送る**（接続直後に 1 回＋以降変化のたび）。
+
+```
+ +0   u8    state          0=none / 1=playing / 2=paused / 3=buffering / 4=stopped
+ +1   u8    has_art        0/1（アルバムアートの有無）
+ +2   u16   reserved       0
+ +4   u32   content_token  タイトル/アーティスト/アルバム/アート同一性のハッシュ (LE)。
+                           0 = 再生中セッションなし。変化時のみ Tab5 は GET_MEDIA_RENDER を呼ぶ
+ (= 8 bytes。将来は末尾に append-only)
+```
+
+##### GET_MEDIA_INFO (cmd = 0x22) — 状態スナップショット
+
+**Tab5 が CONTROL_REQUEST として送る**（カード初期表示用。イベントは変化時のみ発火するため）。
+
+**要求 args**: **なし**（`cmd` + `req_id` のみ）。
+
+**応答 result**（agent → Tab5, `status = OK`）: MEDIA イベントの data と同じ 8 バイト（state /
+has_art / reserved / content_token）。
+
+##### GET_MEDIA_RENDER (cmd = 0x23) — アート＋文字画像
+
+**Tab5 が CONTROL_REQUEST として送る**。agent はアルバムアートを `art_px`×`art_px` の **raw ARGB8888**、
+タイトル/アーティストを各 1 行の **A8（アルファマスク）** に描画して返す（文字色は Tab5 が recolor で付ける）。
+文字は `width_px` を超える分を agent 側で省略記号（…）に丸める。
+
+**要求 args**（Tab5 → agent）:
+
+```
+ +0   u16   width_px    文字行の最大幅 [px] (LE)。超過分は agent が省略(…)
+ +2   u16   art_px      アルバムアート辺長 [px] (LE)。0 = アート不要
+ +4   u8    title_px    タイトル文字サイズ [px]
+ +5   u8    artist_px   アーティスト文字サイズ [px]
+ +6   u16   reserved    0
+ (= 8 bytes)
+```
+
+**応答 result**（agent → Tab5, `status = OK`）: セクション列（固定で art→title→artist の順）。
+
+```
+ +0   u8    section_count   セクション数（= 3 固定）
+ +1   u8    reserved        0
+ +2   u16   reserved        0
+ +4   ...   section_count 個のセクション（連続配置、各セクションは下記）:
+   +0   u8    kind        0=ALBUM_ART / 1=TITLE / 2=ARTIST
+   +1   u8    format      0=absent（空。アート無し / 文字空） / 1=ARGB8888 / 2=A8
+   +2   u16   width  (LE)
+   +4   u16   height (LE)
+   +6   u32   data_len (LE) = width*height*bpp（ARGB8888 = 4, A8 = 1, absent = 0）
+   +10  ...   pixels (data_len bytes。ARGB8888 はメモリ順 B,G,R,A = LVGL ネイティブ、A8 は α 1B/px)
+```
+
+- 再生中セッションが無い／メタデータ欠落は `status = OK` で各セクション `format = absent`（または
+  `content_token = 0` のみ）。不正な要求は `status = EINVAL`。
+- 応答待ちは **2000 ms**（アートのスケール＋文字描画の余裕。既定 1000 ms より長め）。
+
+##### MEDIA_CONTROL (cmd = 0x24) — 再生操作
+
+**Tab5 が CONTROL_REQUEST として送る**。agent は `MediaController.getTransportControls()` で操作する
+（対象セッションが確実。`cmd media_session dispatch` の exec より低遅延）。
+
+**要求 args**（Tab5 → agent）:
+
+```
+ +0   u8    action     0=play_pause / 1=next / 2=previous / 3=play / 4=pause
+ +1   u8    reserved   0
+ +2   u16   reserved   0
+ (= 4 bytes)
+```
+
+**応答 result**: **なし**（`status` のみ）。`status = OK` で受理。再生中セッションが無ければ `EFAIL`。
+
 ### 4.6 capability ビット（共通）
 
 機能の有無を表すビットマスク。HELLO で双方が広告し（agent=提供可能 / Tab5=受理可能）、`MIRROR_START`
@@ -379,10 +470,11 @@ mirror 中、**agent が EVENT として送る**。ソース端末（ディス�
 | 0 | `VIDEO` | 映像 mirror（JPEG ストリップ。§5） |
 | 1 | `AUDIO` | 音声 mirror（§6。Android 12+） |
 | 2 | `APPINFO` | アプリ情報（`GET_APP_LIST` / `GET_APP_ICON`。§4.4） |
-| 3-15 | 予約 | 0 |
+| 3 | `MEDIA` | 再生中メディア情報（`GET_MEDIA_INFO` / `GET_MEDIA_RENDER` / `MEDIA_CONTROL` ＋ `MEDIA` イベント。§4.4） |
+| 4-15 | 予約 | 0 |
 
-agent・Tab5 とも `VIDEO` / `AUDIO`（§6） / `APPINFO` を立てる（agent は PackageManager に届かない
-環境では `APPINFO` を落とす）。両者の `capabilities` の **AND** が利用可能な機能集合。
+agent・Tab5 とも `VIDEO` / `AUDIO`（§6） / `APPINFO` / `MEDIA` を立てる（agent は PackageManager や
+MediaSession に届かない環境ではそれぞれ落とす）。両者の `capabilities` の **AND** が利用可能な機能集合。
 
 ### 4.5 ステータスコード（共通の基準値・拡張可）
 

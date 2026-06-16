@@ -1,12 +1,16 @@
 #include "adb_device_screen.hpp"
 
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "esp_heap_caps.h"
+
 #include "adb.hpp"  // adb::Client
 #include "adb_app.hpp"
+#include "agent_link_protocol.hpp"  // kCmdGetMediaRender, kMedia*, rd_u16/u32
 #include "adb_app_manager_screen.hpp"
 #include "adb_device_info_screen.hpp"
 #include "adb_file_manager_screen.hpp"
@@ -28,6 +32,11 @@ namespace {
 
 namespace devinfo = app::devinfo;
 namespace mediainfo = app::mediainfo;
+
+// Fixed size of the media card's left slot (album art OR the music glyph). Both
+// occupy this exact box so the card height + text position don't shift when art
+// loads in and the glyph swaps out for the image.
+constexpr int kMediaArtPx = 72;
 
 // Fire-and-forget a device-side shell command (power actions, key events).
 // Reboot/shutdown drop the link, so the completion may never arrive — that is
@@ -115,6 +124,38 @@ void ADBDeviceScreen::onAppear() {
     // (Mirroring/Shell/...).
     startPreview();
 
+    // Now-playing media: in Normal mode with an agent that advertises MEDIA, the
+    // agent pushes state in real time over the link (and renders art + CJK-capable
+    // title/artist). Register the channel + fetch the current snapshot (the push
+    // only fires on changes, and the link's initial push happened before this
+    // screen existed). Otherwise the dumpsys path in refreshSummary drives the card.
+    agent_media_ = false;
+    if (app::agent_client().mode() == app::AgentClient::Mode::Normal &&
+        (app::agent_client().agent_caps() & agent_link::kCapMedia)) {
+        if (auto l = app::agent_client().link()) {
+            agent_media_ = true;
+            l->set_media_listener(std::static_pointer_cast<agent_link::MediaListener>(
+                std::static_pointer_cast<ADBDeviceScreen>(shared_from_this())));
+            // Snapshot: GET_MEDIA_INFO returns the 8-byte state; reuse on_media_update.
+            auto self = std::static_pointer_cast<ADBDeviceScreen>(shared_from_this());
+            l->request(agent_link::kCmdGetMediaInfo, nullptr, 0,
+                       [self, this](adb::Error err, uint8_t status, const uint8_t *r,
+                                    size_t len) {
+                           if (err != adb::Error::Ok || status != agent_link::kStatusOk ||
+                               len < agent_link::kMediaInfoLen)
+                               return;
+                           agent_link::MediaState st;
+                           st.state = r[0];
+                           st.has_art = r[1] != 0;
+                           st.content_token = agent_link::rd_u32(r + 4);
+                           lv_async_call([self, this, st]() {
+                               if (exited() || !agent_media_) return;
+                               applyMediaState(st);
+                           });
+                       });
+        }
+    }
+
     // Live summary fields: fetch now, then every 10 s while the screen shows
     // (battery and signal move; returning from a sub-screen refreshes too).
     refreshSummary();
@@ -135,6 +176,14 @@ void ADBDeviceScreen::onDisappear() {
     if (media_poll_timer_) {
         lv_timer_delete(media_poll_timer_);
         media_poll_timer_ = nullptr;
+    }
+    // Stop the media push while a sub-screen shows (re-registered + re-snapshotted
+    // on the next onAppear). The listener is weak, but detaching avoids needless
+    // reader-thread dispatch + marshalling behind the pushed screen.
+    if (agent_media_) {
+        if (auto l = app::agent_client().link()) l->set_media_listener({});
+        agent_media_ = false;
+        media_token_ = 0;
     }
 }
 
@@ -316,7 +365,9 @@ void ADBDeviceScreen::refreshSummary() {
                 lv_obj_add_flag(cell_icon_, LV_OBJ_FLAG_HIDDEN);
             }
 
-            applyMedia(sum->media);
+            // In Normal mode the agent MEDIA channel drives the card (real-time +
+            // album art + agent-rendered text); ignore the dumpsys section then.
+            if (!agent_media_) applyMedia(sum->media);
         });
     });
 }
@@ -344,19 +395,38 @@ void ADBDeviceScreen::createMediaCard() {
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(media_card_, 16, 0);
 
-    media_icon_ = lv_label_create(media_card_);
+    // Left slot: a FIXED kMediaArtPx box holding the music glyph (idle / Limited /
+    // no-art) OR the album art image (Normal, art present) — both centered in the
+    // same-size box and toggled, so the card height + text position never shift
+    // when art loads in and the glyph swaps for the image.
+    auto art_slot = lv_obj_create(media_card_);
+    lv_obj_remove_style_all(art_slot);
+    lv_obj_remove_flag(art_slot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(art_slot, kMediaArtPx, kMediaArtPx);
+
+    media_icon_ = lv_label_create(art_slot);
     lv_label_set_text(media_icon_, LUCIDE_MUSIC);
     lv_obj_set_style_text_font(media_icon_, R.font.lucide_40, 0);
     lv_obj_set_style_text_color(media_icon_, lv_color_hex(0x888888), 0);
+    lv_obj_center(media_icon_);
 
-    auto text_box = lv_obj_create(media_card_);
+    media_art_ = lv_image_create(art_slot);
+    lv_obj_set_size(media_art_, kMediaArtPx, kMediaArtPx);
+    lv_obj_set_style_radius(media_art_, 8, 0);
+    lv_obj_set_style_clip_corner(media_art_, true, 0);
+    lv_obj_center(media_art_);
+    lv_obj_add_flag(media_art_, LV_OBJ_FLAG_HIDDEN);
+
+    media_text_box_ = lv_obj_create(media_card_);
+    lv_obj_t *text_box = media_text_box_;
     lv_obj_remove_style_all(text_box);
     lv_obj_remove_flag(text_box, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(text_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_height(text_box, LV_SIZE_CONTENT);
     lv_obj_set_flex_grow(text_box, 1);  // takes the slack between icon and controls
     lv_obj_set_flex_flow(text_box, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(text_box, 2, 0);
 
+    // Limited-mode text labels (dumpsys metadata; CJK renders as tofu — accepted).
     media_title_ = lv_label_create(text_box);
     lv_obj_set_style_text_font(media_title_, &lv_font_montserrat_20, 0);
     lv_obj_set_width(media_title_, LV_PCT(100));
@@ -367,6 +437,12 @@ void ADBDeviceScreen::createMediaCard() {
     lv_obj_set_style_text_color(media_artist_, lv_color_hex(0x888888), 0);
     lv_obj_set_width(media_artist_, LV_PCT(100));
     lv_label_set_long_mode(media_artist_, LV_LABEL_LONG_DOT);
+
+    // Normal-mode agent-rendered text (any script). Hidden until a render lands.
+    media_title_img_ = lv_image_create(text_box);
+    lv_obj_add_flag(media_title_img_, LV_OBJ_FLAG_HIDDEN);
+    media_artist_img_ = lv_image_create(text_box);
+    lv_obj_add_flag(media_artist_img_, LV_OBJ_FLAG_HIDDEN);
 
     auto controls = lv_obj_create(media_card_);
     lv_obj_remove_style_all(controls);
@@ -435,16 +511,263 @@ void ADBDeviceScreen::applyMedia(const mediainfo::NowPlaying &np) {
     }
 }
 
+// --- agent-driven media (Normal mode): real-time push + agent-rendered art/text ---
+
+namespace {
+
+// Parsed GET_MEDIA_RENDER result: album art (ARGB8888) + title/artist (already
+// converted from the agent's A8 mask to ARGB8888 in the card's fixed colors, so
+// the Tab5 needs no LVGL A8 recolor). Buffers are PSRAM; the dtor frees whatever
+// the LVGL thread didn't take ownership of (it nulls a field once it adopts it).
+struct RenderResult {
+    uint8_t *art = nullptr;    uint16_t artW = 0, artH = 0;
+    uint8_t *title = nullptr;  uint16_t titleW = 0, titleH = 0;
+    uint8_t *artist = nullptr; uint16_t artistW = 0, artistH = 0;
+    ~RenderResult() {
+        heap_caps_free(art);
+        heap_caps_free(title);
+        heap_caps_free(artist);
+    }
+};
+
+// A8 alpha mask -> ARGB8888 in the given 0xRRGGBB color (PSRAM). The Color int
+// 0xAARRGGBB written LE is B,G,R,A — LVGL's native ARGB8888 order, like the icons.
+uint8_t *a8_to_argb(const uint8_t *a, int w, int h, uint32_t rgb) {
+    size_t n = (size_t)w * h;
+    auto *buf = static_cast<uint32_t *>(heap_caps_malloc(n * 4, MALLOC_CAP_SPIRAM));
+    if (!buf) return nullptr;
+    for (size_t i = 0; i < n; i++) buf[i] = (static_cast<uint32_t>(a[i]) << 24) | rgb;
+    return reinterpret_cast<uint8_t *>(buf);
+}
+
+// Parse the GET_MEDIA_RENDER sections (protocol.md): head(4) + N×(header(10)+data).
+std::shared_ptr<RenderResult> parse_media_render(const uint8_t *r, size_t len) {
+    if (len < agent_link::kMediaRenderHeadLen) return nullptr;
+    int count = r[0];
+    size_t off = agent_link::kMediaRenderHeadLen;
+    auto out = std::make_shared<RenderResult>();
+    for (int i = 0; i < count; i++) {
+        if (off + agent_link::kMediaSectionHeaderLen > len) break;
+        uint8_t kind = r[off];
+        uint8_t fmt = r[off + 1];
+        uint16_t w = agent_link::rd_u16(r + off + 2);
+        uint16_t h = agent_link::rd_u16(r + off + 4);
+        uint32_t dlen = agent_link::rd_u32(r + off + 6);
+        const uint8_t *data = r + off + agent_link::kMediaSectionHeaderLen;
+        if (off + agent_link::kMediaSectionHeaderLen + dlen > len) break;
+        off += agent_link::kMediaSectionHeaderLen + dlen;
+        if (fmt == agent_link::kMediaFmtAbsent || w == 0 || h == 0) continue;
+        if (kind == agent_link::kMediaSectionArt &&
+            fmt == agent_link::kMediaFmtArgb8888 && dlen == (size_t)w * h * 4) {
+            out->art = static_cast<uint8_t *>(heap_caps_malloc(dlen, MALLOC_CAP_SPIRAM));
+            if (out->art) { memcpy(out->art, data, dlen); out->artW = w; out->artH = h; }
+        } else if (fmt == agent_link::kMediaFmtA8 && dlen == (size_t)w * h) {
+            uint32_t rgb = (kind == agent_link::kMediaSectionTitle) ? 0x222222u : 0x888888u;
+            uint8_t *buf = a8_to_argb(data, w, h, rgb);
+            if (kind == agent_link::kMediaSectionTitle) { out->title = buf; out->titleW = w; out->titleH = h; }
+            else if (kind == agent_link::kMediaSectionArtist) { out->artist = buf; out->artistW = w; out->artistH = h; }
+        }
+    }
+    return out;
+}
+
+void set_argb_dsc(lv_image_dsc_t &dsc, uint8_t *buf, uint16_t w, uint16_t h) {
+    dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    dsc.header.cf = LV_COLOR_FORMAT_ARGB8888;
+    dsc.header.w = w;
+    dsc.header.h = h;
+    dsc.header.stride = w * 4;
+    dsc.data = buf;
+    dsc.data_size = (size_t)w * h * 4;
+}
+
+}  // namespace
+
+void ADBDeviceScreen::on_media_update(agent_link::Link *, const agent_link::MediaState &st) {
+    // Reader thread: marshal to the LVGL thread (the listener is held weakly).
+    auto self = std::static_pointer_cast<ADBDeviceScreen>(shared_from_this());
+    lv_async_call([self, this, st]() {
+        if (exited() || !agent_media_) return;
+        applyMediaState(st);
+    });
+}
+
+void ADBDeviceScreen::applyMediaState(const agent_link::MediaState &st) {
+    if (!media_card_) return;
+    last_media_ = st;
+    // Normal mode uses the agent-rendered images; keep the Limited labels hidden.
+    lv_obj_add_flag(media_title_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(media_artist_, LV_OBJ_FLAG_HIDDEN);
+
+    media_playing_ = st.playing();
+    lv_label_set_text(media_play_icon_, st.playing() ? LUCIDE_PAUSE : LUCIDE_PLAY);
+    lv_obj_set_style_text_color(media_play_icon_, lv_color_hex(0x222222), 0);
+    for (lv_obj_t *b : {media_prev_btn_, media_next_btn_}) {
+        lv_color_t fg = st.active() ? lv_color_hex(0x222222) : lv_color_hex(0xc0c0c0);
+        lv_obj_set_style_text_color(lv_obj_get_child(b, 0), fg, 0);
+        st.active() ? lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE)
+                    : lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    if (st.content_token == 0) {  // no active session: clear to the idle glyph
+        media_token_ = 0;
+        media_art_loaded_ = false;
+        media_art_tried_ = false;
+        freeMediaBitmaps();
+        lv_obj_add_flag(media_art_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(media_icon_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_color(media_icon_, lv_color_hex(0x888888), 0);
+        lv_obj_add_flag(media_title_img_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(media_artist_img_, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    maybeFetchRender();
+}
+
+// Decide whether to (re)fetch the art + rendered text for the current track. A new
+// track (content_token changed) always fetches. CRUCIALLY, album art often loads
+// *after* the metadata change (the app fires onMetadataChanged with the text first,
+// the bitmap a moment later), so the first render of a new track can come back
+// art-less; the agent then pushes has_art 0->1 for the SAME token, and this catches
+// it — re-fetch once art becomes available even though the token is unchanged.
+void ADBDeviceScreen::maybeFetchRender() {
+    if (media_render_inflight_) return;  // re-evaluated when the in-flight one completes
+    bool token_changed = last_media_.content_token != media_token_;
+    if (token_changed) {
+        media_token_ = last_media_.content_token;
+        media_art_loaded_ = false;
+        media_art_tried_ = false;
+    }
+    bool want_art = last_media_.content_token != 0 && last_media_.has_art;
+    bool need = token_changed || (want_art && !media_art_loaded_ && !media_art_tried_);
+    if (!need) return;
+    if (want_art) media_art_tried_ = true;
+    fetchMediaRender(want_art);
+}
+
+void ADBDeviceScreen::fetchMediaRender(bool has_art) {
+    auto l = app::agent_client().link();
+    if (!l || media_render_inflight_) return;
+    media_render_inflight_ = true;
+
+    lv_obj_update_layout(media_card_);
+    int tw = lv_obj_get_width(media_text_box_);
+    uint16_t width = tw > 16 ? (uint16_t)tw : 300;
+    uint16_t art_px = has_art ? kMediaArtPx : 0;
+
+    uint8_t args[agent_link::kMediaRenderArgsLen];
+    agent_link::wr_u16(args, width);
+    agent_link::wr_u16(args + 2, art_px);
+    args[4] = 20;  // title_px
+    args[5] = 16;  // artist_px
+    agent_link::wr_u16(args + 6, 0);
+
+    auto self = std::static_pointer_cast<ADBDeviceScreen>(shared_from_this());
+    l->request(
+        agent_link::kCmdGetMediaRender, args, sizeof(args),
+        [self, this](adb::Error err, uint8_t status, const uint8_t *r, size_t len) {
+            // Reader thread: parse + copy to PSRAM, then marshal the swap to LVGL.
+            std::shared_ptr<RenderResult> rr;
+            if (err == adb::Error::Ok && status == agent_link::kStatusOk)
+                rr = parse_media_render(r, len);
+            lv_async_call([self, this, rr]() {
+                if (exited()) return;  // rr dtor frees the buffers
+                media_render_inflight_ = false;
+                if (!agent_media_) return;
+                if (!rr) {  // failed: force a retry on the next update / poll push
+                    media_token_ = 0;
+                    media_art_tried_ = false;
+                    return;
+                }
+                media_art_loaded_ = rr->art != nullptr;
+                freeMediaBitmaps();
+                // Album art (or fall back to the glyph). The art is requested at
+                // kMediaArtPx, matching the fixed slot — no per-render resize, so
+                // the layout stays put.
+                if (rr->art) {
+                    set_argb_dsc(art_dsc_, rr->art, rr->artW, rr->artH);
+                    rr->art = nullptr;  // ownership moved to art_dsc_
+                    lv_image_set_src(media_art_, &art_dsc_);
+                    lv_obj_remove_flag(media_art_, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_add_flag(media_icon_, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(media_art_, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_remove_flag(media_icon_, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_set_style_text_color(media_icon_, lv_color_hex(0x444444), 0);
+                }
+                // Title / artist images.
+                if (rr->title) {
+                    set_argb_dsc(title_dsc_, rr->title, rr->titleW, rr->titleH);
+                    rr->title = nullptr;
+                    lv_image_set_src(media_title_img_, &title_dsc_);
+                    lv_obj_remove_flag(media_title_img_, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(media_title_img_, LV_OBJ_FLAG_HIDDEN);
+                }
+                if (rr->artist) {
+                    set_argb_dsc(artist_dsc_, rr->artist, rr->artistW, rr->artistH);
+                    rr->artist = nullptr;
+                    lv_image_set_src(media_artist_img_, &artist_dsc_);
+                    lv_obj_remove_flag(media_artist_img_, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(media_artist_img_, LV_OBJ_FLAG_HIDDEN);
+                }
+                // Re-evaluate: the track may have changed, or art may have become
+                // available (has_art pushed while this fetch was in flight).
+                maybeFetchRender();
+            });
+        },
+        2000);
+}
+
+void ADBDeviceScreen::freeMediaBitmaps() {
+    // Drop the image references BEFORE freeing the pixels they point at.
+    if (media_art_) lv_image_set_src(media_art_, nullptr);
+    if (media_title_img_) lv_image_set_src(media_title_img_, nullptr);
+    if (media_artist_img_) lv_image_set_src(media_artist_img_, nullptr);
+    heap_caps_free((void *)art_dsc_.data);
+    art_dsc_.data = nullptr;
+    heap_caps_free((void *)title_dsc_.data);
+    title_dsc_.data = nullptr;
+    heap_caps_free((void *)artist_dsc_.data);
+    artist_dsc_.data = nullptr;
+}
+
+ADBDeviceScreen::~ADBDeviceScreen() {
+    // The LVGL objects are gone by now; just free the heap pixel buffers.
+    heap_caps_free((void *)art_dsc_.data);
+    heap_caps_free((void *)title_dsc_.data);
+    heap_caps_free((void *)artist_dsc_.data);
+}
+
 void ADBDeviceScreen::dispatchMedia(const char *key) {
-    if (auto *c = app::adb_client())
+    const std::string k(key);
+    // Normal mode: drive the agent's MediaController (correct session, low latency,
+    // and the MEDIA event reconciles the state). Limited mode / no link: the
+    // agent-free `cmd media_session dispatch`.
+    if (agent_media_) {
+        if (auto l = app::agent_client().link()) {
+            uint8_t action = k == "play-pause" ? agent_link::kMediaActionPlayPause
+                             : k == "next"     ? agent_link::kMediaActionNext
+                                                : agent_link::kMediaActionPrevious;
+            uint8_t arg[4] = {action, 0, 0, 0};
+            l->request(agent_link::kCmdMediaControl, arg, sizeof(arg),
+                       [](adb::Error, uint8_t, const uint8_t *, size_t) {}, 1000);
+        }
+    } else if (auto *c = app::adb_client()) {
         c->exec(std::string("cmd media_session dispatch ") + key,
                 [](adb::Error, const std::string &) {});
+    }
 
     // Optimistic flip: a control tap almost always changes the play state, so
     // update the play/pause glyph NOW for instant feedback instead of waiting for
     // a re-fetch. play-pause toggles; next/previous keep playback running.
-    media_playing_ = std::string(key) == "play-pause" ? !media_playing_ : true;
+    media_playing_ = k == "play-pause" ? !media_playing_ : true;
     lv_label_set_text(media_play_icon_, media_playing_ ? LUCIDE_PAUSE : LUCIDE_PLAY);
+
+    // Normal mode reconciles via the MEDIA event push; only Limited mode needs the
+    // one-shot re-fetch (no push there). The timer is tracked + cancelled in onDisappear.
+    if (agent_media_) return;
 
     // The device updates its session state asynchronously; re-fetch shortly after
     // so the glyph and track metadata reconcile with reality without waiting for

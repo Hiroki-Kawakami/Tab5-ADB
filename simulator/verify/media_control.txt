@@ -1,6 +1,8 @@
-# Tap the media card's Next button (~648,1098) and confirm the dispatch reaches
-# the phone: the track metadata should change after the post-tap re-fetch.
-# Needs a real phone with media playing.
+# Tap the media card's Next button (~648,1098) and confirm the skip reaches the
+# phone: in Normal mode it goes over the agent MEDIA_CONTROL channel and the new
+# track arrives via the MEDIA event push (the album art + agent-rendered CJK
+# title/artist update within ~1s, no 10 s tick). Needs a real phone with media
+# playing.
 settle
 tap 360 420
 wait 9000

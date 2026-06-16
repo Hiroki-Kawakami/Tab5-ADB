@@ -83,6 +83,12 @@ void ScreencapPreview::stop() {
         jpeg_pipe_ = nullptr;
         jpeg_pipe_max_ = 0;
     }
+    // present() pointed image_'s source at our dsc_ / img_buf_. The image outlives
+    // this preview (it belongs to the screen), so drop that reference before the
+    // dtor frees the buffers — otherwise a redraw after we're gone reads freed
+    // memory (the same "drop the src before freeing the pixels" rule as the media
+    // bitmaps). The decode task is joined above, so no present() will re-set it.
+    if (image_) lv_image_set_src(image_, nullptr);
 }
 
 void ScreencapPreview::capture_once() {

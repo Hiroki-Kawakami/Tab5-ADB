@@ -109,6 +109,12 @@ void AgentPreview::stop() {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
         decode_task_ = nullptr;
     }
+    // present() pointed image_'s source at our dsc_ / img_buf_. The image outlives
+    // this preview (it belongs to the screen), so drop that reference before the
+    // dtor frees the buffers — otherwise a redraw after we're gone reads freed
+    // memory (the same "drop the src before freeing the pixels" rule as the media
+    // bitmaps). The decode task is joined above, so no present() will re-set it.
+    if (image_) lv_image_set_src(image_, nullptr);
 }
 
 // ---------------------------------------------------------------------------

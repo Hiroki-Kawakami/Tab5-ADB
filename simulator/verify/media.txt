@@ -1,8 +1,10 @@
 # ADBDeviceScreen now-playing card: Connect -> device screen; the bottom media
-# card fills with the active session from `dumpsys media_session` (title /
-# artist + transport controls). Needs a real phone on the PC WITH MEDIA PLAYING
-# (e.g. start a track in a music app first), else the card shows "Nothing
-# playing" with greyed controls.
+# card fills with the active session. In Normal mode (agent up) the agent pushes
+# the state over the MEDIA channel and renders the album art (ARGB8888) + the
+# title/artist as images (so CJK shows with no Tab5 font); a new track re-fetches
+# art+text, a state-only change (play<->pause) updates instantly. Limited mode
+# falls back to `dumpsys media_session` text (CJK -> tofu). Needs a real phone on
+# the PC WITH MEDIA PLAYING, else the card shows the idle glyph + greyed prev/next.
 settle
 tap 360 420
 wait 9000

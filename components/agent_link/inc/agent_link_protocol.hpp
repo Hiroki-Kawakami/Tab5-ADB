@@ -42,6 +42,9 @@ enum Cmd : uint8_t {
     kCmdMirrorSetParam = 0x12,  // T->A: live param change (reserved)
     kCmdGetAppList = 0x20,    // T->A: installed apps (pkg/label/flags), §4.4
     kCmdGetAppIcon = 0x21,    // T->A: one app icon as raw ARGB8888, §4.4
+    kCmdGetMediaInfo = 0x22,    // T->A: now-playing state snapshot (§4.4)
+    kCmdGetMediaRender = 0x23,  // T->A: album art (ARGB8888) + title/artist (A8), §4.4
+    kCmdMediaControl = 0x24,    // T->A: transport control (play-pause/next/prev), §4.4
 };
 
 // GET_APP_LIST entry flags (§4.4).
@@ -59,6 +62,60 @@ enum Event : uint8_t {
     kEventError = 0x01,
     kEventStreamStopped = 0x02,
     kEventOrientation = 0x03,  // source device logical rotation changed (§4.4)
+    kEventMedia = 0x04,        // now-playing media state/track changed (§4.4)
+};
+
+// MEDIA event / GET_MEDIA_INFO data (after the event byte for the event, or the
+// whole result for GET_MEDIA_INFO, §4.4):
+//  +0 u8  state          kMediaState* below
+//  +1 u8  has_art        0/1
+//  +2 u16 reserved
+//  +4 u32 content_token  track-identity hash (LE); 0 = no active session.
+//                        The Tab5 re-fetches art/text only when this changes.
+constexpr size_t kMediaInfoLen = 8;
+
+enum MediaPlayState : uint8_t {
+    kMediaNone = 0,
+    kMediaPlaying = 1,
+    kMediaPaused = 2,
+    kMediaBuffering = 3,
+    kMediaStopped = 4,
+};
+
+// GET_MEDIA_RENDER request args (§4.4): width_px(u16) + art_px(u16) +
+// title_px(u8) + artist_px(u8) + reserved(u16).
+constexpr size_t kMediaRenderArgsLen = 8;
+
+// GET_MEDIA_RENDER response: a 4-byte head (section_count u8 + 3 reserved) then
+// `section_count` sections, each a 10-byte header + data:
+//  +0 u8  kind     kMediaSection*  (art / title / artist)
+//  +1 u8  format   kMediaFmt*      (absent / argb8888 / a8)
+//  +2 u16 width
+//  +4 u16 height
+//  +6 u32 data_len = width*height*bpp (argb8888=4, a8=1, absent=0)
+//  +10 .. data
+constexpr size_t kMediaRenderHeadLen = 4;
+constexpr size_t kMediaSectionHeaderLen = 10;
+
+enum MediaSection : uint8_t {
+    kMediaSectionArt = 0,
+    kMediaSectionTitle = 1,
+    kMediaSectionArtist = 2,
+};
+
+enum MediaFmt : uint8_t {
+    kMediaFmtAbsent = 0,
+    kMediaFmtArgb8888 = 1,
+    kMediaFmtA8 = 2,
+};
+
+// MEDIA_CONTROL request arg (§4.4): action(u8) + reserved. No response result.
+enum MediaAction : uint8_t {
+    kMediaActionPlayPause = 0,
+    kMediaActionNext = 1,
+    kMediaActionPrevious = 2,
+    kMediaActionPlay = 3,
+    kMediaActionPause = 4,
 };
 
 // ORIENTATION event data (after the event byte, §4.4): rotation + reserved.
@@ -77,6 +134,7 @@ enum Cap : uint16_t {
     kCapVideo = 0x0001,
     kCapAudio = 0x0002,
     kCapAppInfo = 0x0004,  // GET_APP_LIST / GET_APP_ICON (§4.4)
+    kCapMedia = 0x0008,    // GET_MEDIA_INFO / GET_MEDIA_RENDER / MEDIA_CONTROL + MEDIA event (§4.4)
 };
 
 // scale_mode (MIRROR_START args, §5.3).
