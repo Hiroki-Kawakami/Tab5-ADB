@@ -26,3 +26,8 @@ void *heap_caps_aligned_alloc(size_t alignment, size_t size, uint32_t caps) {
 void heap_caps_free(void *ptr) {
     free(ptr);
 }
+
+size_t heap_caps_get_largest_free_block(uint32_t caps) {
+    (void)caps;
+    return (size_t)256 * 1024 * 1024;  // host heap always fits
+}

@@ -45,6 +45,30 @@ bool unfilter(uint8_t ft, const uint8_t* in, const uint8_t* prev, uint8_t* out,
     return true;
 }
 
+// Advance the chunk cursor `*pos` to the next IDAT chunk and hand back its
+// (compressed) data slice, skipping any non-IDAT chunk. Returns false at IEND,
+// end of file, or a truncated chunk. This lets inflate be fed each IDAT in
+// place — no concatenation buffer (a screen-capture PNG's IDAT is several MB,
+// and buffering it in one PSRAM vector hit the geometric-growth realloc, e.g. an
+// 8 MB request for ~4.5 MB of data, which a fragmented PSRAM heap can't satisfy).
+bool next_idat(const uint8_t* png, size_t len, size_t* pos,
+               const uint8_t** data, uint32_t* clen) {
+    while (*pos + 8 <= len) {
+        uint32_t cl = be32(png + *pos);
+        const uint8_t* type = png + *pos + 4;
+        if (*pos + 12 + (size_t)cl > len) return false;  // truncated
+        const uint8_t* d = png + *pos + 8;
+        *pos += 12 + cl;  // length + type + data + CRC
+        if (memcmp(type, "IDAT", 4) == 0) {
+            *data = d;
+            *clen = cl;
+            return true;
+        }
+        if (memcmp(type, "IEND", 4) == 0) return false;
+    }
+    return false;
+}
+
 }  // namespace
 
 namespace app {
@@ -63,16 +87,14 @@ bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
     if (len < 8 + 25 || memcmp(png, SIG, 8) != 0) return false;
 
     int W = 0, H = 0, bpp = 0;
-    std::vector<uint8_t, PsramAllocator<uint8_t>> idat;  // concatenated IDAT (compressed)
 
-    size_t pos = 8;
+    // Find IHDR (always the first chunk) to size the row buffers.
     bool seen_ihdr = false;
-    while (pos + 8 <= len) {
+    for (size_t pos = 8; pos + 8 <= len;) {
         uint32_t clen = be32(png + pos);
         const uint8_t* type = png + pos + 4;
         const uint8_t* data = png + pos + 8;
         if (pos + 12 + (size_t)clen > len) break;  // truncated
-
         if (memcmp(type, "IHDR", 4) == 0) {
             W = int(be32(data));
             H = int(be32(data + 4));
@@ -83,14 +105,11 @@ bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
             else if (color_type == 6) bpp = 4;  // RGBA
             else return false;
             seen_ihdr = true;
-        } else if (memcmp(type, "IDAT", 4) == 0) {
-            idat.insert(idat.end(), data, data + clen);
-        } else if (memcmp(type, "IEND", 4) == 0) {
             break;
         }
         pos += 12 + clen;  // length + type + data + CRC
     }
-    if (!seen_ihdr || idat.empty()) return false;
+    if (!seen_ihdr) return false;
     if (src_w) *src_w = W;
     if (src_h) *src_h = H;
 
@@ -102,8 +121,19 @@ bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
     const int stride = W * bpp;
     z_stream zs{};
     if (inflateInit(&zs) != Z_OK) return false;
-    zs.next_in = idat.data();
-    zs.avail_in = uInt(idat.size());
+    // IDAT chunks are streamed into inflate one at a time (refilled below); no
+    // concatenation buffer. Start the cursor at the first chunk after the sig.
+    size_t idat_pos = 8;
+    zs.next_in = Z_NULL;
+    zs.avail_in = 0;
+    auto refill = [&]() -> bool {
+        const uint8_t* d;
+        uint32_t cl;
+        if (!next_idat(png, len, &idat_pos, &d, &cl)) return false;
+        zs.next_in = const_cast<uint8_t*>(d);
+        zs.avail_in = uInt(cl);
+        return true;
+    };
 
     std::vector<uint8_t> rowbuf(stride + 1);          // filter byte + pixels
     std::vector<uint8_t> prev(stride, 0), cur(stride, 0);
@@ -115,10 +145,11 @@ bool decode_png_downscale_rgb565(const uint8_t* png, size_t len,
         zs.next_out = rowbuf.data();
         zs.avail_out = uInt(stride + 1);
         while (zs.avail_out > 0) {
+            if (zs.avail_in == 0 && !refill()) { ok = false; break; }  // out of IDAT
+            if (zs.avail_in == 0) continue;  // empty IDAT chunk; try the next
             int r = inflate(&zs, Z_NO_FLUSH);
             if (r == Z_STREAM_END) break;
             if (r != Z_OK) { ok = false; break; }
-            if (zs.avail_in == 0 && zs.avail_out > 0) { ok = false; break; }
         }
         if (!ok || zs.avail_out != 0) { ok = false; break; }
 

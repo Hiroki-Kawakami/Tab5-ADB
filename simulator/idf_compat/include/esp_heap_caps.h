@@ -30,6 +30,10 @@ void *heap_caps_realloc(void *ptr, size_t size, uint32_t caps);
 void *heap_caps_aligned_alloc(size_t alignment, size_t size, uint32_t caps);
 void  heap_caps_free(void *ptr);
 
+// Largest allocatable contiguous block for the given caps. On the host there is
+// no fragmentation model, so report a large value (the host heap always fits).
+size_t heap_caps_get_largest_free_block(uint32_t caps);
+
 #ifdef __cplusplus
 }
 #endif

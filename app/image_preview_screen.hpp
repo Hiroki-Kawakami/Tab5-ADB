@@ -66,6 +66,7 @@ private:
     size_t buf_size_{0};
     int frame_w_{0}, frame_h_{0};
     int src_w_{0}, src_h_{0};
+    bool oversize_{false};  // file won't fit in PSRAM -> "too large" error, not a crash
 
     // ---- load / decode ----
     std::shared_ptr<adb::Sync> sync_;  // Android source (sync: RECV)

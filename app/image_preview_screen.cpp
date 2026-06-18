@@ -153,6 +153,7 @@ void ImagePreviewScreen::copy_to_android() {
 
 void ImagePreviewScreen::start_load() {
     // Spinner in the stage while the picture loads + decodes.
+    oversize_ = false;
     image_ = nullptr;
     lv_obj_clean(stage_);
     auto spinner = lv_spinner_create(stage_);
@@ -178,6 +179,21 @@ void ImagePreviewScreen::start_load() {
         decode_task_ = t;
     }
 
+    // Pre-flight: the whole compressed file is held in one contiguous PSRAM block
+    // (both decoders need the full buffer). The PsramAllocator vector aborts on
+    // OOM (-fno-exceptions can't throw), so refuse oversize files here instead of
+    // crashing. Check the largest free block, not total free — fragmentation at
+    // this nav depth is what bounds us. Headroom covers the decoders' own scratch.
+    constexpr size_t kHeadroom = 1024 * 1024;  // 1 MB
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if (ref_.size && (size_t)ref_.size + kHeadroom > largest) {
+        ESP_LOGW(TAG, "image too large: %u B, largest free PSRAM block %zu B",
+                 (unsigned)ref_.size, largest);
+        oversize_ = true;
+        present(false);
+        return;
+    }
+
     if (ref_.where == app::FileRef::Where::SD) {
         // The file read happens on the decode task (local FS, fast).
         xSemaphoreGive(static_cast<SemaphoreHandle_t>(work_sem_));
@@ -191,6 +207,10 @@ void ImagePreviewScreen::start_load() {
         return;
     }
     data_.clear();
+    // Reserve the exact file size up front so the sink's appends never trigger a
+    // geometric-growth realloc (which would briefly need ~2x the file in one
+    // contiguous PSRAM block — fatal for a multi-MB image on a fragmented heap).
+    if (ref_.size) data_.reserve(ref_.size);
     auto self = std::static_pointer_cast<ImagePreviewScreen>(shared_from_this());
     sync_ = app::adb_client()->open_sync(std::weak_ptr<adb::SyncListener>(self));
     if (!sync_) {
@@ -248,9 +268,12 @@ void ImagePreviewScreen::present(bool ok) {
         lv_obj_set_style_text_color(caption, lv_color_hex(0x888888), 0);
     } else {
         auto label = lv_label_create(stage_);
-        lv_label_set_text(label, (ref_.where == app::FileRef::Where::Android && !adb_online())
-                                     ? "Not connected."
-                                     : "Cannot display this image.");
+        const char* msg = "Cannot display this image.";
+        if (ref_.where == app::FileRef::Where::Android && !adb_online())
+            msg = "Not connected.";
+        else if (oversize_)
+            msg = "Image too large to display.";
+        lv_label_set_text(label, msg);
         lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(label, lv_color_hex(0x888888), 0);
     }
@@ -279,6 +302,7 @@ bool ImagePreviewScreen::load_sd_file() {
         return false;
     }
     data_.clear();
+    if (ref_.size) data_.reserve(ref_.size);  // exact size -> no doubling realloc
     bool ok = true;
     for (;;) {
         ssize_t r = ::read(fd, buf, kReadChunk);
