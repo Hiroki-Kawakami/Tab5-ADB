@@ -317,7 +317,7 @@ public:
     // coordinates — the agent inverts the mirror geometry to the source's logical
     // display coords and assembles the multi-pointer MotionEvent itself. Like
     // inject_key: fire-and-forget, non-blocking, no response, callable from any
-    // thread (e.g. the DisplayManager touch task). Returns StreamClosed if down.
+    // thread (e.g. the BSP dispatch task). Returns StreamClosed if down.
     adb::Error inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
                             uint16_t y);
 
@@ -397,7 +397,7 @@ private:
 
     std::vector<uint8_t> rx_;  // frame accumulator (reader thread only)
     // Outgoing frame counter. Touched by the reader thread (HELLO response), the
-    // app thread (start_mirror), and the touch task thread (inject_touch /
+    // app thread (start_mirror), and the BSP dispatch task (inject_touch /
     // inject_key), so atomic; each stream_->write() enqueues a whole frame, so
     // frames never interleave on the wire.
     std::atomic<uint8_t> tx_seq_{0};

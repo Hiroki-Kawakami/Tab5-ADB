@@ -145,7 +145,7 @@ void apply_usb_host_power() {
     // Only a live USB link keeps VBUS on; a TCP link uses no host-port power.
     bool on = usb_host_power() == UsbHostPower::Always ||
               (g_adb_online && g_connection_is_usb);
-    bsp_usb_host_set_power(on);
+    bsp_power_set_switch(BSP_POWER_SWITCH_USB5V, on);
 }
 
 Transport connection_transport() {
@@ -184,15 +184,6 @@ void adb_app() {
         (app::display_color_depth() == app::ColorDepth::Color16)
             ? BSP_PIXEL_FORMAT_RGB565
             : BSP_PIXEL_FORMAT_RGB888;
-    // Boot VBUS follows the persisted USB host power policy: Always powers the host
-    // port at boot; Connected leaves it off (we boot disconnected) and only powers
-    // it for a live link. Connecting re-powers the port via the transport reset hook
-    // regardless, so a device plugged before Connect still enumerates on the rising
-    // VBUS edge.
-    config.usb.usb5v_en = (app::usb_host_power() == app::UsbHostPower::Always);
-    // Enable the touch controller INT so the DisplayManager touch task can block on
-    // it (interrupt-driven wake) and idle when untouched instead of polling forever.
-    config.touch.interrupt = true;
     // Speaker route policy from the persisted setting (default Auto: speaker on
     // only while no headphone is plugged, so plugging in headphones for the mirror
     // audio silences the speaker automatically).
@@ -200,6 +191,7 @@ void adb_app() {
                                     ? BSP_AUDIO_SPEAKER_MODE_OFF
                                     : BSP_AUDIO_SPEAKER_MODE_AUTO;
     ESP_ERROR_CHECK(bsp_init(&config));
+    app::apply_usb_host_power();
 
     // Teach the USB transport how to reset the host port (called once after the
     // host stack is up, so a device plugged in before Connect re-attaches with a
@@ -207,9 +199,9 @@ void adb_app() {
     // "reset"; the VBUS power-cycle (USB5V_EN off→settle→on) lives here. No-op on
     // the simulator (the libusb transport never calls it).
     adb::set_usb_host_reset_hook([] {
-        bsp_usb_host_set_power(false);
+        bsp_power_set_switch(BSP_POWER_SWITCH_USB5V, false);
         vTaskDelay(pdMS_TO_TICKS(200));  // let the phone observe VBUS removal
-        bsp_usb_host_set_power(true);
+        bsp_power_set_switch(BSP_POWER_SWITCH_USB5V, true);
     });
 
     // Apply the persisted audio settings (the volume is the gain the next stream

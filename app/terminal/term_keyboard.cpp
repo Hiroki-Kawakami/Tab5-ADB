@@ -88,15 +88,18 @@ TermKeyboard::TermKeyboard(lv_obj_t *parent, int x, int y, int w, int h) {
     lv_obj_set_style_radius(obj_, 8, LV_PART_ITEMS);
     lv_obj_set_style_bg_color(obj_, lv_color_white(), LV_PART_ITEMS);
     lv_obj_set_style_bg_color(obj_, lv_color_hex(0xd0d0d0),
-                              LV_PART_ITEMS | LV_STATE_PRESSED);
+                              static_cast<lv_style_selector_t>(LV_PART_ITEMS) |
+                                  static_cast<lv_style_selector_t>(LV_STATE_PRESSED));
     lv_obj_set_style_text_color(obj_, lv_color_hex(0x202020), LV_PART_ITEMS);
     lv_obj_set_style_shadow_width(obj_, 0, LV_PART_ITEMS);
     // Armed modifier / active layer keys (the all-state white above would
     // otherwise hide the checked state).
     lv_obj_set_style_bg_color(obj_, lv_palette_main(LV_PALETTE_BLUE),
-                              LV_PART_ITEMS | LV_STATE_CHECKED);
+                              static_cast<lv_style_selector_t>(LV_PART_ITEMS) |
+                                  static_cast<lv_style_selector_t>(LV_STATE_CHECKED));
     lv_obj_set_style_text_color(obj_, lv_color_white(),
-                                LV_PART_ITEMS | LV_STATE_CHECKED);
+                                static_cast<lv_style_selector_t>(LV_PART_ITEMS) |
+                                    static_cast<lv_style_selector_t>(LV_STATE_CHECKED));
 
     lv_obj_add_event_cb(obj_, value_changed_cb, LV_EVENT_VALUE_CHANGED, this);
 }

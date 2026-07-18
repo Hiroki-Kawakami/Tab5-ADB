@@ -50,7 +50,7 @@ to the code and its comments.
 
 - **Host `esp_hosted` version must exactly match the ESP32-C6 slave firmware.**
   A 1.x-host/2.x-slave mismatch runs, but very slowly. Pinned in
-  `components/m5stack-bsp/idf_component.yml`. Reset GPIO polarity also flipped
+  `components/wifi/idf_component.yml`. Reset GPIO polarity also flipped
   between major versions (1.x = active-low, 2.x = active-high) — wrong polarity
   holds the C6 in reset and the SDIO bring-up loops on `send_op_cond`.
 - **C6 firmware fires redundant `WIFI_EVENT_STA_START`/`STOP` events**, which
@@ -79,11 +79,14 @@ to the code and its comments.
   pxStackBufferTemp != NULL`). Deliberately left off.
 - **ESP-IDF's mbedTLS has TLS 1.3 off by default**, needed for Android 11+
   wireless-debugging pairing. `esp32p4/sdkconfig.defaults` sets
-  `CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y` (+~64KB binary). Also,
-  `mbedtls_x509write_crt_set_serial` is removed on-device — use
-  `mbedtls_x509write_crt_set_serial_raw` (works on both targets).
+  `CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y` (+~64KB binary). IDF 6 also disables X.509
+  creation by default, but STARTTLS creates its client certificate at runtime;
+  `CONFIG_MBEDTLS_X509_CREATE_C` and `CONFIG_MBEDTLS_X509_CRT_WRITE_C` must stay
+  enabled. Both targets use Mbed TLS 4's PSA Crypto API, and the host flake pins
+  `mbedtls_4` so the simulator cannot silently keep compiling the removed 3.x
+  APIs.
 
-## Touch (`components/m5stack-bsp/boards/tab5/tab5.c`)
+## Touch (`esp-devkit/bsp/boards/tab5/tab5.c`)
 
 - **GT911 touch is dead after a warm reboot** (`esp_restart`/panic, i.e.
   `SW_CPU_RESET` — a cold power-on is fine). Fix is the AOSP `gtp_reset_guitar`
@@ -94,7 +97,7 @@ to the code and its comments.
 ## Display / JPEG
 
 - **RGB565 output needs `rgb_order = BGR`, not `RGB`**
-  (`components/jpeg_decode_enhanced/`). The Tab5 panel is driven R-in-high-bits
+  (`esp-devkit/libs/jpeg_decode_enhanced/`). The Tab5 panel is driven R-in-high-bits
   RGB565; on the P4 the *BGR* 2D-DMA scramble is what produces that packing —
   the *RGB* enum's scramble mis-packs the 16-bit pixel (green straddles the byte
   boundary) and renders as rainbow noise with the image structure intact. The
@@ -146,7 +149,7 @@ ordinary app-facing Android APIs fail in surprising ways:
 See also `[[agent-media-phase0]]` in memory for the full app_process media
 investigation.
 
-## LVGL (`components/lvgl++/`, `app/`)
+## LVGL
 
 - **`lv_async_call` callbacks run in LIFO order**, not FIFO. Anything that needs
   ordered delivery of a stream of chunks (shell/logcat output, sync completions)

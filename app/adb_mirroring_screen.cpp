@@ -129,7 +129,7 @@ void ADBMirroringScreen::start_mirror_ui() {
     apply_overlay(cur_rot_, /*first=*/true);  // cur_rot_ defaults to 0 (portrait)
     display_manager.set_overlay_visible(true);
 
-    // Observe raw touch (pushed from the DisplayManager touch task): a swipe out of
+    // Observe raw touch (pushed from the BSP dispatch task): a swipe out of
     // the bottom-left corner reveals a hidden strip. on_touch fires off the LVGL
     // thread, but the swipe logic only flips DM flags (no LVGL access).
     display_manager.set_touch_listener(

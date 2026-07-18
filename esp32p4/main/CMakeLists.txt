@@ -1,10 +1,7 @@
-# Device entry point (app_main + device-side LVGL runtime via esp_lvgl_port).
-# `main` is the IDF special component: it implicitly depends on every other
-# component in the build, so no REQUIRES is needed (and adding one would
-# suppress that implicit dependency, breaking transitive BSP/LCD includes).
 idf_component_register(
     SRCS "main.cpp"
-    INCLUDE_DIRS ".")
+    INCLUDE_DIRS "."
+    REQUIRES app)
 
 # Keep app_main() (referenced across the main<->app component link group) from
 # being garbage-collected.

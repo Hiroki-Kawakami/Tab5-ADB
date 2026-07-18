@@ -24,7 +24,7 @@ the LVGL thread (see `components/adb/README.md`'s threading rule):
   popped between the callback firing and the async call running).
 - High-frequency data streams (shell stdout, logcat lines, sync progress) never
   get one `lv_async_call` per chunk — `lv_async_call` runs queued callbacks
-  **LIFO** (see [gotchas.md](gotchas.md#lvgl-componentslvgl-app)), so a stream
+  **LIFO** (see [gotchas.md](gotchas.md#lvgl)), so a stream
   buffers into a capped FIFO and coalesces to **one** flush per frame.
 - A monotonically-increasing generation counter (`nav_gen_`/`load_gen_`,
   LVGL-thread-only) is the standard way to drop a stale async completion when
@@ -32,9 +32,9 @@ the LVGL thread (see `components/adb/README.md`'s threading rule):
   with a list-refresh or directory-navigation flow uses this, not just the file
   browser.
 
-`ScreenManager` (`components/screen_manager/`) owns the screen stack; pop/load
+`ScreenManager` (`esp-devkit/ui_framework/`) owns the screen stack; pop/load
 loads the next screen **before** freeing the leaving one, deferred via
-`lv_async_call` (see [gotchas.md](gotchas.md#lvgl-componentslvgl-app) — deleting
+`lv_async_call` (see [gotchas.md](gotchas.md#lvgl) — deleting
 the still-active screen inside its own event handler segfaults).
 
 ## Navigation map
@@ -106,7 +106,7 @@ unrelated browse session. A job also watches its parent screen's/target
 browser's `LV_EVENT_DELETE` (weakly) so a mid-transfer screen teardown ends the
 transfer quietly instead of touching freed UI — the reason the
 `lv_obj_add_event_fn` cleanup-ordering fix in
-[gotchas.md](gotchas.md#lvgl-componentslvgl-app) was needed.
+[gotchas.md](gotchas.md#lvgl) was needed.
 
 APK manifest parsing (`app/apk_info.{hpp,cpp}`) and image decoding
 (`app/png_decode.{hpp,cpp}` + the `jpeg_decode_enhanced` Layer-1 whole-frame

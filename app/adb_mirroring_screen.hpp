@@ -67,7 +67,7 @@ public:
     void on_video_strip(agent_link::Link* link, const agent_link::VideoStrip& strip) override;
     void on_orientation(agent_link::Link* link, const agent_link::OrientationInfo& info) override;
 
-    // DisplayManager::TouchListener — fires on the touch task thread. Detects the
+    // DisplayManager::TouchListener — fires on the BSP dispatch task. Detects the
     // bottom-left corner swipe that reveals a hidden control strip (see poll-free
     // note below).
     void on_touch(const bsp_touch_point_t* pts, int count) override;
@@ -216,11 +216,11 @@ private:
     // Touch-control mode: when on (the default), touches over the mirror (outside
     // a visible overlay strip / the reveal corner) are injected to the source
     // device as per-pointer MotionEvents. Toggled by the overlay OpMode button
-    // (LVGL thread); read on the touch task thread.
+    // (LVGL thread); read on the BSP dispatch task.
     std::atomic<bool> passthrough_{true};
 
     // Active touch points, keyed by the controller track id, tracked across
-    // touch-task samples so on_touch can emit per-pointer DOWN/MOVE/UP. Each
+    // dispatch-task samples so on_touch can emit per-pointer DOWN/MOVE/UP. Each
     // pointer's role is decided at DOWN and kept for its lifetime: Pass = injected
     // to the device, Reveal = a corner-swipe candidate, Ignore = handled by the
     // overlay / dropped. Guarded by pass_mtx_ so onExit (LVGL thread) can

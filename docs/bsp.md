@@ -1,147 +1,89 @@
-# `m5stack-bsp` — board support
+# esp-devkit BSP integration
 
-`bsp_*` **is** the cross-platform hardware seam: `app/` calls `bsp_*` directly
-on both targets, there is no separate porting layer. The component is shared
-(`components/m5stack-bsp/`) and builds device drivers or the SDL simulator
-backend from its own `ESP_PLATFORM`-branched `CMakeLists.txt` (see
-[architecture.md](architecture.md#components-are-self-describing-idf_component_register)).
+`bsp_*` is the cross-platform hardware seam used directly by `app/` on both
+targets. Its implementation now lives in the `esp-devkit/bsp/` submodule; this
+repository does not carry a fork or a second porting layer. Reusable board or
+simulator changes belong in esp-devkit first, followed by a submodule-pointer
+update here.
 
-Structured so non-Tab5 M5Stack models can be added later without reworking the
-drivers:
+The device selects Tab5 with `CONFIG_BSP_BOARD_TAB5=y` in
+`esp32p4/sdkconfig.defaults`. The simulator passes `BOARD tab5` to
+`devkit_simulator`. Both select the same model-agnostic public API in
+`esp-devkit/bsp/inc/bsp.h`, with device and SDL providers chosen by the build.
 
-- **Public API (`inc/bsp.h`)** — model-agnostic: `bsp_init`/`bsp_restart`,
-  `bsp_display_*`, `bsp_touch_*` (touch points are the BSP's own
-  `bsp_touch_point_t` in `bsp_types.h` — no `esp_lcd_touch` type leaks into the
-  public API). The dispatch (`src/bsp_display.c`, `src/bsp_touch.c`) is
-  implemented **once**, holding the active provider and dispatching through its
-  vtable — a board never re-implements this glue.
-- **Internal driver interfaces (`inc_private/bsp_display.h`, `bsp_touch.h`)** —
-  struct-inheritance vtables (esp_lcd style): a driver embeds `bsp_display_t`/
-  `bsp_touch_t` as its **first** struct member and returns `&state->base` from a
-  `*_create()` factory. Host-side framebuffers (`get_framebuffers`+`flush`) and
-  backlight (`set_brightness`) are **optional** (NULL when the panel lacks the
-  capability) — so an EPD or SPI-with-GRAM panel fits without the MIPI
-  framebuffer-swap model baked into the contract; today only the framebuffer
-  path is wired and the app assumes it.
-- **Device drivers (`devices/`)** — reusable chip drivers (ili9881c, st7123,
-  gt911, es8388, pi4io), each a `bsp_display`/`bsp_touch` provider. Include only
-  `bsp_display.h`/`bsp_touch.h` (+`bsp_types.h`), never `bsp_private.h`.
-- **Simulator backend (`simulator/`)** — the host-side analogue of `devices/`: a
-  reusable SDL backend (`sdl_backend.cpp`) that turns one SDL window into a
-  `bsp_display` + `bsp_touch` provider, parameterized per model via
-  `sdl_backend_config_t` (window title, geometry, pixel format, buffer count,
-  on-screen scale). SDL is main-thread-only on macOS, so
-  `sdl_backend_pump_input()` (called from the main loop) is the only thing that
-  touches SDL for input — it drains events and writes a mutex-guarded touch
-  snapshot that `bsp_touch_read` (called from the background touch task, see
-  below) just copies.
-- **Boards (`boards/<model>/`)** — `bsp_init()`/`bsp_restart()`, the only
-  per-model pieces: a device variant (`<model>.c`) and a simulator variant
-  (`<model>_sim.c`), selected by the `ESP_PLATFORM` branch. Tab5's `tab5.c`
-  resolves the panel generation (ST7123 vs ILI9881C/GT911) by I2C probe +
-  plain `if` (board-internal, not abstracted further) and wires the matching
-  providers.
+The Tab5 implementation is under `esp-devkit/bsp/boards/tab5/`:
 
-Everything in the BSP is **C** on both targets (touch/display; audio is also
-C). In the vtable header `inc_private/bsp_touch.h`, `bsp_touch_config_t`
-(device bus/GPIO wiring) is `#ifdef ESP_PLATFORM` so the host build never pulls
-in `driver/*`.
+- `board.cmake` declares the board's device drivers and simulator source.
+- `tab5.c` brings up I2C, the IO expanders, panel/touch, SD and audio. Display
+  failure is fatal; unavailable SD or audio leaves those optional capabilities
+  disabled without blocking the UI.
+- `tab5_sim.c` supplies the same BSP surface using the shared SDL panel/audio
+  backends. Generic simulator SD redirection is linked by the BSP component.
 
-## Audio (`bsp_audio_*`)
+## Display and power
 
-Capability-based so every M5Stack audio variant (no audio / buzzer-only /
-speaker-only / speaker+HP) fits one API: `bsp_audio_get_caps()` returns
-`BSP_AUDIO_CAP_{PCM,TONE,SPEAKER,HEADPHONE}` bits; unsupported calls return
-`ESP_ERR_NOT_SUPPORTED` (no provider = caps 0).
+`DisplayManager` (`app/display_manager.{hpp,cpp}`) owns the LVGL display,
+framebuffer presentation, touch indev and mirror overlay compositor. App code
+uses it instead of writing panel state directly, while the manager delegates
+framebuffer allocation, format and flushing to `bsp_display_*`.
 
-Design intent worth knowing before touching this code:
-- **`bsp_init` must produce no signal.** Providers register *closed* — the
-  stream format is `bsp_audio_open()`'s argument, not part of `bsp_config_t`
-  (which only carries `audio.dsp_mode`/`audio.speaker_mode`); write/reconfig/
-  close before open return `ESP_ERR_INVALID_STATE`.
-- **The shared dispatch (`src/bsp_audio.c`) owns all policy** — providers only
-  implement low-level vtable ops (open/close/write/set_hw_volume/set_hw_mute/
-  set_speaker_enabled/headphone_inserted/get_dsp_profile/tone; each optional =
-  NULL). Policy = the volume curve (linear-in-dB, delivered as a fading SW
-  gain — **never a HW step**, that's the click-free contract), mute, the
-  speaker route ON/AUTO/OFF policy + headphone-insert poll/callback, and the
-  DSP voicing mode.
-- **Click-free sequencing contract** (stated in `inc_private/bsp_audio.h`): amp
-  state changes only while the DAC is settled silence; audible amplitude
-  changes only via the SW fade. The first `open` "arms" the amp (silent gain →
-  codec unmute at max HW volume → ~50ms analog settle → amp on); `close`
-  HW-mutes before the clocks stop but **keeps the amp** (so its transient isn't
-  re-paid every open); `bsp_audio_quiesce()` (mute + amp off) is the
-  `bsp_restart()` path. Device pop-noise behavior and the close-path settle
-  delays still need a real-HW flash check.
-- **DSP voicing modes** (`bsp_audio_dsp_mode_t`, zero-init = Auto): *Auto* pulls
-  the board's per-headphone/per-rate voicing from the provider's
-  `get_dsp_profile()` hook and **re-applies it on HP insert/remove** (so app
-  edits to the DSP get overwritten in this mode — intentional, it's the "just
-  sound right" default); *Manual* starts flat and leaves the app in control via
-  `bsp_audio_dsp()`; *Disable* skips DSP entirely, volume falls back to the HW
-  codec (clicky).
-- EQ/post-processing itself is the separate, board-independent **`audio_dsp`**
-  module (`inc/audio_dsp.h`+`src/audio_dsp.c`): a fixed chain
-  EQ (cascaded RBJ biquads) → gain (the click-free volume primitive, fades
-  continue seamlessly across `process()` chunk boundaries) → stereo→mono mix.
-  Stage capacity auto-grows via `set_biquads`, but beyond 8 stages `process()`
-  falls back to holding the lock instead of stack-snapshotting (the grow
-  realloc would dangle a direct pointer taken earlier).
-- Simulator provider (`simulator/sdl_audio.c`) **backpressures at ~100ms
-  queued** to mimic the blocking I2S DMA write, and degrades to a silent
-  **null sink with the same real-time pacing** under `SIMULATOR_HEADLESS` (or no
-  host audio device) — so verify runs still exercise producer timing even
-  without sound.
+The panel pixel format is fixed during `bsp_init`. The app requests three
+buffers in the persisted RGB565/RGB888 format so the mirror decode path can
+rotate buffers without waiting for the current scan-out. Normal LVGL rendering
+and overlay composition use that same BSP-owned framebuffer set.
 
-## SD card (`inc/bsp_sd.h`)
+USB VBUS is the generic `BSP_POWER_SWITCH_USB5V` power switch. `adb_app()`
+applies the stored preference after `bsp_init`, and its USB-host reset hook
+cycles that switch to force a physical re-enumeration edge. Unsupported boards
+return `ESP_ERR_NOT_SUPPORTED`; no Tab5 IO-expander detail leaks into the ADB
+component. Settings restart uses `bsp_power_restart()`.
 
-Mount/unmount only — once mounted, app code uses plain POSIX file I/O under the
-mount point on both targets, no further BSP seam. Mount on demand; a failed
-scan unmounts so the next Refresh re-mounts (no hot-plug detection).
+## SD card
 
-- Device: the TF slot **must** be SDMMC slot 0 (see
-  [gotchas.md](gotchas.md#wi-fi--esp-hosted-componentswifi-esp32p4sdkconfigdefaults)
-  for why — slot 1 is the C6 Wi-Fi SDIO link). Card power comes from the
-  on-chip LDO channel 4, kept acquired across remounts.
-- **Read-performance rule:** plain `fread` is slow on this path — read with
-  unbuffered `read()` in 16KB chunks into a `MALLOC_CAP_CACHE_ALIGNED` buffer
-  instead (what the APK-install push source does). Long file names need
-  `CONFIG_FATFS_LFN_HEAP` (the default `LFN_NONE` truncates to 8.3).
-- Simulator (`simulator/sd_redirect.c`): "mount" maps the mount point onto a
-  host directory (`SIMULATOR_SDCARD_PATH`, default `simulator/sdcard/`) by
-  defining `open`/`fopen`/`opendir`/`stat`/`rename`/`unlink` in the executable —
-  statically-linked calls resolve there, and the real libc is reached via
-  `dlsym(RTLD_NEXT, ...)`.
+SD is part of esp-devkit's public `bsp.h`; there is no project-local
+`bsp_sd.h`. The app mounts on demand with `bsp_sd_mount("/sd", ...)`, uses
+ordinary POSIX file I/O below that mount point, and calls `bsp_sd_unmount()`
+after a failed scan so Refresh can retry after card insertion.
 
-## DisplayManager touch input
+- Device: the Tab5 provider is a four-bit SDMMC implementation using slot 0 and
+  on-chip LDO channel 4. Slot 1 remains reserved for the C6 esp-hosted Wi-Fi
+  link. The provider owns the power handle across a mounted session.
+- Simulator: `esp-devkit/bsp/simulator/sd_redirect.c` maps `/sd` onto
+  `SIMULATOR_SDCARD_PATH`, defaulting to `simulator/sdcard/`. It redirects the
+  POSIX calls used by the app, so browser and file-transfer logic exercise the
+  same paths as the device build.
 
-`DisplayManager` (`app/display_manager.{hpp,cpp}`) owns the touch indev, but
-**the hardware read is decoupled from the LVGL render loop**: a dedicated
-FreeRTOS touch task does all `bsp_touch_read`, so panel refresh / JPEG decode
-latency never delays input.
+Plain `fread` is slow on the device path. APK push reads in 16 KiB chunks with
+`read()` into a cache-aligned buffer. Long file names require
+`CONFIG_FATFS_LFN_HEAP`, retained in `esp32p4/sdkconfig.defaults`.
 
-- **Interrupt-gated + idle-stop:** the task blocks on
-  `bsp_touch_wait_interrupt()` (device = the GT911/ST7123 INT semaphore; sim = a
-  short delay), then polls at `touch_poll_hz_` (default 60Hz), and after 3
-  consecutive empty reads goes back to waiting for the next interrupt. This
-  needs the touch controller's INT line enabled at `bsp_init`
-  (`config.touch.interrupt = true`) — the semaphore is only created when that
-  flag is set, so any caller of `bsp_touch_wait_interrupt()` must ensure it's
-  on, or the driver asserts on a NULL semaphore.
-- **Push, not poll, for multi-touch.** Each sample both feeds LVGL's
-  single-tap indev (id 0 only) *and* pushes all contemporaneous points to a
-  `DisplayManager::TouchListener` (`on_touch(pts, count)`) that a feature
-  registers with `set_touch_listener(weak_ptr)` — held weakly, fires **on the
-  touch task thread** (the listener marshals to LVGL itself if it needs to).
-  This is what lets the mirror screen's touch passthrough and corner-swipe
-  reveal detection see genuine multi-touch without polling.
-- Each `bsp_touch_point_t` carries the controller's pointer track id (`.id`;
-  GT911/ST7123 forward `esp_lcd_touch`'s `track_id`, the single-point sim
-  reports 0), so a listener can correlate fingers across samples without
-  synthesizing ids itself.
-- **Swipe-reveal masking:** when a corner-swipe makes a hidden overlay visible,
-  the same in-flight press would otherwise land as a tap on the freshly-shown
-  button underneath it. `consume_overlay_touch()` masks the press from the
-  indev until the finger lifts — callers must invoke it *before* making the
-  overlay visible, to close the visible-without-mask window.
+## Touch dispatch
+
+The shared BSP dispatch task owns touch sampling and delivers display-space
+snapshots through `bsp_touch_set_event_cb`. `DisplayManager::init()` registers
+one callback; it caches pointer 0 for LVGL and forwards the complete sample to
+the active weak `TouchListener`. The callback runs off the LVGL thread, so
+listeners must synchronize their state and marshal any widget access.
+
+Each `bsp_touch_point_t` includes the controller track id, allowing the mirror
+to correlate multiple fingers and emit Android pointer transitions without
+synthesizing ids. `consume_overlay_touch()` masks an in-progress reveal gesture
+from the LVGL indev until all fingers lift, preventing that same press from
+activating a newly exposed overlay button.
+
+Keeping touch polling in the BSP matters because button/audio routing and touch
+share one board dispatch policy. A project-owned touch task would duplicate
+polling, bypass board scheduling and make reusable BSP callbacks ineffective.
+
+## Audio
+
+The capability-based `bsp_audio_*` surface represents no-audio, tone, PCM,
+speaker and headphone variants without Tab5-specific branching in the app.
+The shared dispatch owns volume/mute, speaker routing and DSP policy; providers
+only implement low-level codec or simulator operations.
+
+`bsp_init` must produce no audible signal. A stream opens with
+`bsp_audio_open()`, audio writes are naturally paced, and route/volume changes
+use the shared DSP fade. Under `SIMULATOR_HEADLESS`, the SDL provider becomes a
+silent real-time-paced sink so scripted verification still exercises producer
+timing.

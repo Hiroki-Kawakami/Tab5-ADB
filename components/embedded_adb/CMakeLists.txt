@@ -1,6 +1,6 @@
 # embedded_adb — shared ADB host-side client library (see inc/embedded_adb.hpp).
 #
-# Like m5stack-bsp, this is a target-divergent shared component: everything is
+# This is a target-divergent shared component: everything is
 # portable C++ EXCEPT the USB transport, which has an esp-idf usb_host backend on
 # device and a libusb backend in the simulator. The transport split is selected
 # here by ESP_PLATFORM (defined only under ESP-IDF). The TCP transport is the

@@ -14,8 +14,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include <mbedtls/ctr_drbg.h>
-#include <mbedtls/entropy.h>
+#include <psa/crypto.h>
 #include <mbedtls/error.h>
 #include <mbedtls/net_sockets.h>  // MBEDTLS_ERR_NET_* codes for the BIO callbacks
 #include <mbedtls/ssl.h>
@@ -69,8 +68,6 @@ public:
             mbedtls_ssl_config_free(&conf_);
             mbedtls_x509_crt_free(&cert_);
             mbedtls_pk_free(&pkey_);
-            mbedtls_ctr_drbg_free(&drbg_);
-            mbedtls_entropy_free(&entropy_);
         }
     }
 
@@ -87,18 +84,13 @@ public:
         mbedtls_ssl_config_init(&conf_);
         mbedtls_x509_crt_init(&cert_);
         mbedtls_pk_init(&pkey_);
-        mbedtls_ctr_drbg_init(&drbg_);
-        mbedtls_entropy_init(&entropy_);
         tls_inited_ = true;
 
-        if (mbedtls_ctr_drbg_seed(&drbg_, mbedtls_entropy_func, &entropy_, nullptr,
-                                  0) != 0) {
-            log("drbg seed failed");
+        if (psa_crypto_init() != PSA_SUCCESS) {
+            log("psa init failed");
             return false;
         }
-        // pk_parse_key needs an RNG in mbedTLS 3.x.
-        if (mbedtls_pk_parse_key(&pkey_, key_der.data(), key_der.size(), nullptr, 0,
-                                 mbedtls_ctr_drbg_random, &drbg_) != 0) {
+        if (mbedtls_pk_parse_key(&pkey_, key_der.data(), key_der.size(), nullptr, 0) != 0) {
             log("pk parse failed");
             return false;
         }
@@ -117,7 +109,6 @@ public:
         mbedtls_ssl_conf_authmode(&conf_, MBEDTLS_SSL_VERIFY_NONE);
         mbedtls_ssl_conf_min_tls_version(&conf_, MBEDTLS_SSL_VERSION_TLS1_3);
         mbedtls_ssl_conf_max_tls_version(&conf_, MBEDTLS_SSL_VERSION_TLS1_3);
-        mbedtls_ssl_conf_rng(&conf_, mbedtls_ctr_drbg_random, &drbg_);
         if (mbedtls_ssl_conf_own_cert(&conf_, &cert_, &pkey_) != 0) {
             log("own cert failed");
             return false;
@@ -260,8 +251,6 @@ private:
     mbedtls_ssl_config conf_;
     mbedtls_x509_crt cert_;
     mbedtls_pk_context pkey_;
-    mbedtls_ctr_drbg_context drbg_;
-    mbedtls_entropy_context entropy_;
 };
 
 // Non-blocking connect with a bounded timeout, so a wrong/unreachable target fails

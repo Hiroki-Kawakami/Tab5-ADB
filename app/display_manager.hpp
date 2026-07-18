@@ -4,7 +4,6 @@
 #include "bsp_types.h"  // bsp_pixel_format_t, bsp_touch_point_t
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"  // SemaphoreHandle_t (overlay compositor lock)
-#include "freertos/task.h"    // TaskHandle_t (touch-sampling task)
 #include "lvgl.hpp"
 
 // Central owner of the panel framebuffers, the LVGL display, the touch indev, and
@@ -41,12 +40,12 @@ public:
     void  flush(int index);
 
     // --- raw touch observation (pushed, multi-touch) ---
-    // Touch is sampled on a dedicated task (see init), decoupled from the LVGL
-    // render loop, so a screen can observe touches that land outside any LVGL
-    // widget — the mirror uses this for the overlay show/hide swipe and, later, to
-    // forward multi-touch to the phone. A TouchListener is pushed every sample;
+    // Touch arrives from the BSP dispatch task, decoupled from the LVGL render
+    // loop, so a screen can observe touches that land outside any LVGL widget —
+    // the mirror uses this for the overlay show/hide swipe and, later, to forward
+    // multi-touch to the phone. A TouchListener is pushed every sample;
     // `pts[0..count)` are raw PANEL coordinates and count==0 means all fingers
-    // lifted. on_touch fires on the TOUCH TASK thread (NOT the LVGL thread) — the
+    // lifted. on_touch fires on the BSP dispatch task (NOT the LVGL thread) — the
     // listener marshals to LVGL itself if it touches widgets.
     struct TouchListener {
         virtual void on_touch(const bsp_touch_point_t *pts, int count) = 0;
@@ -55,9 +54,6 @@ public:
     // Register (empty weak_ptr clears) the touch listener. Held weakly — drop your
     // shared_ptr to detach (Shell/Sync-style). Settable from any thread.
     void set_touch_listener(std::weak_ptr<TouchListener> listener);
-    // Touch sampling rate [Hz] (default 60), adjustable at runtime (quantized to
-    // the FreeRTOS tick).
-    void set_touch_poll_hz(int hz);
     // Mask the in-progress press from the LVGL indev until the finger lifts. The
     // mirror's swipe-to-reveal calls this so the gesture that reveals the overlay
     // isn't also delivered as a press to the freshly-shown overlay buttons. Call
@@ -94,11 +90,7 @@ private:
     enum class Mode { Normal, Overlay };
 
     static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data);
-    // Touch-sampling task: block on the controller INT, then poll at touch_poll_hz_
-    // while a finger is down; stop after a few empty reads and wait for the next
-    // INT. Produces the single-tap LVGL indev feed and pushes the TouchListener.
-    static void touch_trampoline(void *arg);
-    void touch_loop();
+    static void touch_event_cb(const bsp_touch_point_t *points, int count, void *arg);
     // Main display flush: presents the panel framebuffer in normal mode; in
     // overlay mode it only acks (the main display renders into a scratch buffer
     // and the mirror owns the panel framebuffers).
@@ -113,7 +105,7 @@ private:
     lv_display_t *main_disp_ = nullptr;
     lv_indev_t   *indev_ = nullptr;
 
-    // LVGL indev feed (single tap = touch id 0): produced by the touch task,
+    // LVGL indev feed (single tap = touch id 0): produced by the BSP callback,
     // consumed by indev_read_cb — both under touch_mtx_. lvgl_suppress_ masks the
     // press until the finger lifts (consume_overlay_touch); the task clears it on
     // the first all-lifted sample.
@@ -123,9 +115,6 @@ private:
     bool              lvgl_suppress_ = false;
     std::weak_ptr<TouchListener> touch_listener_;
     SemaphoreHandle_t touch_mtx_ = nullptr;   // guards the indev feed + listener
-    TaskHandle_t      touch_task_ = nullptr;
-    volatile bool     touch_stop_ = false;
-    int               touch_poll_hz_ = 60;
 
     Mode          mode_ = Mode::Normal;
     lv_display_t *overlay_disp_ = nullptr;

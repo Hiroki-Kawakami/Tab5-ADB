@@ -19,7 +19,7 @@ here=$(CDPATH= cd "$(dirname "$0")" && pwd)
 comp=$(CDPATH= cd "$here/.." && pwd)        # components/adb
 comps=$(CDPATH= cd "$comp/.." && pwd)       # components
 root=$(CDPATH= cd "$comps/.." && pwd)       # repo root
-cc="$root/simulator/idf_compat"
+cc="$root/esp-devkit/idf_compat"
 out="$here/build"
 mkdir -p "$out"
 
@@ -52,6 +52,7 @@ g++ -std=c++17 -I"$comp/inc" -I"$comps/embedded_adb/inc" -I"$cc/include" \
     "$comps/embedded_adb/src/adb_protocol.cpp" "$comps/embedded_adb/src/adb_crypto.cpp" \
     "$comps/embedded_adb/src/adb_keystore.cpp" "$comps/embedded_adb/src/adb_connection.cpp" \
     "$comps/embedded_adb/src/adb_stream.cpp" "$comps/embedded_adb/src/transport_libusb.cpp" \
+    "$comps/embedded_adb/src/transport_tcp.cpp" \
     $objs \
     $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson) \
     -lpthread -o "$bin"

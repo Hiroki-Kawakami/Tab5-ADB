@@ -2,12 +2,15 @@
 
 ## Build environment
 
-The ESP-IDF (v5.4.3) toolchain and the host-simulator tools (cmake, ninja, gcc,
-SDL2, cjson, libusb, mbedTLS) all come from a Nix flake. **Always run commands
+The ESP-IDF (v6.0.2) toolchain and the host-simulator tools (cmake, ninja, gcc,
+SDL2, cjson, libusb, Mbed TLS 4) all come from a Nix flake. The base development
+shell is inherited from the pinned `esp-devkit` submodule. **Always run commands
 through `nix develop -c <cmd>`** (or from inside a `nix develop` shell) — never
 invoke `idf.py` / `cmake` / `esptool` directly.
 
-Nix flakes only see git-tracked files. After adding new files, `git add` them
+Initialize the submodule after cloning an existing checkout with
+`git submodule update --init --recursive`. Nix flakes only see git-tracked
+files. After adding new files, `git add` them
 (staging is enough) or `nix develop` won't pick up `flake.nix` changes / the
 tree, and the build can fail with "not tracked by Git".
 
@@ -16,7 +19,7 @@ tree, and the build can fail with "not tracked by Git".
 ```sh
 nix develop -c idf.py -C esp32p4 build
 nix develop -c idf.py -C esp32p4 flash monitor   # needs a TTY
-./run.sh esp32p4                                  # same as flash monitor
+nix develop -c ./run.sh esp32p4                   # same as flash monitor
 ```
 
 When `idf.py monitor` can't attach (no TTY in a non-interactive shell), drive
@@ -36,13 +39,12 @@ Runs `app/` on the desktop (SDL2 + LVGL + a pthread-backed FreeRTOS API — see
 developed without a board.
 
 ```sh
-./run.sh                # == ./run.sh simulator
-# expands to:
-# nix develop -c sh -c 'cmake --fresh -S simulator -B build -G Ninja && cmake --build build && ./build/simulator'
+nix develop -c ./run.sh
 ```
 
-`run.sh simulator` only re-runs `cmake --fresh` when `build/` is missing; delete
-`build/` to force a clean reconfigure (e.g. after editing `simulator/CMakeLists.txt`).
+`run.sh simulator` only configures when `build/` is missing; use
+`nix develop -c cmake --fresh -S simulator -B build -G Ninja` to force a clean
+reconfigure after changing the simulator component graph.
 
 ## Headless UI verification (simverify)
 
@@ -50,13 +52,13 @@ Drives the UI from a script with no host window — synthetic touch in, captured
 JPEG frames out — instead of clicking/screenshotting the real SDL window
 (fragile, host-state-dependent, hands the agent host-PC control). The same
 `simulator` binary runs the same app/BSP code with `SIMULATOR_HEADLESS=1` +
-`SIMULATOR_SCRIPT=<path>`; see `simulator/platform/sim_harness.cpp` for the
+`SIMULATOR_SCRIPT=<path>`; see `esp-devkit/sim_harness/` for the
 interpreter and `simulator/verify/` for examples.
 
 ```sh
-./run.sh simverify simulator/verify/home.txt     # build + run headless, capture frames
-./run.sh simverify simulator/verify/mirror.txt   # connect a phone + show the live mirror
-./run.sh simverify simulator/verify/wifi.txt     # Wi-Fi scan/connect UI (fake backend)
+nix develop -c ./run.sh simverify simulator/verify/home.txt
+nix develop -c ./run.sh simverify simulator/verify/mirror.txt
+nix develop -c ./run.sh simverify simulator/verify/wifi.txt
 ```
 
 Script commands: `wait <ms>`, `settle [<max_ms>]`, `capture <path.jpg>`,
@@ -69,7 +71,7 @@ clean up anything it leaves on the phone/SD card (installed test APKs, pushed
 test files) afterward.
 
 Two gotchas baked into the harness, worth knowing before writing a new script:
-- `tap` spans a press *and* release edge so both a background touch-task sample
+- `tap` spans a press *and* release edge so both a BSP dispatch-task sample
   and an LVGL indev read see it; `down`/`move`/`up` scripts need `wait`s between
   steps for a drag to be sampled (each step only writes the touch snapshot).
 - `settle` pumps `lv_timer_handler` until no animation runs for a few frames —
@@ -105,7 +107,7 @@ Every component with host-testable logic has its own `test/run.sh`, invoked via
 | Component | Runner | Notes |
 |---|---|---|
 | `app/` (parsers) | `app/test/run.sh` | `test_device_info` / `test_apk_info` / `test_media_session` / `test_sysclock` — no phone, no LVGL |
-| `components/m5stack-bsp/` | `components/m5stack-bsp/test/run.sh` | `test_audio_dsp` (default, pure math) / `test_bsp_audio` (dispatch policy vs stub) / `test_sdl_audio` (audible pacing check) — no device |
+| `esp-devkit/bsp/` | `esp-devkit/bsp/test/run.sh` | `test_audio_dsp` (default, pure math) / `test_bsp_audio` (dispatch policy vs stub) / `test_sdl_audio` (audible pacing check) — no device |
 | `components/term_emu/` | `components/term_emu/test/run.sh` | VT parser + grid, incl. a chunk-split fuzz — no phone |
 | `components/embedded_adb/` | `components/embedded_adb/test/run.sh` | `test_crypto` (default, no phone) / `test_connect` / `test_shell` (need an authorized phone over libusb) / `test_connect_tcp` (`TAB5ADB_TCP_TARGET=host:port` env, no IP committed to git) |
 | `components/adb/` | `components/adb/test/run.sh` | `test_client` (default) / `test_shell` / `test_sync` — all need a phone connected + authorized over libusb |

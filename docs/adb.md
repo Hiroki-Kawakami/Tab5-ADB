@@ -29,9 +29,10 @@ One concern per file pair, all portable C++ **except the transport**:
 - `adb_protocol` — pure wire format (24-byte `amessage` header, `apacket`,
   command/auth constants, checksum). No I/O.
 - `adb_crypto` — RSA-2048 keygen, token signing, the Android public-key blob.
-  Uses mbedTLS on both targets (bundled by ESP-IDF, from Nix on the host) — a
-  third-party lib, not an ESP API or board concern, so it's used directly with
-  no `idf_compat` shim.
+  Uses Mbed TLS 4's PSA Crypto API on both targets (bundled by ESP-IDF, the
+  `mbedtls_4` package on the host). Keeping the host on the same major version
+  makes the simulator and crypto test catch IDF 6 API migrations; it remains a
+  third-party library rather than an ESP API, so there is no `idf_compat` shim.
 - `adb_keystore` — persists the RSA private key via the NVS C API (see
   [architecture.md](architecture.md#nvs--the-nvs_flash-c-api-used-directly)).
   **We never read the host's `~/.android/adbkey`** — always generate/store our
@@ -51,7 +52,7 @@ USB bulk transfer to the ADB interface (class `0xFF`/subclass `0x42`/protocol
 `0x01`) is the **only** device/simulator split in this component:
 `transport_usbhost.cpp` (esp-idf `usb_host`, async API wrapped as a synchronous
 `Transport` with a binary semaphore per direction) vs `transport_libusb.cpp`
-(libusb) — same `ESP_PLATFORM`-branch pattern as `m5stack-bsp`. It lives inside
+(libusb) — same `ESP_PLATFORM`-branch pattern as `esp-devkit/bsp`. It lives inside
 `embedded_adb`, not the BSP, because the `usb_host` API is too large to
 reimplement on the host and the need (claim interface, open bulk endpoints,
 transfer) is ADB-specific, not a generic board seam. See
@@ -62,8 +63,8 @@ transport had to work around.
 **VBUS is the app's concern, not `embedded_adb`'s.** The library only knows
 "reset the port" (`adb::set_usb_host_reset_hook`, called once after
 `usb_host_install`); what a reset *is* — a `USB5V_EN` power-cycle via
-`bsp_usb_host_set_power()` — and when VBUS is on at all (the persisted
-**USB Power** setting: Always-on so a plugged phone charges, vs
+`bsp_power_set_switch(BSP_POWER_SWITCH_USB5V, ...)` — and when VBUS is on at all
+(the persisted **USB Power** setting: Always-on so a plugged phone charges, vs
 Connected-only) both live in `adb_app.cpp`. No `embedded_adb → bsp` dependency.
 
 `transport_tcp.cpp` — **ADB-over-TCP** — is the one transport shared verbatim

@@ -7,54 +7,51 @@ app/                         # SHARED  app logic / screens (a single component)
   terminal/                  #   ADBShellScreen's terminal widgets: term_view + term_keyboard
   agent/                     #   embedded tab5adb-agent jar (agent_jar.{h,c}, xxd -i of the built jar)
   test/                      #   host unit tests (parsers) + run.sh — no phone, no LVGL
-components/                  # SHARED  (both targets)
-  m5stack-bsp/                 board support (bsp_*) — see bsp.md
-  lvgl++/                      C++ helpers over LVGL (lv_async_call, event fn wrapper — see gotchas.md)
-  screen_manager/               Screen base + screen stack
+components/                  # PROJECT-SPECIFIC SHARED components (both targets)
   embedded_adb/  adb/           ADB host-side client — see adb.md
   agent_link/                   Tab5-side link to tab5adb-agent — see agent.md
   wifi/                         Wi-Fi STA connection manager — see components/wifi/README.md + docs/wifi.md
-  jpeg_decode_enhanced/         enhanced P4 HW JPEG decode — see its README.md
   term_emu/                     VT100/xterm-subset terminal emulator (no LVGL/adb deps)
+esp-devkit/                   # git submodule: reusable cross-project infrastructure
+  bsp/                          board support (bsp_*) — see bsp.md
+  ui_framework/                 LVGL C++ helpers, Screen base + ScreenManager
+  libs/jpeg_decode_enhanced/    enhanced P4 HW JPEG decode
+  idf_compat/                   host ESP-IDF compatibility component
+  sim_harness/                  scripted headless simulator driver
 esp32p4/                     # DEVICE build root (IDF project) — main/ is app_main + esp_lvgl_port
 simulator/                   # SIMULATOR build root
-  platform/                  #   SIM-only entry (main.cpp: SDL/LVGL timer loop, sim_harness.cpp)
-  idf_compat/                #   SIM-only ESP-IDF compat component — see its README.md
+  platform/                  #   SIM-only entry (main.cpp: LVGL loop + sim_harness wiring)
 android-agent/               # ANDROID  tab5adb-agent (scrcpy-style app_process server) — see its README.md
 ```
 
-Rule of thumb: **shared → top-level `components/` (or `app/`); target-only →
-under that target's build root.** No build file reaches into another tree.
+Rule of thumb: **project-specific shared → top-level `components/` (or `app/`);
+reusable board/simulator/UI infrastructure → `esp-devkit`; target-only → under
+that target's build root.** Changes intended for several firmware projects must
+land in esp-devkit first, then this repository advances the submodule pointer.
 
 Every shared component with non-trivial docs owns a `README.md` (front door) and
 a `docs/<surface>.md` per API surface (`components/adb/`, `components/wifi/`).
-`m5stack-bsp`, `embedded_adb`, `agent_link`, `term_emu`, `screen_manager` and
-`lvgl++` don't have their own docs yet — their design is covered here instead
-(`bsp.md`, `adb.md`, `agent.md`).
+The esp-devkit-owned surfaces are documented in that submodule; this repository
+only documents its integration decisions and app-specific use of them.
 
 ## Components are self-describing (`idf_component_register`)
 
 Every shared component owns one `CMakeLists.txt` that declares its sources /
-includes / deps with the ESP-IDF `idf_component_register()` call — the single
-source of truth consumed by both builds:
+includes / deps with the ESP-IDF `idf_component_register()` call. Both build
+roots include `esp-devkit/devkit.cmake`, which keeps component discovery and
+the simulator shim consistent across projects:
 
-- **Device:** `esp32p4/CMakeLists.txt` sets
-  `EXTRA_COMPONENT_DIRS = ../components ../app`. The IDF `main` component
-  implicitly depends on all others, so `esp32p4/main` needs **no `REQUIRES`**
-  (adding one suppresses that implicit dep and breaks transitive BSP/LCD
-  includes).
-- **Simulator:** `simulator/CMakeLists.txt` defines a small `idf_component_register`
-  **shim** (a CMake function) and `add_subdirectory`s each component; the shim
-  folds the component's `SRCS`/`INCLUDE_DIRS` straight into the `simulator`
-  executable. `REQUIRES` are ignored (one binary → includes are global). Both
-  the shared components and the simulator-only `idf_compat` component are
-  consumed this way — growing `idf_compat` just means adding `SRCS` to its own
-  `CMakeLists.txt`. Only `simulator/platform/` (the SDL/LVGL entry) stays a
-  direct `target_sources` — it's the executable's "main", not a component. A
-  shared component that builds differently per target (like `m5stack-bsp`)
-  branches on `ESP_PLATFORM` inside its own `CMakeLists.txt`; guard anything
-  that touches `${COMPONENT_LIB}` (e.g. `-flto`) in the device branch, since the
-  shim doesn't define it.
+- **Device:** `devkit_idf_init(UI_FRAMEWORK COMPONENT_DIRS ../components ../app)`
+  registers esp-devkit plus the project components and trims the build to
+  `main`'s transitive dependency graph. `esp32p4/main` explicitly requires
+  `app`; `app/CMakeLists.txt` carries the remaining reusable dependency graph.
+  This explicit root edge is required because the `COMPONENTS main` trim turns
+  off IDF's usual main-to-everything implicit dependency.
+- **Simulator:** `devkit_simulator(BOARD tab5 ...)` supplies SDL/LVGL,
+  `idf_compat`, `sim_harness`, the Tab5 BSP, UI/image libraries and the
+  `idf_component_register` shim. `simulator/CMakeLists.txt` lists only this
+  project's component directories and host-only libusb/mbedTLS/zlib links.
+  `simulator/platform/main.cpp` remains the executable entry point.
 
 ## Where a device/simulator-divergent API goes — the rule
 
@@ -63,7 +60,7 @@ question: **does Espressif already define this API?**
 
 - **Yes** (`esp_err`, `esp_log`, `nvs_flash`, FreeRTOS, `esp_timer`,
   `esp_heap_caps`, the JPEG/PPA driver APIs) → implement the *ESP-IDF API
-  itself* on the host in `simulator/idf_compat/`. Don't re-abstract something
+  itself* on the host in `esp-devkit/idf_compat/`. Don't re-abstract something
   already abstracted; app code stays standard ESP-IDF on both targets.
 - **No** — it's this board's own hardware concern with no standard contract
   (framebuffer, touch point, brightness, USB host, Wi-Fi radio bring-up) →
@@ -84,14 +81,14 @@ host, so `wifi` gets its own backend split instead of an `idf_compat` shim
 `bsp_*` covers hardware; the LVGL **runtime** (the task/loop that drives
 `lv_timer_handler`) is a per-target runtime concern and stays out of the BSP:
 
-- Device: `esp32p4/main/main.cpp` `app_main()` starts esp_lvgl_port
-  (`lvgl_port_init`) then calls `adb_app()`.
-- Simulator: `simulator/platform/main.cpp` `main()` runs `lv_init`, sets the LVGL
-  tick/delay to SDL, then calls `adb_app()` and runs the `lv_timer_handler` loop
-  on the main thread (the one main-thread rule — see
-  [FreeRTOS on the host](#freertos-on-the-host)).
+- Device: `esp32p4/main/main.cpp` `app_main()` starts the esp-devkit
+  `ui_framework` LVGL port (`lvgl_port_init`) then calls `adb_app()`.
+- Simulator: `simulator/platform/main.cpp` initializes the same port surface,
+  calls `adb_app()`, registers project-specific harness commands, then runs
+  `lvgl_sim_loop(sim_harness_frame)` on the main thread.
 
-`adb_app()` in `app/adb_app.cpp` is the shared entry: `bsp_init()` →
+`adb_app()` in `app/adb_app.cpp` is the shared entry: `bsp_init()` → apply the
+stored USB-host power preference through `BSP_POWER_SWITCH_USB5V` →
 `DisplayManager::init()` (owns the LVGL display, the touch indev, and the
 mirror overlay compositor — see [bsp.md](bsp.md#displaymanager-touch-input)) →
 push the first screen. Panel is 720×1280 portrait (`PANEL_W`/`PANEL_H` in
@@ -109,7 +106,7 @@ NVS is the worked example of the device/simulator-divergent-API rule above: the
 seam is the ESP-IDF `nvs.h`/`nvs_flash.h` **C API** itself, so shared code calls
 that C API directly on both targets — device gets the real flash-backed
 component, the simulator gets a JSON-backed compat impl in
-`simulator/idf_compat/` (file defaults to `nvs_data.json` in the cwd; override
+`esp-devkit/idf_compat/` (file defaults to `nvs_data.json` in the cwd; override
 with the sim-only `nvs_flash_sim_set_path()` before the first open). Keep NVS as
 the C API on both sides — a C++ convenience layer, if wanted, belongs in a
 shared component on top of the C API, not as a per-target file.
@@ -134,7 +131,7 @@ shared app-layer module, like `device_info`/`apk_info`.
 ## FreeRTOS on the host
 
 The simulator does **not** run the FreeRTOS kernel. The FreeRTOS *API contract*
-is reimplemented on native pthreads in `simulator/idf_compat/`
+is reimplemented on native pthreads in `esp-devkit/idf_compat/`
 (`include/freertos/*.h` + `src/freertos_*.c`) — the same "reimplement the
 contract, don't port the implementation" approach as the `esp_*` shims. A task
 **is** a detached pthread scheduled by the host OS; there's no scheduler to
@@ -171,10 +168,10 @@ targets, so a FreeRTOS task that touches LVGL marshals via `lv_async_call`
 
 - LVGL config is `simulator/lv_conf.h` (via `LV_CONF_INCLUDE_SIMPLE`).
   `LV_COLOR_DEPTH 16` (RGB565, matches the panel).
-- `simulator/idf_compat/README.md` is the source of truth for the host compat
+- `esp-devkit/idf_compat/README.md` is the source of truth for the host compat
   surface (layout, include-path rules, how to add a shim). Current surface:
   `esp_err`/`esp_log`/`esp_check`/`esp_timer`/`esp_heap_caps`, `nvs`/`nvs_flash`,
   `driver/jpeg_decode` (libjpeg-backed), `driver/ppa` (CPU software impl), and
   `freertos`.
-- Build artifacts (`build/`, `simulator/.deps/`) are gitignored. LVGL is fetched
-  into `.deps`.
+- Build artifacts (`build/`) are gitignored. CMake fetches LVGL into
+  `build/_deps/`.

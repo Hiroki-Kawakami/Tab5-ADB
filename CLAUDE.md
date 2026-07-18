@@ -30,8 +30,8 @@ simulator modeled on `NameCardKnot`.
   debugging time (USB host FIFO/enumeration, Wi-Fi/esp-hosted, touch reset,
   JPEG/display, `app_process` Android quirks, LVGL). Check here before
   re-debugging something that looks like a vendor-stack bug.
-- [`docs/bsp.md`](docs/bsp.md) — the `m5stack-bsp` component (display/touch/
-  audio/SD, the DisplayManager touch task).
+- [`docs/bsp.md`](docs/bsp.md) — the `esp-devkit` BSP integration (display/
+  touch/audio/SD, the DisplayManager touch callback).
 - [`docs/adb.md`](docs/adb.md) — the ADB host-side client
   (`embedded_adb`/`adb`/`agent_link` layering, USB/TCP transport design).
 - [`docs/agent.md`](docs/agent.md) — `tab5adb-agent` (the Android-side
@@ -45,10 +45,10 @@ they take priority over anything said here:
 - `components/adb/README.md` + `components/adb/docs/*.md` — the app-facing ADB
   API (`Client`/`Shell`/`Sync`/`Stream`) contract.
 - `components/wifi/README.md` + `components/wifi/docs/wifi.md` — `wifi::Manager`.
-- `components/jpeg_decode_enhanced/README.md` — the enhanced JPEG decode API.
+- `esp-devkit/libs/jpeg_decode_enhanced/README.md` — the enhanced JPEG decode API.
 - `android-agent/README.md` + `android-agent/docs/protocol.md` +
   `android-agent/docs/testing.md` — the agent process and its wire protocol.
-- `simulator/idf_compat/README.md` — the host ESP-IDF compat shim surface.
+- `esp-devkit/idf_compat/README.md` — the host ESP-IDF compat shim surface.
 
 ## The one rule that matters most
 

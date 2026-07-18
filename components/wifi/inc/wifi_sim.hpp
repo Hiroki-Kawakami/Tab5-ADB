@@ -34,5 +34,7 @@ void set_ip(std::string ip);
 // to exercise the persistent Listener path.
 void drop_link();
 
+void register_harness_commands();
+
 }  // namespace sim
 }  // namespace wifi

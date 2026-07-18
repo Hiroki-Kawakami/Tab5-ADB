@@ -17,7 +17,7 @@ set -e
 here=$(CDPATH= cd "$(dirname "$0")" && pwd)
 comp=$(CDPATH= cd "$here/.." && pwd)        # components/embedded_adb
 root=$(CDPATH= cd "$comp/../.." && pwd)      # repo root
-cc="$root/simulator/idf_compat"
+cc="$root/esp-devkit/idf_compat"
 out="$here/build"
 mkdir -p "$out"
 

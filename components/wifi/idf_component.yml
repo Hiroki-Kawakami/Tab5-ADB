@@ -1,0 +1,3 @@
+dependencies:
+  espressif/esp_hosted: 2.12.6
+  espressif/esp_wifi_remote: 1.6.1

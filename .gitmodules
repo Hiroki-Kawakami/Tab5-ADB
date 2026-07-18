@@ -1,0 +1,3 @@
+[submodule "esp-devkit"]
+	path = esp-devkit
+	url = https://github.com/Hiroki-Kawakami/esp-devkit

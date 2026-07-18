@@ -37,11 +37,7 @@ void DisplayManager::init() {
     overlay_mtx_ = xSemaphoreCreateMutex();
     touch_mtx_ = xSemaphoreCreateMutex();
 
-    // Sample touch on a dedicated task so the hardware read is decoupled from the
-    // LVGL render loop (panel refresh / JPEG decode never delay input) and idles
-    // while untouched. indev_read_cb just returns the feed this task produces.
-    touch_stop_ = false;
-    xTaskCreate(&DisplayManager::touch_trampoline, "touch", 4096, this, 5, &touch_task_);
+    bsp_touch_set_event_cb(&DisplayManager::touch_event_cb, this);
 }
 
 void DisplayManager::main_flush_cb(lv_display_t *disp, const lv_area_t * /*area*/,
@@ -59,7 +55,7 @@ void DisplayManager::main_flush_cb(lv_display_t *disp, const lv_area_t * /*area*
 
 void DisplayManager::indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     auto *self = static_cast<DisplayManager *>(lv_indev_get_user_data(indev));
-    // The hardware read happens on the touch task; here we only consume the cached
+    // The hardware read happens on the BSP dispatch task; here we consume the cached
     // single-tap feed. lvgl_suppress_ masks the press until the finger lifts (the
     // swipe-to-reveal gesture), so check it together with the press state.
     bool pressed;
@@ -138,57 +134,26 @@ void DisplayManager::set_touch_listener(std::weak_ptr<TouchListener> listener) {
     xSemaphoreGive(touch_mtx_);
 }
 
-void DisplayManager::set_touch_poll_hz(int hz) {
-    if (hz > 0) touch_poll_hz_ = hz;
-}
-
 void DisplayManager::consume_overlay_touch() {
     xSemaphoreTake(touch_mtx_, portMAX_DELAY);
     lvgl_suppress_ = true;
     xSemaphoreGive(touch_mtx_);
 }
 
-void DisplayManager::touch_trampoline(void *arg) {
-    static_cast<DisplayManager *>(arg)->touch_loop();
-}
+void DisplayManager::touch_event_cb(const bsp_touch_point_t *points, int count, void *arg) {
+    auto *self = static_cast<DisplayManager *>(arg);
+    if (count < 0) count = 0;
+    if (count > kMaxTouch) count = kMaxTouch;
 
-void DisplayManager::touch_loop() {
-    // Block on the controller INT (bsp_touch_wait_interrupt) while untouched, then
-    // poll at touch_poll_hz_; after kIdleStop consecutive empty reads stop polling
-    // and wait for the next INT again. The first empty read still publishes the
-    // RELEASED state so a tap's release reaches LVGL before we idle.
-    constexpr int kIdleStop = 3;
-    bsp_touch_point_t pts[kMaxTouch];
-    while (!touch_stop_) {
-        bsp_touch_wait_interrupt();
-        int empty = 0;
-        while (!touch_stop_) {
-            int n = bsp_touch_read(pts, kMaxTouch);
-            if (n < 0) n = 0;
-            else if (n > kMaxTouch) n = kMaxTouch;
+    std::weak_ptr<TouchListener> listener;
+    xSemaphoreTake(self->touch_mtx_, portMAX_DELAY);
+    self->lvgl_pressed_ = count > 0;
+    if (count > 0) self->lvgl_pt_ = points[0];
+    if (count == 0) self->lvgl_suppress_ = false;
+    listener = self->touch_listener_;
+    xSemaphoreGive(self->touch_mtx_);
 
-            std::weak_ptr<TouchListener> lw;
-            xSemaphoreTake(touch_mtx_, portMAX_DELAY);
-            lvgl_pressed_ = (n > 0);            // LVGL indev = single tap (id 0)
-            if (n > 0) lvgl_pt_ = pts[0];
-            if (n == 0) lvgl_suppress_ = false;  // gesture ended -> unmask
-            lw = touch_listener_;
-            xSemaphoreGive(touch_mtx_);
-
-            // Push every contemporaneous point (multi-touch) to the listener, on
-            // this thread, outside the lock so it can call back into DisplayManager.
-            if (auto l = lw.lock()) l->on_touch(pts, n);
-
-            if (n == 0) {
-                if (++empty >= kIdleStop) break;
-            } else {
-                empty = 0;
-            }
-            int hz = touch_poll_hz_ > 0 ? touch_poll_hz_ : 60;
-            vTaskDelay(pdMS_TO_TICKS(1000 / hz));
-        }
-    }
-    vTaskDelete(nullptr);
+    if (auto active = listener.lock()) active->on_touch(points, count);
 }
 
 // MARK: Overlay mode

@@ -58,7 +58,7 @@ std::shared_ptr<adb::Client> adb_client_shared();
 // connected, and is cut when the policy is Connected and ADB is disconnected.
 // Called on connect/disconnect and when the Settings toggle changes; the boot
 // VBUS state is set directly from the policy in adb_app(). No-op effect on the
-// simulator (bsp_usb_host_set_power is a no-op there).
+// simulator (BSP_POWER_SWITCH_USB5V is unsupported there).
 void apply_usb_host_power();
 
 // Tear down the active connection: close the Client (which stops the reader task

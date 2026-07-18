@@ -6,13 +6,16 @@
 // the device's async event delivery (so the UI's Connecting state is observable).
 // Control via wifi::sim::* (wifi_sim.hpp), driven by the sim harness / env vars.
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "esp_log.h"
+#include "sim_harness.h"
 #include "wifi_backend.hpp"
 #include "wifi_sim.hpp"
 
@@ -58,6 +61,71 @@ Result heuristic_result(const std::string& ssid) {
     if (has("fail-notfound")) return Result::ApNotFound;
     if (has("fail-assoc")) return Result::AssocFailed;
     return Result::Ok;
+}
+
+bool parse_result(const char* value, Result& result) {
+    struct Entry {
+        const char* name;
+        Result result;
+    };
+    const Entry entries[] = {
+        {"Ok", Result::Ok},
+        {"ApNotFound", Result::ApNotFound},
+        {"AuthFailed", Result::AuthFailed},
+        {"AssocFailed", Result::AssocFailed},
+        {"IpFailed", Result::IpFailed},
+        {"Timeout", Result::Timeout},
+        {"Failed", Result::Failed},
+    };
+    for (const auto& entry : entries) {
+        if (std::strcmp(value, entry.name) == 0) {
+            result = entry.result;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<AP> parse_aps(const char* value) {
+    std::vector<AP> aps;
+    std::string spec(value);
+    size_t begin = 0;
+    while (begin < spec.size()) {
+        size_t comma = spec.find(',', begin);
+        std::string entry = spec.substr(
+            begin, comma == std::string::npos ? std::string::npos : comma - begin);
+        size_t first = entry.find(':');
+        size_t last = entry.rfind(':');
+        if (first != std::string::npos && last != first) {
+            AP ap;
+            ap.ssid = entry.substr(0, first);
+            ap.rssi = static_cast<int8_t>(
+                std::atoi(entry.substr(first + 1, last - first - 1).c_str()));
+            ap.secured = std::atoi(entry.substr(last + 1).c_str()) != 0;
+            aps.push_back(std::move(ap));
+        }
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+    return aps;
+}
+
+bool harness_command(int argc, const char* const* argv, void*) {
+    if (argc < 1) return true;
+    if (std::strcmp(argv[0], "wifi-aps") == 0) {
+        if (argc >= 2) sim::set_aps(parse_aps(argv[1]));
+        else std::fprintf(stderr, "[sim] wifi-aps: need ssid:rssi:secured,...\n");
+    } else if (std::strcmp(argv[0], "wifi-connect-result") == 0) {
+        Result result;
+        if (argc >= 2 && parse_result(argv[1], result)) sim::set_next_connect_result(result);
+        else std::fprintf(stderr, "[sim] wifi-connect-result: bad/missing result name\n");
+    } else if (std::strcmp(argv[0], "wifi-delay") == 0) {
+        if (argc >= 2) sim::set_event_delay_ms(std::atoi(argv[1]));
+        else std::fprintf(stderr, "[sim] wifi-delay: need ms\n");
+    } else if (std::strcmp(argv[0], "wifi-drop") == 0) {
+        sim::drop_link();
+    }
+    return true;
 }
 
 class SimBackend : public Backend {
@@ -171,6 +239,16 @@ void drop_link() {
     auto* host = fake().host;
     { std::lock_guard<std::mutex> lk(fake().mtx); fake().connected = false; fake().cur_rssi = 0; }
     if (host) host->on_disconnected(Result::Failed);
+}
+
+void register_harness_commands() {
+    const char* names[] = {
+        "wifi-aps",
+        "wifi-connect-result",
+        "wifi-delay",
+        "wifi-drop",
+    };
+    for (const char* name : names) sim_harness_register(name, harness_command, nullptr);
 }
 
 }  // namespace sim

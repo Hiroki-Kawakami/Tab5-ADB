@@ -18,7 +18,7 @@ here=$(CDPATH= cd "$(dirname "$0")" && pwd)
 comp=$(CDPATH= cd "$here/.." && pwd)        # components/agent_link
 comps=$(CDPATH= cd "$comp/.." && pwd)       # components
 root=$(CDPATH= cd "$comps/.." && pwd)       # repo root
-cc="$root/simulator/idf_compat"
+cc="$root/esp-devkit/idf_compat"
 out="$here/build"
 mkdir -p "$out"
 

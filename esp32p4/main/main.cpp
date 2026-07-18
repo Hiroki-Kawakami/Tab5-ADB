@@ -6,7 +6,7 @@
 #include <cassert>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "esp_lvgl_port.h"
+#include "lvgl.hpp"
 #include "adb_app.hpp"
 
 static const char *TAG = "main";

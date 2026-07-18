@@ -2,17 +2,29 @@
 
 ADB (Android Debug Bridge) client on M5Stack Tab5 (ESP32-P4).
 
+Clone with the shared development kit submodule:
+
+```sh
+git clone --recurse-submodules https://github.com/Hiroki-Kawakami/Tab5-ADB.git
+cd Tab5-ADB
+```
+
+For an existing checkout, run `git submodule update --init --recursive` once.
+
 ## Development
 
 The dev environment lives in a Nix flake; always run build tooling through
 `nix develop`:
 
 ```sh
-nix develop --command idf.py -C esp32p4 build
-./run.sh esp32p4          # == idf.py -C esp32p4 flash monitor (needs a TTY)
-./run.sh                  # host simulator (SDL2 + LVGL), no board needed
-./run.sh simverify simulator/verify/home.txt   # headless UI check, no window
+nix develop -c idf.py -C esp32p4 build
+nix develop -c ./run.sh esp32p4
+nix develop -c ./run.sh
+nix develop -c ./run.sh simverify simulator/verify/home.txt
 ```
+
+Reusable BSP, simulator compatibility, image and LVGL infrastructure comes
+from the pinned [`esp-devkit`](esp-devkit/) submodule.
 
 See [`docs/development.md`](docs/development.md) for every build/flash/test
 command, and [`docs/architecture.md`](docs/architecture.md) for the component

@@ -11,7 +11,7 @@ case "$TARGET" in
     ;;
   simverify)
     # Headless, scripted UI verification (no host window): build, then run the
-    # given sim-harness script (see simulator/platform/sim_harness.h). Captured
+    # given sim-harness script (see esp-devkit/sim_harness/sim_harness.h). Captured
     # frames go wherever the script's `capture` lines point.
     SCRIPT=$2
     if [ -z "$SCRIPT" ]; then

@@ -11,7 +11,7 @@ android-agent（`tab5adb-agent`）と Tab5 側（`embedded_adb`/`adb` + `agent_l
 テストパターン。
 
 - **本番の Tab5 側コードをそのままリンク**して回す: `embedded_adb` / `adb` / `agent_link` を
-  そのまま使い、host ランタイムは simulator と同じ `idf_compat`（`freertos`=pthread 実装 /
+  そのまま使い、host ランタイムは simulator と同じ `esp-devkit/idf_compat`（`freertos`=pthread 実装 /
   `nvs`=JSON / `esp_*` shim）+ `transport_libusb`。**SDL/LVGL/`app/` は持ち込まない**。
 - libusb で **PC 直結の実機**を叩くので、Tab5 実機を待たずに Tab5 経路を検証できる。受信スタックの
   “描画以外” を実機 agent 相手に丸ごと回す。GUI 操作なし・終了コードで合否判定。
@@ -32,7 +32,7 @@ nix develop -c components/agent_link/test/run.sh [jar-path]
 
 `components/agent_link/test/run.sh` が:
 
-- `idf_compat` の `.o`（`nvs`/`esp_err` は gcc、`freertos_*`/`esp_timer` も）+ `embedded_adb` 全
+- `esp-devkit/idf_compat` の `.o`（`nvs`/`esp_err` は gcc、`freertos_*`/`esp_timer` も）+ `embedded_adb` 全
   `.cpp` + `transport_libusb` + `adb` 全 `.cpp` + `agent_link` + テスト本体を **1 コマンドでビルド**、
 - `adb kill-server` してから実行。
 - 成果物（`.o`・バイナリ）は `test/build/`（gitignore の `build` 規則で無視。`.o` キャッシュで再ビルド高速）。

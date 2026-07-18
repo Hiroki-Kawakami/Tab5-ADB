@@ -258,7 +258,7 @@ void SettingsScreen::build() {
             app::modal_confirm(root_, "Restart required",
                                "The color depth changes after a restart.\n"
                                "Restart now?",
-                               "Restart", false, []() { bsp_restart(); });
+                               "Restart", false, []() { bsp_power_restart(); });
         });
     }
 

@@ -15,7 +15,7 @@
 #include "freertos/task.h"
 
 #include "adb_app.hpp"
-#include "bsp_sd.h"
+#include "bsp.h"
 #include "file_preview.hpp"  // preview_chrome
 #include "lvgl.hpp"
 #include "modal.hpp"
