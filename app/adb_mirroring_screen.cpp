@@ -128,6 +128,9 @@ void ADBMirroringScreen::start_mirror_ui() {
 
     apply_overlay(cur_rot_, /*first=*/true);  // cur_rot_ defaults to 0 (portrait)
     display_manager.set_overlay_visible(true);
+    batch_touch_ = app::connection_is_tcp();
+    touch_batch_.clear();
+    has_last_touch_snapshot_ = false;
 
     // Observe raw touch (pushed from the BSP dispatch task): a swipe out of
     // the bottom-left corner reveals a hidden strip. on_touch fires off the LVGL
@@ -469,31 +472,83 @@ bool ADBMirroringScreen::in_overlay_footprint(int px, int py, uint8_t rot) {
 }
 
 void ADBMirroringScreen::flush_touch_batch(agent_link::Link* link) {
-    // Call under pass_mtx_. Ship the accumulated transitions as one INPUT frame.
-    if (!link || tx_batch_.empty()) return;
-    link->inject_touch_batch(tx_batch_.data(), tx_batch_.size());
-    tx_batch_.clear();
+    if (!link || touch_batch_.empty()) return;
+    if (link->inject_touch_snapshot_batch(touch_batch_.data(), touch_batch_.size()) ==
+        adb::Error::Ok) {
+        touch_batch_.clear();
+    }
+}
+
+void ADBMirroringScreen::submit_touch_snapshot(
+    agent_link::Link* link, const agent_link::Link::TouchSnapshot& snapshot) {
+    if (!link) {
+        touch_batch_.clear();
+        has_last_touch_snapshot_ = false;
+        return;
+    }
+
+    auto same_points = [](const agent_link::Link::TouchSnapshot& a,
+                          const agent_link::Link::TouchSnapshot& b) {
+        if (a.point_count != b.point_count) return false;
+        for (size_t i = 0; i < a.point_count; ++i) {
+            if (a.points[i].pointer_id != b.points[i].pointer_id ||
+                a.points[i].x != b.points[i].x || a.points[i].y != b.points[i].y) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto same_ids = [](const agent_link::Link::TouchSnapshot& a,
+                       const agent_link::Link::TouchSnapshot& b) {
+        if (a.point_count != b.point_count) return false;
+        for (size_t i = 0; i < a.point_count; ++i) {
+            if (a.points[i].pointer_id != b.points[i].pointer_id) return false;
+        }
+        return true;
+    };
+
+    if (!has_last_touch_snapshot_ && snapshot.point_count == 0) return;
+    if (has_last_touch_snapshot_ && same_points(last_touch_snapshot_, snapshot)) {
+        if (batch_touch_ && !touch_batch_.empty() && link->tx_pending_bytes() == 0) {
+            flush_touch_batch(link);
+        }
+        return;
+    }
+
+    const bool edge = !has_last_touch_snapshot_ ||
+                      !same_ids(last_touch_snapshot_, snapshot);
+    if (!batch_touch_) {
+        if (link->inject_touch_snapshot(snapshot) == adb::Error::Ok) {
+            last_touch_snapshot_ = snapshot;
+            has_last_touch_snapshot_ = true;
+        }
+        return;
+    }
+
+    if (touch_batch_.size() >= kSnapshotBatchMax) touch_batch_.erase(touch_batch_.begin());
+    touch_batch_.push_back(snapshot);
+    last_touch_snapshot_ = snapshot;
+    has_last_touch_snapshot_ = true;
+    if (edge || link->tx_pending_bytes() == 0) flush_touch_batch(link);
 }
 
 void ADBMirroringScreen::release_all_pointers() {
     std::lock_guard<std::mutex> lk(pass_mtx_);
     auto l = app::agent_client().link();
+    bool had_pass = false;
     for (auto& p : pass_) {
-        // UP any still-down Pass pointer (flushed below) so the source sees no stuck
-        // finger, then retire every tracked pointer.
-        if (p.used && p.kind == PtKind::Pass)
-            tx_batch_.push_back({agent_link::kTouchUp, static_cast<uint8_t>(p.id),
-                                 p.x, p.y});
+        had_pass |= p.used && p.kind == PtKind::Pass;
         p.used = false;
     }
-    flush_touch_batch(l.get());  // UPs go out immediately (teardown / OpMode off)
+    if (!had_pass &&
+        (!has_last_touch_snapshot_ || last_touch_snapshot_.point_count == 0)) return;
+
+    agent_link::Link::TouchSnapshot snapshot{};
+    snapshot.sample_time_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    submit_touch_snapshot(l.get(), snapshot);
 }
 
 void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
-    // Touch task thread. Diff this snapshot against the tracked pointers (keyed by
-    // the controller track id) to emit per-pointer DOWN/MOVE/UP. Each new pointer
-    // is classified once (Pass / Reveal / Ignore) and keeps that role until it
-    // lifts, so MOVE/UP stay consistent with the initial decision.
     const bool po = passthrough_.load();
     const bool visible = display_manager.overlay_visible();
     const uint8_t rot = cur_rot_;
@@ -510,20 +565,6 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
         for (int s = 0; s < kMaxPass; ++s)
             if (!pass_[s].used) return s;
         return -1;
-    };
-
-    // Append a per-pointer transition to the batch. DOWN/UP must always be carried
-    // (gesture state), so they set `edge` to force a flush; a MOVE past kBatchMax
-    // evicts the oldest queued MOVE so a stalled link can't grow the frame without
-    // bound (the batch only ever holds MOVEs between flushes — edges flush at once).
-    bool edge = false;
-    auto enqueue = [&](uint8_t action, int id, uint16_t x, uint16_t y) {
-        if (action == agent_link::kTouchMove) {
-            if (tx_batch_.size() >= kBatchMax) tx_batch_.erase(tx_batch_.begin());
-        } else {
-            edge = true;
-        }
-        tx_batch_.push_back({action, static_cast<uint8_t>(id), x, y});
     };
 
     bool seen[kMaxPass] = {false};
@@ -546,7 +587,6 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
                 p.kind = PtKind::Reveal;
             } else if (po && !(visible && in_overlay_footprint(x, y, rot))) {
                 p.kind = PtKind::Pass;
-                enqueue(agent_link::kTouchDown, id, x, y);
             } else {
                 p.kind = PtKind::Ignore;  // overlay handles it, or passthrough off
             }
@@ -554,13 +594,9 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
             ActivePtr& p = pass_[s];
             p.x = x; p.y = y;
             if (p.kind == PtKind::Pass) {
-                if (po) {
-                    enqueue(agent_link::kTouchMove, id, x, y);
-                } else {
-                    // Touch-control switched off mid-gesture: release this pointer.
-                    enqueue(agent_link::kTouchUp, id, x, y);
+                if (!po) {
                     p.used = false;
-                    continue;  // dropped; leave it unseen so it isn't re-UP'd below
+                    continue;
                 }
             } else if (p.kind == PtKind::Reveal && !visible) {
                 int dx = x - p.rx0, dy = y - p.ry0;
@@ -577,24 +613,23 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
         seen[s] = true;
     }
 
-    // Pointers absent from this snapshot lifted: UP the Pass ones, retire all.
     for (int s = 0; s < kMaxPass; ++s) {
         if (!pass_[s].used || seen[s]) continue;
-        if (pass_[s].kind == PtKind::Pass)
-            enqueue(agent_link::kTouchUp, pass_[s].id, pass_[s].x, pass_[s].y);
         pass_[s].used = false;
     }
 
-    // Flush the batch as one frame when the link is idle (so it ships the instant
-    // the channel frees — no added latency) or a DOWN/UP edge needs to go now.
-    // While a slow link is mid-round-trip, MOVEs keep accumulating instead. On USB
-    // the link is idle at every sample, so this flushes every time = one transition
-    // per frame, as before.
-    if (!link) {
-        tx_batch_.clear();  // link gone — nothing to send on; don't keep stale events
-    } else if (!tx_batch_.empty() && (edge || link->tx_pending_bytes() == 0)) {
-        flush_touch_batch(link.get());
+    agent_link::Link::TouchSnapshot snapshot{};
+    snapshot.sample_time_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    for (const auto& p : pass_) {
+        if (!p.used || p.kind != PtKind::Pass) continue;
+        auto& point = snapshot.points[snapshot.point_count++];
+        point.pointer_id = static_cast<uint8_t>(p.id);
+        point.x = p.x;
+        point.y = p.y;
     }
+    std::sort(snapshot.points, snapshot.points + snapshot.point_count,
+              [](const auto& a, const auto& b) { return a.pointer_id < b.pointer_id; });
+    submit_touch_snapshot(link.get(), snapshot);
 }
 
 void ADBMirroringScreen::on_orientation(agent_link::Link*,

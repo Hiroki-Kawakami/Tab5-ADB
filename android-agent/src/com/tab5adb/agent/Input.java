@@ -58,22 +58,21 @@ final class Input {
         return inject(ev);
     }
 
-    // --- touch passthrough (§4.7) -------------------------------------------
-    //
-    // The Tab5 sends per-pointer DOWN/MOVE/UP (input_type=TOUCH); this keeps the
-    // active-pointer set and assembles the composite multi-touch MotionEvent the
-    // way scrcpy's PointersState does (the first finger is ACTION_DOWN, later ones
-    // ACTION_POINTER_DOWN with the pointer index in the high bits, etc.). The
-    // coordinates are already the source's LOGICAL display coords (the Server
-    // inverted the mirror geometry via Projection). All calls come from one
-    // connection's reader thread, but synchronize defensively.
     private static final int MAX_POINTERS = 10;
-    private static final int ACTION_POINTER_INDEX_SHIFT = 8;  // MotionEvent
+    private static final int ACTION_POINTER_INDEX_SHIFT = 8;
+    private static final long UINT32_MASK = 0xFFFFFFFFL;
+    private static final long UINT32_HALF = 0x80000000L;
+    private static final long UINT32_MOD = 0x100000000L;
     private final int[] ptrIds = new int[MAX_POINTERS];
     private final float[] ptrX = new float[MAX_POINTERS];
     private final float[] ptrY = new float[MAX_POINTERS];
     private int ptrCount = 0;
-    private long touchDownTime = 0;  // time of the gesture's first ACTION_DOWN
+    private long frameSourceAnchor = 0;
+    private long frameUptimeAnchor = 0;
+    private long gestureSourceAnchor = 0;
+    private long gestureUptimeAnchor = 0;
+    private long touchDownTime = 0;
+    private long lastEventTime = 0;
 
     private int indexOfPointer(int id) {
         for (int i = 0; i < ptrCount; i++) if (ptrIds[i] == id) return i;
@@ -89,43 +88,101 @@ final class Input {
         ptrCount--;
     }
 
-    /**
-     * Inject one per-pointer touch transition (§4.7). {@code action} is
-     * 0=DOWN / 1=MOVE / 2=UP; {@code x,y} are the source's logical display coords
-     * (ignored for UP, which releases at the pointer's last position). Returns
-     * false if the transition can't be applied (unknown pointer, table full).
-     */
-    synchronized boolean injectTouch(int action, int pointerId, int x, int y) {
+    private static int indexOfSnapshotPointer(int id, int count, int[] ids) {
+        for (int i = 0; i < count; ++i) if (ids[i] == id) return i;
+        return -1;
+    }
+
+    synchronized void beginTouchFrame(long newestSourceTime) {
+        frameSourceAnchor = newestSourceTime & UINT32_MASK;
+        frameUptimeAnchor = SystemClock.uptimeMillis();
+    }
+
+    private static long sourceDelta(long value, long base) {
+        long delta = (value - base) & UINT32_MASK;
+        return delta >= UINT32_HALF ? delta - UINT32_MOD : delta;
+    }
+
+    private void beginGesture(long sampleTime) {
+        gestureSourceAnchor = frameSourceAnchor;
+        gestureUptimeAnchor = frameUptimeAnchor;
+        lastEventTime = 0;
+        touchDownTime = touchEventTime(sampleTime);
+    }
+
+    private long touchEventTime(long sampleTime) {
+        long eventTime = gestureUptimeAnchor +
+                sourceDelta(sampleTime & UINT32_MASK, gestureSourceAnchor);
         long now = SystemClock.uptimeMillis();
-        int index = indexOfPointer(pointerId);
-        switch (action) {
-            case 0: {  // DOWN
-                if (index >= 0) {  // duplicate down — treat as a move
-                    ptrX[index] = x; ptrY[index] = y;
-                    return injectMotion(MotionEvent.ACTION_MOVE, now);
-                }
-                if (ptrCount >= MAX_POINTERS) return false;
-                if (ptrCount == 0) touchDownTime = now;
-                index = ptrCount++;
-                ptrIds[index] = pointerId; ptrX[index] = x; ptrY[index] = y;
-                int motion = (ptrCount == 1) ? MotionEvent.ACTION_DOWN
-                        : MotionEvent.ACTION_POINTER_DOWN | (index << ACTION_POINTER_INDEX_SHIFT);
-                return injectMotion(motion, now);
-            }
-            case 1: {  // MOVE
-                if (index < 0) return false;
-                ptrX[index] = x; ptrY[index] = y;
-                return injectMotion(MotionEvent.ACTION_MOVE, now);
-            }
-            default: {  // UP (2) — release at the pointer's last known position
-                if (index < 0) return false;
-                int motion = (ptrCount == 1) ? MotionEvent.ACTION_UP
-                        : MotionEvent.ACTION_POINTER_UP | (index << ACTION_POINTER_INDEX_SHIFT);
-                boolean ok = injectMotion(motion, now);
-                removePointer(index);
-                return ok;
-            }
+        if (eventTime > now) eventTime = now;
+        if (lastEventTime != 0 && eventTime < lastEventTime) eventTime = lastEventTime;
+        return eventTime;
+    }
+
+    synchronized boolean injectTouchSnapshot(long sampleTime, int count,
+                                              int[] ids, int[] xs, int[] ys) {
+        long eventTime = ptrCount > 0 ? touchEventTime(sampleTime) : 0;
+        boolean moved = false;
+        for (int i = 0; i < ptrCount; ++i) {
+            int source = indexOfSnapshotPointer(ptrIds[i], count, ids);
+            if (source < 0 || xs[source] < 0 || ys[source] < 0) continue;
+            if (ptrX[i] != xs[source] || ptrY[i] != ys[source]) moved = true;
+            ptrX[i] = xs[source];
+            ptrY[i] = ys[source];
         }
+
+        boolean changedPointers = false;
+        boolean ok = true;
+        for (int i = ptrCount - 1; i >= 0; --i) {
+            if (indexOfSnapshotPointer(ptrIds[i], count, ids) >= 0) continue;
+            int action = ptrCount == 1 ? MotionEvent.ACTION_UP
+                    : MotionEvent.ACTION_POINTER_UP | (i << ACTION_POINTER_INDEX_SHIFT);
+            ok &= injectMotion(action, eventTime);
+            lastEventTime = eventTime;
+            removePointer(i);
+            changedPointers = true;
+        }
+
+        for (int i = 0; i < count; ++i) {
+            if (xs[i] < 0 || ys[i] < 0 || indexOfPointer(ids[i]) >= 0) continue;
+            if (ptrCount >= MAX_POINTERS) {
+                ok = false;
+                continue;
+            }
+            if (ptrCount == 0) {
+                beginGesture(sampleTime);
+                eventTime = touchEventTime(sampleTime);
+            }
+            int index = ptrCount++;
+            ptrIds[index] = ids[i];
+            ptrX[index] = xs[i];
+            ptrY[index] = ys[i];
+            int action = ptrCount == 1 ? MotionEvent.ACTION_DOWN
+                    : MotionEvent.ACTION_POINTER_DOWN |
+                    (index << ACTION_POINTER_INDEX_SHIFT);
+            ok &= injectMotion(action, eventTime);
+            lastEventTime = eventTime;
+            changedPointers = true;
+        }
+
+        if (moved && !changedPointers && ptrCount > 0) {
+            ok &= injectMotion(MotionEvent.ACTION_MOVE, eventTime);
+            lastEventTime = eventTime;
+        }
+        if (ptrCount == 0) {
+            touchDownTime = 0;
+            lastEventTime = 0;
+        }
+        return ok;
+    }
+
+    synchronized void cancelTouch() {
+        if (ptrCount == 0) return;
+        long now = SystemClock.uptimeMillis();
+        injectMotion(MotionEvent.ACTION_CANCEL, now);
+        ptrCount = 0;
+        touchDownTime = 0;
+        lastEventTime = 0;
     }
 
     private boolean injectMotion(int action, long now) {

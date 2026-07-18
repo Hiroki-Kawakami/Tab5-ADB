@@ -311,33 +311,20 @@ public:
     // power / volume / nav buttons. Returns the first non-Ok of the two sends.
     adb::Error tap_key(uint32_t keycode);
 
-    // Inject one per-pointer touch transition on the source device (TYPE=INPUT,
-    // input_type=TOUCH, §4.7). `action` is kTouchDown/kTouchMove/kTouchUp,
-    // `pointer_id` is the source controller's track id, and (x,y) are Tab5 PANEL
-    // coordinates — the agent inverts the mirror geometry to the source's logical
-    // display coords and assembles the multi-pointer MotionEvent itself. Like
-    // inject_key: fire-and-forget, non-blocking, no response, callable from any
-    // thread (e.g. the BSP dispatch task). Returns StreamClosed if down.
-    adb::Error inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
-                            uint16_t y);
-
-    // One per-pointer touch transition for inject_touch_batch.
-    struct TouchSample {
-        uint8_t action;      // kTouchDown / kTouchMove / kTouchUp
-        uint8_t pointer_id;  // source touch-controller track id
-        uint16_t x, y;       // Tab5 panel coords [px]
+    struct TouchPoint {
+        uint8_t pointer_id;
+        uint16_t x;
+        uint16_t y;
     };
 
-    // Inject several per-pointer touch transitions in ONE INPUT frame
-    // (input_type=kInputTouchBatch, §4.7) — the agent replays them in order through
-    // the same per-pointer state machine as inject_touch, so it is semantically a
-    // run of inject_touch calls but a single A_WRTE. The caller batches the samples
-    // that pile up while the link is mid-round-trip (see tx_pending_bytes) and
-    // flushes them when it goes idle, cutting a fast drag from one frame per touch
-    // sample to ~one per RTT on a slow link. Fire-and-forget like inject_touch.
-    // `n` must be 1..kTouchBatchMax. Returns StreamClosed if down, QueueFull on
-    // backpressure, Ok otherwise.
-    adb::Error inject_touch_batch(const TouchSample* samples, size_t n);
+    struct TouchSnapshot {
+        uint32_t sample_time_ms;
+        uint8_t point_count;
+        TouchPoint points[kTouchSnapshotMaxPoints];
+    };
+
+    adb::Error inject_touch_snapshot(const TouchSnapshot& snapshot);
+    adb::Error inject_touch_snapshot_batch(const TouchSnapshot* snapshots, size_t n);
 
     // Bytes still un-acknowledged on the link's writer (queued + in flight); 0 =
     // the link is idle. The caller uses this to decide when to flush a touch batch
@@ -397,7 +384,7 @@ private:
 
     std::vector<uint8_t> rx_;  // frame accumulator (reader thread only)
     // Outgoing frame counter. Touched by the reader thread (HELLO response), the
-    // app thread (start_mirror), and the BSP dispatch task (inject_touch /
+    // app thread (start_mirror), and the BSP dispatch task (inject_touch_snapshot /
     // inject_key), so atomic; each stream_->write() enqueues a whole frame, so
     // frames never interleave on the wire.
     std::atomic<uint8_t> tx_seq_{0};

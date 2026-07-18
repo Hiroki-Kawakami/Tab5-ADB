@@ -212,49 +212,28 @@ private:
 
     uint8_t cur_rot_ = 0;  // LVGL thread: device rotation the overlay was built for
 
-    // --- touch passthrough (§4.7) ---
-    // Touch-control mode: when on (the default), touches over the mirror (outside
-    // a visible overlay strip / the reveal corner) are injected to the source
-    // device as per-pointer MotionEvents. Toggled by the overlay OpMode button
-    // (LVGL thread); read on the BSP dispatch task.
     std::atomic<bool> passthrough_{true};
 
-    // Active touch points, keyed by the controller track id, tracked across
-    // dispatch-task samples so on_touch can emit per-pointer DOWN/MOVE/UP. Each
-    // pointer's role is decided at DOWN and kept for its lifetime: Pass = injected
-    // to the device, Reveal = a corner-swipe candidate, Ignore = handled by the
-    // overlay / dropped. Guarded by pass_mtx_ so onExit (LVGL thread) can
-    // release_all_pointers() any still-down Pass pointers.
     enum class PtKind : uint8_t { Pass, Reveal, Ignore };
     struct ActivePtr {
         bool used = false;
         int id = 0;
         PtKind kind = PtKind::Ignore;
-        uint16_t x = 0, y = 0;     // last position (for the UP coords)
-        int rx0 = 0, ry0 = 0;      // reveal-swipe start (Reveal only)
+        uint16_t x = 0, y = 0;
+        int rx0 = 0, ry0 = 0;
     };
     static constexpr int kMaxPass = 10;
     ActivePtr pass_[kMaxPass];
     std::mutex pass_mtx_;
 
-    // Touch passthrough is sent as BATCHED INPUT frames (agent_link::inject_touch_batch)
-    // to cut the per-event transaction cost that drags down the link (small +
-    // high-frequency touch packets contend with the video's ADB flow control). Each
-    // on_touch sample appends its per-pointer transitions to tx_batch_ (guarded by
-    // pass_mtx_); the batch is flushed as ONE frame when the link is idle
-    // (tx_pending_bytes() == 0) or a DOWN/UP edge occurs. On USB the link is idle at
-    // every ~60 Hz sample, so each sample flushes immediately = one transition per
-    // frame (unchanged from per-event sending). On a slow link (TCP) the MOVEs that
-    // arrive mid-round-trip accumulate and ship together the instant it goes idle —
-    // ~one frame per RTT, no points dropped, no deliberate latency added. To bound
-    // the frame on a stalled link, a MOVE past kBatchMax evicts the oldest MOVE
-    // (DOWN/UP force a flush, so the batch only ever accumulates MOVEs).
-    static constexpr size_t kBatchMax = 24;
-    std::vector<agent_link::Link::TouchSample> tx_batch_;
-    // Send tx_batch_ as one INPUT frame and clear it (call under pass_mtx_).
+    bool batch_touch_ = false;
+    static constexpr size_t kSnapshotBatchMax = 24;
+    std::vector<agent_link::Link::TouchSnapshot> touch_batch_;
+    agent_link::Link::TouchSnapshot last_touch_snapshot_{};
+    bool has_last_touch_snapshot_ = false;
     void flush_touch_batch(agent_link::Link* link);
-    // UP every still-down Pass pointer and clear the table (any thread). Called on
-    // exit / when passthrough is turned off, so the source sees no stuck finger.
+    void submit_touch_snapshot(agent_link::Link* link,
+                               const agent_link::Link::TouchSnapshot& snapshot);
     void release_all_pointers();
 
     FrameSlot slots_[kSlots];

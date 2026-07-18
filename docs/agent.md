@@ -97,18 +97,18 @@ request/response `CONTROL_REQUEST` path — high-frequency touch must never wait
 on a round trip. The agent injects via the hidden
 `InputManager.injectInputEvent` (the scrcpy technique).
 
-**Touch is batched, not sent per-event**, because ADB's classic
-per-`A_WRTE`/`A_OKAY` stop-and-wait makes every small touch packet a full
-transaction that contends with the inbound video's flow control — on a slow
-link this can drag the whole mirror down. `ADBMirroringScreen` accumulates
-per-pointer transitions and flushes as one `kInputTouchBatch` frame whenever
-the link goes idle (`Link::tx_pending_bytes() == 0`, which also counts the
-in-flight unacked frame) or a DOWN/UP edge needs to go immediately. On USB the
-link is idle at every touch sample, so this degrades to exactly one transition
-per frame (no behavior change); on TCP/Wi-Fi, MOVEs that pile up mid-round-trip
-ship together — fewer transactions, no added latency (the samples were waiting
-on the link anyway), no dropped points (a full batch evicts only the oldest
-queued MOVE).
+Touch uses timestamped, full multi-pointer snapshots. `ADBMirroringScreen` only
+classifies points as pass/reveal/overlay and sends the complete pass set; the
+agent owns the previous set and derives Android DOWN/MOVE/UP actions. Repeated
+polls at identical coordinates produce no `MotionEvent`, and the Tab5 sample
+timestamp becomes Android `eventTime`, preserving velocity history when network
+delivery is bursty.
+
+USB sends each changed snapshot in its own `kInputTouchSnapshot` frame. TCP/Wi-Fi
+uses `kInputTouchSnapshotBatch` because ADB's per-`A_WRTE`/`A_OKAY` stop-and-wait
+can stall the whole mirror. Each batched snapshot retains its own timestamp and
+is self-contained, so bounding a stalled batch by dropping its oldest snapshot
+cannot corrupt pointer state.
 
 ## Mirror rendering (Tab5 side, `ADBMirroringScreen`)
 

@@ -500,7 +500,8 @@ MediaSession に届かない環境ではそれぞれ落とす）。両者の `ca
 - payload 先頭の `input_type` で種別を分ける。
 
 ```
- +0   u8   input_type   0x00=KEY / 0x01=TOUCH（0x02=TEXT は予約）
+ +0   u8   input_type   0x00=KEY / 0x01=TOUCH_SNAPSHOT / 0x02=TEXT（予約） /
+                         0x03=TOUCH_SNAPSHOT_BATCH
  +1   ...               input_type ごとに定義（下記）
 ```
 
@@ -521,60 +522,49 @@ MediaSession に届かない環境ではそれぞれ落とす）。両者の `ca
 - overlay のボタンが使う keycode: Home=3, Back=4, VolumeUp=24, VolumeDown=25, Power=26, AppSwitch=187。
   Tab5 側が keycode を決め、agent は透過する。
 
-#### INPUT_TOUCH (input_type = 0x01) — タッチイベント
+#### INPUT_TOUCH_SNAPSHOT (input_type = 0x01) — タッチ状態
 
-mirror 表示中の Tab5 パネルへのタッチを、ソース端末へ **ポインタ単位**で送る。1 フレーム =
-1 ポインタの 1 状態変化。agent はアクティブなポインタ集合を保持し、複数指の `MotionEvent`
-（`ACTION_DOWN` / `ACTION_POINTER_DOWN` / `ACTION_MOVE` / `ACTION_POINTER_UP` / `ACTION_UP`）を
-組み立てて `injectInputEvent` に流す（scrcpy の `PointersState` 方式）。
+mirror 表示中の Tab5 パネル上でパススルー対象になっている全ポインタを、サンプル時刻とともに送る。
+Tab5 は DOWN/MOVE/UP へ分解しない。agent が前回の状態との差分から複数指の `MotionEvent` を構成する。
 
 ```
- +1   u8    action      0=DOWN, 1=MOVE, 2=UP（ポインタ単位）。agent が複合 ACTION_* に変換
- +2   u8    pointer_id  ソース端末タッチコントローラの track ID（Tab5 はそのまま透過）
- +3   u8    reserved    0
- +4   u16   x           Tab5 パネル座標 X [px] (LE)。0..target_width-1
- +6   u16   y           Tab5 パネル座標 Y [px] (LE)。0..target_height-1
- (= 入力ペイロード計 7 bytes。将来は末尾に append-only)
+ +1   u32   sample_time_ms  Tab5 の単調増加時刻 [ms] の下位32 bit (LE)
+ +5   u8    point_count     この時点で接触中のポインタ数（0..10）
+ then point_count × point（各 5 bytes）:
+   +0  u8    pointer_id     Tab5 タッチコントローラの track ID
+   +1  u16   x              Tab5 パネル座標 X [px] (LE)
+   +3  u16   y              Tab5 パネル座標 Y [px] (LE)
+ (= 入力ペイロード計 6 + 5×point_count bytes)
 ```
 
-- **座標は Tab5 パネル座標**（720×1280 デバイス座標）で送り、**ソース端末座標への逆変換は agent が行う**。
-  agent は mirror のジオメトリ（回転・scale-fit・レターボックス。§5.1）を持つ唯一の側なので、
-  パネル座標 → 自然向きソース座標（fit/fill の逆算 + 中央寄せオフセット除去）→ ソース端末の論理
-  ディスプレイ座標（端末回転 `Surface.ROTATION_*` を適用）へ戻して注入する。レターボックス余白に
-  落ちた座標は破棄する。
-- **pointer_id はソースのタッチ track ID**。Tab5 は自前で ID を合成せず、コントローラの track ID を
-  そのまま透過するので、agent 側でポインタの対応付けが安定する。
-- **DOWN→…(MOVE)…→UP の意味論はポインタ単位**。Tab5 は各指の押下/移動/離しを別フレームで送り、
-  agent は最初の DOWN を `ACTION_DOWN`、2 本目以降の DOWN を `ACTION_POINTER_DOWN`、最後でない UP を
-  `ACTION_POINTER_UP`、最後の UP を `ACTION_UP` に変換する（index は agent が現在のポインタ配列から算出）。
-- KEY 同様 **一方向・fire-and-forget**（`req_id`／応答なし、状態を変えない）。
+- snapshot は完全状態であり、前回存在しなかった ID は DOWN、両方に存在して座標が変わった ID は MOVE、
+  前回存在して今回ない ID は UP になる。`point_count=0` は全ポインタの解放を表す。2 本目以降の追加・
+  最後以外の削除は agent が `ACTION_POINTER_DOWN/UP` にする。
+- 同一 ID・同一座標の snapshot は `MotionEvent` を発生させない。タッチコントローラの定周期ポーリングが
+  同じ座標を繰り返しても、Android の速度推定へ停止サンプルを追加しないためである。
+- `sample_time_ms` は転送時刻ではなく BSP が状態を採取した時刻。agent はジェスチャー先頭で Android の
+  `uptimeMillis` へ対応付け、以降の相対時間を `MotionEvent.eventTime` に使う。32 bit wrap は差分計算で扱う。
+- 座標は Tab5 パネル座標で送り、source logical 座標への逆変換は agent が行う。レターボックス内の新規
+  ポインタは注入しない。注入済みポインタが一時的に映像外へ出ても snapshot に ID がある間は保持し、
+  ID が消えた時だけ解放する。
+- pointer の配列順は意味を持たず、snapshot 内の ID は一意でなければならない。
+- KEY 同様、一方向・fire-and-forget（`req_id`／応答なし、リンク状態を変えない）。
 
-#### INPUT_TOUCH_BATCH (input_type = 0x03) — タッチイベント（まとめ送り）
+#### INPUT_TOUCH_SNAPSHOT_BATCH (input_type = 0x03) — タッチ状態（まとめ送り）
 
-`INPUT_TOUCH` を **1 フレームに複数件まとめた**もの。意味論は完全に同じで、agent は各レコードを
-順番に `INPUT_TOUCH` と同一の注入経路（`handleTouch` → per-pointer state machine）へ流すだけ。
-**目的は転送効率**：タッチは「小さいデータを高頻度」で送るため、ADB のストリーム単位 stop-and-wait
-（1 A_WRTE ＝ 1 往復）では 1 イベント＝1 トランザクションのコストが映像のフロー制御と競合し、
-回線全体を重くする。Tab5 は**リンクが往復待ちの間に溜まった MOVE をまとめ、リンクが空いた瞬間に
-1 フレームで送る**ので、速いドラッグでも「1 サンプル＝1 フレーム」ではなく「~1 フレーム/RTT」に減る
-（点は捨てない＝軌跡の精度は保つ／個別送信に対する追加遅延もない）。USB のような速いリンクでは毎サンプル
-即フラッシュ＝実質 count=1 なので従来と同じ。
+`INPUT_TOUCH_SNAPSHOT` を1フレームに複数件まとめる。各 snapshot は完全状態かつ固有の時刻を持つため、
+agent は順番に差分を取りながら、まとめ前と同じ `MotionEvent.eventTime` 間隔で再生できる。
 
 ```
- +1   u8    count       後続レコード数（1..255）
- then count × record（各 6 bytes）:
-   +0  u8   action      0=DOWN, 1=MOVE, 2=UP（ポインタ単位）
-   +1  u8   pointer_id  ソース端末タッチコントローラの track ID
-   +2  u16  x           Tab5 パネル座標 X [px] (LE)
-   +4  u16  y           Tab5 パネル座標 Y [px] (LE)
- (= 入力ペイロード計 2 + 6×count bytes)
+ +1   u8    snapshot_count  後続 snapshot 数（1..255）
+ +2   ...   snapshot        INPUT_TOUCH_SNAPSHOT の +1 以降と同じ可変長レコード
+ ...        snapshot        snapshot_count 件を採取順に連結
 ```
 
-- レコードの **action / pointer_id / 座標の意味は `INPUT_TOUCH` と同一**（reserved バイトは持たない）。
-  座標は Tab5 パネル座標で、ソース端末座標への逆変換は agent が行う（上記 `INPUT_TOUCH` と同じ）。
-- agent は count 件を**到着順**に replay する（DOWN/MOVE/UP の順序はそのまま）。Tab5 側で DOWN/UP は
-  常に即フラッシュされるので、まとめ対象になるのは連続する MOVE のみ。
-- KEY/TOUCH 同様 **一方向・fire-and-forget**（`req_id`／応答なし）。
+ADB-over-TCP では小さい `A_WRTE` ごとの stop-and-wait が映像と競合するため、Tab5 はリンク待ちの間に
+増えた snapshot を最大24件まで保持し、リンクが空いた時またはポインタ集合が変わった時に送る。上限超過時は
+最古を落としてよい。各 snapshot が完全状態なので、受信側は残った先頭から正しい接触状態を再構成できる。
+USB は `INPUT_TOUCH_SNAPSHOT` を単発送信する。
 
 > **テキスト（input_type=0x02）は予約**。同じ INPUT チャネル・同じ注入経路に乗るので、
 > フレーム層（§3）は変えない。

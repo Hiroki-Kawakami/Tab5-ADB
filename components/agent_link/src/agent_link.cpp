@@ -8,6 +8,24 @@ namespace agent_link {
 
 namespace {
 constexpr const char* kSocket = "localabstract:tab5adb-agent";
+
+size_t touch_snapshot_size(const Link::TouchSnapshot& snapshot) {
+    return kTouchSnapshotHeaderLen +
+           static_cast<size_t>(snapshot.point_count) * kTouchSnapshotPointLen;
+}
+
+uint8_t* write_touch_snapshot(uint8_t* p, const Link::TouchSnapshot& snapshot) {
+    wr_u32(p, snapshot.sample_time_ms);
+    p[4] = snapshot.point_count;
+    p += kTouchSnapshotHeaderLen;
+    for (size_t i = 0; i < snapshot.point_count; ++i) {
+        p[0] = snapshot.points[i].pointer_id;
+        wr_u16(p + 1, snapshot.points[i].x);
+        wr_u16(p + 3, snapshot.points[i].y);
+        p += kTouchSnapshotPointLen;
+    }
+    return p;
+}
 }  // namespace
 
 Link::Link(std::weak_ptr<LinkLifecycleListener> listener, const HelloConfig& cfg)
@@ -199,47 +217,40 @@ adb::Error Link::tap_key(uint32_t keycode) {
     return inject_key(keycode, kKeyActionUp);
 }
 
-adb::Error Link::inject_touch(uint8_t action, uint8_t pointer_id, uint16_t x,
-                              uint16_t y) {
+adb::Error Link::inject_touch_snapshot(const TouchSnapshot& snapshot) {
     if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+    if (snapshot.point_count > kTouchSnapshotMaxPoints) return adb::Error::Protocol;
 
-    // INPUT payload (§4.7): input_type, then the INPUT_TOUCH args. Fire-and-forget
-    // (TYPE=INPUT) — no req_id / no response. Coordinates are Tab5 panel coords.
-    uint8_t payload[1 + kInputTouchArgsLen];
-    payload[0] = kInputTouch;
-    payload[1] = action;
-    payload[2] = pointer_id;
-    payload[3] = 0;  // reserved
-    wr_u16(payload + 4, x);
-    wr_u16(payload + 6, y);
-
-    uint8_t frame[kFrameHeaderSize + sizeof(payload)];
-    write_header(frame, kTypeInput, /*flags=*/0, tx_seq_.fetch_add(1),
-                 static_cast<uint32_t>(sizeof(payload)));
-    std::memcpy(frame + kFrameHeaderSize, payload, sizeof(payload));
-    return stream_->write(frame, sizeof(frame));
-}
-
-adb::Error Link::inject_touch_batch(const TouchSample* samples, size_t n) {
-    if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
-    if (n == 0) return adb::Error::Ok;
-    if (n > kTouchBatchMax) n = kTouchBatchMax;  // count is a u8
-
-    // INPUT payload (§4.7): input_type, count, then n packed records.
-    const size_t payload_len = 2 + n * kTouchBatchRecordLen;
+    const size_t payload_len = 1 + touch_snapshot_size(snapshot);
     std::vector<uint8_t> frame(kFrameHeaderSize + payload_len);
-    write_header(frame.data(), kTypeInput, /*flags=*/0, tx_seq_.fetch_add(1),
+    write_header(frame.data(), kTypeInput, 0, tx_seq_.fetch_add(1),
                  static_cast<uint32_t>(payload_len));
     uint8_t* p = frame.data() + kFrameHeaderSize;
-    p[0] = kInputTouchBatch;
-    p[1] = static_cast<uint8_t>(n);
-    uint8_t* rec = p + 2;
+    *p++ = kInputTouchSnapshot;
+    write_touch_snapshot(p, snapshot);
+    return stream_->write(frame.data(), frame.size());
+}
+
+adb::Error Link::inject_touch_snapshot_batch(const TouchSnapshot* snapshots, size_t n) {
+    if (!stream_ || !stream_->is_open()) return adb::Error::StreamClosed;
+    if (n == 0) return adb::Error::Ok;
+    if (n > kTouchSnapshotBatchMax) n = kTouchSnapshotBatchMax;
+
+    size_t payload_len = 2;
     for (size_t i = 0; i < n; ++i) {
-        rec[0] = samples[i].action;
-        rec[1] = samples[i].pointer_id;
-        wr_u16(rec + 2, samples[i].x);
-        wr_u16(rec + 4, samples[i].y);
-        rec += kTouchBatchRecordLen;
+        if (snapshots[i].point_count > kTouchSnapshotMaxPoints) {
+            return adb::Error::Protocol;
+        }
+        payload_len += touch_snapshot_size(snapshots[i]);
+    }
+    std::vector<uint8_t> frame(kFrameHeaderSize + payload_len);
+    write_header(frame.data(), kTypeInput, 0, tx_seq_.fetch_add(1),
+                 static_cast<uint32_t>(payload_len));
+    uint8_t* p = frame.data() + kFrameHeaderSize;
+    *p++ = kInputTouchSnapshotBatch;
+    *p++ = static_cast<uint8_t>(n);
+    for (size_t i = 0; i < n; ++i) {
+        p = write_touch_snapshot(p, snapshots[i]);
     }
     return stream_->write(frame.data(), frame.size());
 }
