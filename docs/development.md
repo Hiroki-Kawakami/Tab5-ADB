@@ -42,6 +42,11 @@ developed without a board.
 nix develop -c ./run.sh
 ```
 
+Interactive keys are `s` to save the current panel image under `screenshots/`,
+`r` / `l` to rotate the host view, and `Esc` to quit. Screenshot filenames use
+the host timestamp and a numeric suffix when needed, so existing files are not
+overwritten.
+
 `run.sh simulator` only configures when `build/` is missing; use
 `nix develop -c cmake --fresh -S simulator -B build -G Ninja` to force a clean
 reconfigure after changing the simulator component graph.
