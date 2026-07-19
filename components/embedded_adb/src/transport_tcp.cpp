@@ -239,7 +239,15 @@ private:
                 if (off == 0 && at_boundary) return IoResult::Timeout;
                 continue;  // mid-packet: the rest is coming
             }
-            return IoResult::Error;  // close-notify / reset / error
+            if (n == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
+            if (n == 0) {
+                log("TLS peer closed connection");
+            } else {
+                char buf[96];
+                mbedtls_strerror(n, buf, sizeof(buf));
+                std::fprintf(stderr, "[adb/tcp] TLS read failed: %d %s\n", n, buf);
+            }
+            return IoResult::Error;
         }
         return IoResult::Ok;
     }
