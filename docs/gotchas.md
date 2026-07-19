@@ -66,7 +66,10 @@ to the code and its comments.
   the live C6 SDIO bus mid-transfer (`sdmmc_io_rw_extended ... 0x107`). This
   flipped once already: esp-hosted 1.4.0 ran the C6 on slot 0 (SD's default slot
   1 was free); esp-hosted 2.x moved the C6 to slot 1, silently breaking the SD
-  until it too moved to slot 0.
+  until it too moved to slot 0. IDF 6 permits only one initialization of that
+  host controller, so the Tab5 SD provider borrows the esp-hosted-owned host but
+  still initializes and deinitializes its own slot 0. Making slot deinit a no-op
+  breaks retry after a failed mount or card reinsertion.
 - **A `>65535` lwip TCP window silently gets rejected back to 5760** unless
   `LWIP_WND_SCALE` is enabled, which itself `depends on
   SPIRAM_TRY_ALLOCATE_WIFI_LWIP`. The mirror-over-Wi-Fi tuning in

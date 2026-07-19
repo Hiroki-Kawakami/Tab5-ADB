@@ -47,7 +47,9 @@ after a failed scan so Refresh can retry after card insertion.
 
 - Device: the Tab5 provider is a four-bit SDMMC implementation using slot 0 and
   on-chip LDO channel 4. Slot 1 remains reserved for the C6 esp-hosted Wi-Fi
-  link. The provider owns the power handle across a mounted session.
+  link. With esp-hosted enabled, the SD driver borrows its initialized SDMMC
+  host while still owning slot 0; without esp-hosted it manages the host itself.
+  The provider owns the power handle across a mounted session.
 - Simulator: `esp-devkit/bsp/simulator/sd_redirect.c` maps `/sd` onto
   `SIMULATOR_SDCARD_PATH`, defaulting to `simulator/sdcard/`. It redirects the
   POSIX calls used by the app, so browser and file-transfer logic exercise the
