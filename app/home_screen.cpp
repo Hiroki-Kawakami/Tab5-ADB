@@ -19,6 +19,26 @@
 
 namespace {
 
+const char *const kTcpKeyboardMap[] = {
+    " ", "1", "2", "3", " ", "\n",
+    " ", "4", "5", "6", LV_SYMBOL_BACKSPACE, "\n",
+    LV_SYMBOL_LEFT, "7", "8", "9", LV_SYMBOL_RIGHT, "\n",
+    LV_SYMBOL_CLOSE, "0", ".", ":", LV_SYMBOL_OK, "",
+};
+
+constexpr lv_buttonmatrix_ctrl_t kKeyW1 = LV_BUTTONMATRIX_CTRL_WIDTH_1;
+constexpr lv_buttonmatrix_ctrl_t kActionW1 = static_cast<lv_buttonmatrix_ctrl_t>(
+    LV_KEYBOARD_CTRL_BUTTON_FLAGS | LV_BUTTONMATRIX_CTRL_WIDTH_1);
+constexpr lv_buttonmatrix_ctrl_t kHideW1 = static_cast<lv_buttonmatrix_ctrl_t>(
+    LV_BUTTONMATRIX_CTRL_HIDDEN | LV_BUTTONMATRIX_CTRL_WIDTH_1);
+
+const lv_buttonmatrix_ctrl_t kTcpKeyboardCtrlMap[] = {
+    kHideW1, kKeyW1, kKeyW1, kKeyW1, kHideW1,
+    kHideW1, kKeyW1, kKeyW1, kKeyW1, kKeyW1,
+    kKeyW1, kKeyW1, kKeyW1, kKeyW1, kKeyW1,
+    kActionW1, kKeyW1, kKeyW1, kKeyW1, kActionW1,
+};
+
 // A transparent flex row used for card header lines (icon + title + extras).
 lv_obj_t *make_row(lv_obj_t *parent) {
     lv_obj_t *row = lv_obj_create(parent);
@@ -364,6 +384,9 @@ void HomeScreen::show_tcp_keyboard() {
     lv_obj_add_flag(tcp_keyboard_, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_set_size(tcp_keyboard_, PANEL_W, kKeyboardH);
     lv_obj_align(tcp_keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_map(tcp_keyboard_, LV_KEYBOARD_MODE_USER_1,
+                        kTcpKeyboardMap, kTcpKeyboardCtrlMap);
+    lv_keyboard_set_mode(tcp_keyboard_, LV_KEYBOARD_MODE_USER_1);
     lv_keyboard_set_textarea(tcp_keyboard_, tcp_addr_);
     // OK confirms = connect to the typed address. Deferred via lv_async_call so the
     // keyboard is torn down OUTSIDE its own in-flight event (tearing an lv_keyboard

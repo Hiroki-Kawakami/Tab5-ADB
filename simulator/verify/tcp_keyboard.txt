@@ -1,0 +1,22 @@
+# HomeScreen's ADB-over-TCP address keyboard keeps digits, dot, and colon on
+# one page. The simulator's saved Wi-Fi network auto-connects during startup.
+settle 2500
+
+tap 200 645
+settle
+capture simulator/verify/out/tcp_keyboard.jpg
+
+# Type 1.2:3 using the dedicated layout.
+tap 216 912
+tap 360 1227
+tap 360 912
+tap 504 1227
+tap 504 912
+settle
+capture simulator/verify/out/tcp_keyboard_input.jpg
+
+# Close without starting a connection.
+tap 72 1227
+settle
+capture simulator/verify/out/tcp_keyboard_closed.jpg
+quit
