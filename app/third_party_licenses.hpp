@@ -300,9 +300,8 @@ The following components are licensed under the Apache License, Version 2.0,
 the full text of which is reproduced once below:
 
   * ESP-IDF and the Espressif components used by this firmware:
-    esp_lcd_ili9881c, esp_lcd_touch_gt911, esp_lcd_st7123,
-    esp_lcd_touch_st7123, esp_codec_dev, esp_hosted, esp_wifi_remote,
-    esp_lvgl_port, and their transitive dependencies
+    esp_hosted, esp_wifi_remote, esp_lvgl_port, usb, and their transitive
+    dependencies
     - Copyright (c) Espressif Systems (Shanghai) Co., Ltd.
   * Mbed TLS - Copyright (c) The Mbed TLS Contributors / Arm Limited
   * Android Debug Bridge (adb) - Copyright (c) The Android Open Source Project
