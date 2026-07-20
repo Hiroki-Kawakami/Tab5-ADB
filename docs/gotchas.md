@@ -119,8 +119,9 @@ to the code and its comments.
   `jpeg_ppa_pipeline_new` registers its PPA client (grabbing internal DMA)
   *before* creating the JPEG engine, so at screen-stack depth (where
   esp-hosted/Wi-Fi already hold most internal RAM) the engine alloc fails.
-  Anything that decodes deep in the navigation stack (image preview) must use
-  the bare Layer-1 whole-frame decoder, never the Layer-2 PPA pipeline.
+  Throughput-oriented screens using these drivers must account for their stack
+  depth. File previews and PNG screenshot paths use the CPU `image_framework`
+  decoder; `ScreencapPreview` retains PPA only for its optional JPEG path.
 
 ## Android agent / app_process (`android-agent/src/`)
 

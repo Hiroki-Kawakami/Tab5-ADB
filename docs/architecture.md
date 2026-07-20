@@ -15,6 +15,7 @@ components/                  # PROJECT-SPECIFIC SHARED components (both targets)
 esp-devkit/                   # git submodule: reusable cross-project infrastructure
   bsp/                          board support (bsp_*) — see bsp.md
   ui_framework/                 LVGL C++ helpers, Screen base + ScreenManager
+  libs/image_framework/         streaming image decode/resize pipeline
   libs/jpeg_decode_enhanced/    enhanced P4 HW JPEG decode
   idf_compat/                   host ESP-IDF compatibility component
   sim_harness/                  scripted headless simulator driver

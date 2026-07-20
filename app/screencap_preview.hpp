@@ -9,7 +9,7 @@
 #include "adb_raw_stream.hpp"
 #include "esp_heap_caps.h"
 #include "lvgl.hpp"
-#include "png_decode.hpp"  // PsramAllocator + decode_png_downscale_rgb565
+#include "psram_allocator.hpp"
 
 // A low-rate, agent-free preview of the device screen for ADBDeviceScreen.
 //
@@ -20,11 +20,8 @@
 //
 // The win over raw RGBA (screencap with no -p) is bandwidth: a UI screenshot
 // PNG is ~0.2-2 MB vs ~10 MB raw, so the preview doesn't eat the link the mirror
-// needs. PNG's row filters only reference the *previous* reconstructed row, so
-// decoding never materializes the full image: we hold the compressed PNG, then
-// inflate row-by-row keeping just two scanlines and downscale on the fly into a
-// small RGB565 buffer (see screencap_preview.cpp). Interlaced PNG would break the
-// row-streaming, but screencap never emits it (we verify IHDR.interlace == 0).
+// needs. PNG decoding streams through image_framework into a small RGB565
+// buffer, so the native-resolution bitmap is never materialized.
 //
 // App-specific (depends on adb::Client::open_stream), so it lives in app/.
 class ScreencapPreview : public adb::StreamListener,

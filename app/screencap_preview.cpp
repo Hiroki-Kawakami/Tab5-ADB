@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "image_decode.hpp"
 #include "jpeg_ppa_pipeline.h"
 
 static const char* TAG = "screencap_preview";
@@ -253,10 +254,20 @@ void ScreencapPreview::decode_loop() {
             ok = decode_jpeg(d, n, idx);
         } else {
             last_fmt_ = "png";
-            ok = is_png && app::decode_png_downscale_rgb565(
-                              d, n, reinterpret_cast<uint16_t*>(img_buf_[idx]),
-                              max_w_, max_h_, &frame_w_[idx], &frame_h_[idx],
-                              &src_w_, &src_h_);
+            app::ImageDecodeResult result;
+            imgf_err_t err = is_png
+                                 ? app::decode_image_rgb565(d, n, img_buf_[idx], buf_size_,
+                                                            max_w_, max_h_, &result)
+                                 : IMGF_ERR_UNSUPPORTED;
+            ok = err == IMGF_OK && result.format == IMGF_FMT_PNG;
+            if (ok) {
+                frame_w_[idx] = result.frame_w;
+                frame_h_[idx] = result.frame_h;
+                src_w_ = result.src_w;
+                src_h_ = result.src_h;
+            } else {
+                ESP_LOGW(TAG, "PNG decode failed: %s", imgf_err_to_str(err));
+            }
         }
         // We asked for `-j` but got something else (or nothing) → the device lacks
         // it; drop to PNG for the rest of the session.

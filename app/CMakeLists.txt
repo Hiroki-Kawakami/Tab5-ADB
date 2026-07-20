@@ -16,5 +16,6 @@ idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS "."
     REQUIRES bsp ui_framework lvgl adb agent_link wifi
+             image_framework
              jpeg_decode_enhanced esp_driver_jpeg esp_driver_ppa
              esp_timer zlib term_emu nvs_flash)

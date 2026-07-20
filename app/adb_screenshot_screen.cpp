@@ -17,6 +17,7 @@
 #include "adb_app.hpp"
 #include "bsp.h"
 #include "file_preview.hpp"  // preview_chrome
+#include "image_decode.hpp"
 #include "lvgl.hpp"
 #include "modal.hpp"
 #include "sysclock.hpp"
@@ -235,15 +236,22 @@ void ADBScreenshotScreen::decode_loop() {
 
         const uint8_t* d = png_.data();
         size_t n = png_.size();
-        bool is_png = n >= 8 && d[0] == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G';
-        bool ok = is_png && app::decode_png_downscale_rgb565(
-                                d, n, reinterpret_cast<uint16_t*>(img_buf_), kMaxW,
-                                kMaxH, &frame_w_, &frame_h_, &src_w_, &src_h_);
+        app::ImageDecodeResult result;
+        imgf_err_t err = app::decode_image_rgb565(d, n, img_buf_, buf_size_,
+                                                   kMaxW, kMaxH, &result);
+        if (err == IMGF_OK && result.format != IMGF_FMT_PNG) err = IMGF_ERR_UNSUPPORTED;
+        bool ok = err == IMGF_OK;
+        if (ok) {
+            frame_w_ = result.frame_w;
+            frame_h_ = result.frame_h;
+            src_w_ = result.src_w;
+            src_h_ = result.src_h;
+        }
         if (ok)
             ESP_LOGI(TAG, "screenshot %dx%d -> %dx%d %zukB", src_w_, src_h_, frame_w_,
                      frame_h_, n / 1024);
         else
-            ESP_LOGW(TAG, "screenshot decode failed (%zu B)", n);
+            ESP_LOGW(TAG, "screenshot decode failed: %s (%zu B)", imgf_err_to_str(err), n);
         // Keep png_ — Save writes the full-resolution PNG; the next capture clears it.
 
         // weak, not shared_from_this(): an adb disconnect could give us work while

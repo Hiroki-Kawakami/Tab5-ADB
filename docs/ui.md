@@ -1,10 +1,9 @@
 # App UI (`app/`)
 
-`app/` is a single shared component: LVGL screens + the pure-logic modules they
-call into (`device_info`, `apk_info`, `media_session`, `sysclock`, `png_decode`
-— all host-tested in `app/test/`, no LVGL/adb deps). This page covers the
-cross-cutting UI patterns; screen-by-screen behavior is best read from the
-source (one `.cpp`/`.hpp` pair per screen).
+`app/` is a single shared component: LVGL screens plus their pure-logic modules
+(`device_info`, `apk_info`, `media_session`, `sysclock`, `image_decode`, …).
+This page covers the cross-cutting UI patterns; screen-by-screen behavior is
+best read from the source (one `.cpp`/`.hpp` pair per screen).
 
 ## Screen lifecycle & threading — the pattern every screen follows
 
@@ -108,15 +107,12 @@ transfer quietly instead of touching freed UI — the reason the
 `lv_obj_add_event_fn` cleanup-ordering fix in
 [gotchas.md](gotchas.md#lvgl) was needed.
 
-APK manifest parsing (`app/apk_info.{hpp,cpp}`) and image decoding
-(`app/png_decode.{hpp,cpp}` + the `jpeg_decode_enhanced` Layer-1 whole-frame
-decoder) both run **locally/offline where possible** — APK parsing needs no
-device at all; image preview decodes off a low-priority Core-1 task and only
-ever hands LVGL a small downscaled RGB565 frame, never the native-resolution
-bitmap (mirrors the screenshot/screencap-preview decode split). Image preview
-deliberately uses the bare JPEG decoder, not the PPA pipeline — see
-[gotchas.md](gotchas.md#display--jpeg) (internal DMA RAM contention at
-screen-stack depth).
+APK manifest parsing (`app/apk_info.{hpp,cpp}`) and image decoding both run
+**locally/offline where possible** — APK parsing needs no device at all; file
+previews and PNG screenshot paths stream `image_framework` through the shared
+`app/image_decode` adapter on a low-priority Core-1 task and only hand LVGL a
+small RGB565 frame. `ScreencapPreview` retains its optional `-j` JPEG/PPA path,
+and the mirror keeps its throughput-oriented decoder.
 
 ## Parser contract (device_info, apk_info, media_session)
 

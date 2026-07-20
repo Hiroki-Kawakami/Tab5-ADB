@@ -4,22 +4,19 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <cerrno>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
 
 #include "adb_app.hpp"
 #include "adb_file_browser_screen.hpp"
-#include "driver/jpeg_decode.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "jpeg_decode_enhanced.h"
+#include "image_decode.hpp"
 #include "modal.hpp"
 #include "resources/resources.h"
 #include "screen_manager.hpp"
@@ -28,8 +25,6 @@
 namespace {
 const char* TAG = "image_preview";
 constexpr size_t kReadChunk = 16 * 1024;  // SD fast-path chunk (cache-aligned buffer)
-
-constexpr uint32_t align16(uint32_t v) { return (v + 15u) & ~15u; }
 
 bool adb_online() {
     adb::Client* c = app::adb_client();
@@ -60,17 +55,6 @@ void ImagePreviewScreen::stop_engine() {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
         decode_task_ = nullptr;  // sems freed in the dtor (a late on_stream_close
                                  // may still give work_sem_ while the screen is alive)
-    }
-    // The decode task (sole owner of the JPEG decoder) is joined — release here.
-    if (jpeg_dec_) {
-        jpeg_enh_strip_decoder_del(static_cast<jpeg_enh_strip_decoder_handle_t>(jpeg_dec_));
-        jpeg_dec_ = nullptr;
-        jpeg_dec_max_ = 0;
-    }
-    if (decode_buf_) {
-        heap_caps_free(decode_buf_);
-        decode_buf_ = nullptr;
-        decode_buf_size_ = 0;
     }
 }
 
@@ -109,7 +93,7 @@ void ImagePreviewScreen::build() {
     lv_obj_set_style_pad_row(actions, 16, 0);
     rebuild_actions(actions);
 
-    buf_size_ = (size_t)kMaxW * kMaxH * 2;  // RGB565, sized for the bounding box
+    buf_size_ = (size_t)kMaxW * kMaxH * 2;
     img_buf_ = static_cast<uint8_t*>(heap_caps_calloc(buf_size_, 1, MALLOC_CAP_SPIRAM));
     if (!img_buf_) ESP_LOGE(TAG, "PSRAM alloc failed (%zu B)", buf_size_);
 
@@ -179,12 +163,8 @@ void ImagePreviewScreen::start_load() {
         decode_task_ = t;
     }
 
-    // Pre-flight: the whole compressed file is held in one contiguous PSRAM block
-    // (both decoders need the full buffer). The PsramAllocator vector aborts on
-    // OOM (-fno-exceptions can't throw), so refuse oversize files here instead of
-    // crashing. Check the largest free block, not total free — fragmentation at
-    // this nav depth is what bounds us. Headroom covers the decoders' own scratch.
-    constexpr size_t kHeadroom = 1024 * 1024;  // 1 MB
+    // data_.reserve() aborts on OOM because device builds have no exceptions.
+    constexpr size_t kHeadroom = 1024 * 1024;
     size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     if (ref_.size && (size_t)ref_.size + kHeadroom > largest) {
         ESP_LOGW(TAG, "image too large: %u B, largest free PSRAM block %zu B",
@@ -329,14 +309,7 @@ void ImagePreviewScreen::decode_loop() {
         if (ok) {
             const uint8_t* d = data_.data();
             size_t n = data_.size();
-            bool is_png = n >= 8 && d[0] == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G';
-            bool is_jpeg = n >= 2 && d[0] == 0xFF && d[1] == 0xD8;
-            if (is_jpeg)
-                ok = decode_jpeg(d, n);
-            else if (is_png)
-                ok = decode_png(d, n);
-            else
-                ok = false;
+            ok = decode_image(d, n);
         }
         if (ok)
             ESP_LOGI(TAG, "image %dx%d -> %dx%d %zukB", src_w_, src_h_, frame_w_, frame_h_,
@@ -363,85 +336,18 @@ void ImagePreviewScreen::decode_loop() {
     vTaskDelete(nullptr);
 }
 
-bool ImagePreviewScreen::decode_png(const uint8_t* data, size_t len) {
-    return app::decode_png_downscale_rgb565(data, len, reinterpret_cast<uint16_t*>(img_buf_),
-                                            kMaxW, kMaxH, &frame_w_, &frame_h_, &src_w_,
-                                            &src_h_);
-}
-
-bool ImagePreviewScreen::decode_jpeg(const uint8_t* data, size_t len) {
-    jpeg_decode_picture_info_t pi;
-    if (jpeg_decoder_get_info(data, len, &pi) != ESP_OK) {
-        ESP_LOGW(TAG, "jpeg header parse failed");
+bool ImagePreviewScreen::decode_image(const uint8_t* data, size_t len) {
+    app::ImageDecodeResult result;
+    imgf_err_t err = app::decode_image_rgb565(data, len, img_buf_, buf_size_,
+                                               kMaxW, kMaxH, &result);
+    if (err != IMGF_OK) {
+        ESP_LOGW(TAG, "image decode failed: %s", imgf_err_to_str(err));
         return false;
     }
 
-    // Whole-frame jpeg_decode_enhanced decoder (Layer 1, ring_count=0): the JPEG
-    // decoder WITHOUT the PPA pipeline. The PPA pipeline registers its PPA client
-    // (internal DMA) before creating the engine, which fails for lack of internal
-    // RAM here; the bare decoder matches the mirror's footprint, which works.
-    uint32_t pw = align16(pi.width), ph = align16(pi.height);
-    uint32_t maxdim = std::max(pw, ph);
-    if (!jpeg_dec_ || jpeg_dec_max_ < maxdim) {
-        if (jpeg_dec_)
-            jpeg_enh_strip_decoder_del(static_cast<jpeg_enh_strip_decoder_handle_t>(jpeg_dec_));
-        jpeg_dec_ = nullptr;
-        jpeg_enh_strip_decoder_cfg_t cfg = {};
-        cfg.decode.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-        cfg.decode.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // R-high RGB565 for LVGL
-        cfg.decode.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
-        cfg.decode.yuv_full_range = true;  // JFIF base is full-range
-        cfg.max_pic_w = pw;
-        cfg.max_pic_h = ph;
-        cfg.ring_count = 0;  // whole-frame mode (no PPA, no strip ring)
-        cfg.timeout_ms = 2000;
-        jpeg_enh_strip_decoder_handle_t d = nullptr;
-        if (jpeg_enh_strip_decoder_new(&cfg, &d) != ESP_OK) {
-            ESP_LOGW(TAG, "jpeg decoder new failed (%ux%u)", (unsigned)pi.width,
-                     (unsigned)pi.height);
-            return false;
-        }
-        jpeg_dec_ = d;
-        jpeg_dec_max_ = maxdim;
-    }
-
-    // Full-res RGB565 decode target (MCU-padded, 64-byte aligned for the HW path).
-    size_t need = (size_t)pw * ph * 2;
-    if (decode_buf_size_ < need) {
-        if (decode_buf_) heap_caps_free(decode_buf_);
-        decode_buf_ = static_cast<uint8_t*>(heap_caps_aligned_alloc(64, need, MALLOC_CAP_SPIRAM));
-        decode_buf_size_ = decode_buf_ ? need : 0;
-        if (!decode_buf_) {
-            ESP_LOGW(TAG, "decode buffer alloc failed (%zu B)", need);
-            return false;
-        }
-    }
-
-    jpeg_enh_frame_info_t info = {};
-    if (jpeg_enh_decoder_process(static_cast<jpeg_enh_strip_decoder_handle_t>(jpeg_dec_), data,
-                                 len, decode_buf_, decode_buf_size_, &info) != ESP_OK) {
-        ESP_LOGW(TAG, "jpeg decode process failed");
-        return false;
-    }
-
-    // CPU nearest-neighbour downscale: origin_w×origin_h valid image (row stride =
-    // the MCU-padded info.pic_w) -> the aspect-fitted img_buf_ frame.
-    src_w_ = (int)info.origin_w;
-    src_h_ = (int)info.origin_h;
-    app::aspect_fit(src_w_, src_h_, kMaxW, kMaxH, &frame_w_, &frame_h_);
-    const uint16_t* src = reinterpret_cast<const uint16_t*>(decode_buf_);
-    const int stride_px = (int)info.pic_w;
-    uint16_t* dst = reinterpret_cast<uint16_t*>(img_buf_);
-    for (int y = 0; y < frame_h_; y++) {
-        int sy = (int)(((2 * y + 1) * (long long)src_h_) / (2 * frame_h_));
-        if (sy >= src_h_) sy = src_h_ - 1;
-        const uint16_t* srow = src + (size_t)sy * stride_px;
-        uint16_t* drow = dst + (size_t)y * frame_w_;
-        for (int x = 0; x < frame_w_; x++) {
-            int sx = (int)(((2 * x + 1) * (long long)src_w_) / (2 * frame_w_));
-            if (sx >= src_w_) sx = src_w_ - 1;
-            drow[x] = srow[sx];
-        }
-    }
+    src_w_ = result.src_w;
+    src_h_ = result.src_h;
+    frame_w_ = result.frame_w;
+    frame_h_ = result.frame_h;
     return true;
 }

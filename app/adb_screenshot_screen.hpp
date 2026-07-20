@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "adb.hpp"  // adb::Stream, adb::StreamListener, adb::Error
-#include "png_decode.hpp"  // PsramAllocator
+#include "psram_allocator.hpp"
 #include "screen.hpp"
 
 // One-shot device screenshot, reached from ADBDeviceScreen's "Screenshot" tool
@@ -19,8 +19,8 @@
 //
 // The capture/decode split mirrors ScreencapPreview (the agent-free preview):
 // PNG bytes accumulate on the adb reader thread, a low-priority decode task
-// inflates+downscales them, and present() flips the result onto an lv_image on
-// the LVGL thread. Unlike the preview this is a single shot (no interval timer)
+// streams image_framework into a small frame, and present() flips it onto an
+// lv_image on the LVGL thread. Unlike the preview this is a single shot (no interval timer)
 // and the full PNG is retained so Save writes the device-resolution image.
 class ADBScreenshotScreen : public Screen, public adb::StreamListener {
 public:
