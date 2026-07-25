@@ -8,7 +8,7 @@ app/                         # SHARED  app logic / screens (a single component)
   agent/                     #   embedded tab5adb-agent jar (agent_jar.{h,c}, xxd -i of the built jar)
   test/                      #   host unit tests (parsers) + run.sh — no phone, no LVGL
 components/                  # PROJECT-SPECIFIC SHARED components (both targets)
-  embedded_adb/  adb/           ADB host-side client — see adb.md
+  adb/                          git submodule: esp-adb-host component + private core — see adb.md
   agent_link/                   Tab5-side link to tab5adb-agent — see agent.md
   wifi/                         Wi-Fi STA connection manager — see components/wifi/README.md + docs/wifi.md
   term_emu/                     VT100/xterm-subset terminal emulator (no LVGL/adb deps)
@@ -29,11 +29,14 @@ Rule of thumb: **project-specific shared → top-level `components/` (or `app/`)
 reusable board/simulator/UI infrastructure → `esp-devkit`; target-only → under
 that target's build root.** Changes intended for several firmware projects must
 land in esp-devkit first, then this repository advances the submodule pointer.
+`components/adb` is the external `esp-adb-host` dependency: ADB implementation
+changes land there first, then this repository advances that submodule pointer.
 
 Every shared component with non-trivial docs owns a `README.md` (front door) and
 a `docs/<surface>.md` per API surface (`components/adb/`, `components/wifi/`).
-The esp-devkit-owned surfaces are documented in that submodule; this repository
-only documents its integration decisions and app-specific use of them.
+The submodule-owned surfaces are documented in their respective repositories;
+this repository only documents its integration decisions and app-specific use
+of them.
 
 ## Components are self-describing (`idf_component_register`)
 
@@ -67,7 +70,7 @@ question: **does Espressif already define this API?**
   (framebuffer, touch point, brightness, USB host, Wi-Fi radio bring-up) →
   either put it behind the BSP (if it's truly generic hardware I/O — display,
   touch, audio, SD) or give the owning component its own device/simulator
-  backend split (`embedded_adb`'s USB transport, `wifi`'s backend seam) when
+  backend split (`adb`'s private USB transport, `wifi`'s backend seam) when
   the API is too large/specific to reimplement on the host. Keep any such
   surface small and demand-driven; don't pre-build a speculative one.
 

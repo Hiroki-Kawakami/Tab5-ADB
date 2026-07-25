@@ -5,12 +5,12 @@
 // (esp_netif / esp_event / esp_wifi on device, a deterministic fake in the
 // simulator), scanning, connecting, persisting the last network, and reporting
 // connection state. It exists so the Tab5 can join a LAN — the prerequisite for
-// the eventual ADB-over-TCP transport (which is an independent `embedded_adb`
+// the ADB-over-TCP transport (which is private to the independent `adb`
 // concern: a plain socket once an IP is up).
 //
 // Layering: this is the single device/simulator split inside the component — the
 // esp_wifi API is too large to reimplement on the host (the same call the project
-// already makes for embedded_adb's usb_host transport), so the backend is
+// already makes for adb's private usb_host transport), so the backend is
 // ESP_PLATFORM-branched (backend_espwifi.cpp vs backend_sim.cpp) rather than an
 // idf_compat esp_wifi shim. The simulator backend is a scriptable fake so
 // simverify stays deterministic (no real host-network access).

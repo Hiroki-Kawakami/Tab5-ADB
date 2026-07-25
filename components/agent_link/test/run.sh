@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build & run the agent_link host test (the Tab5 role, played by the real
-# embedded_adb/adb + agent_link stack over libusb vs a real phone — no GUI).
+# adb + agent_link stack over libusb vs a real phone — no GUI).
 #
 # Run inside the nix dev shell, from anywhere:
 #   nix develop -c components/agent_link/test/run.sh [jar-path]
@@ -45,22 +45,36 @@ done
 bin="$out/$TEST"
 echo "[build] $TEST"
 g++ -std=c++17 \
-    -I"$comp/inc" -I"$comps/adb/inc" -I"$comps/embedded_adb/inc" -I"$cc/include" \
+    -I"$comp/inc" -I"$comps/adb/inc" \
+    -I"$comps/adb/src/core/include" -I"$comps/adb/src/core" \
+    -I"$cc/include" \
     "$test_src" \
     "$comp/src/agent_link.cpp" \
     "$comps/adb/src/adb_client.cpp" "$comps/adb/src/adb_error.cpp" \
+    "$comps/adb/src/adb_pairing.cpp" \
     "$comps/adb/src/adb_raw_stream.cpp" "$comps/adb/src/adb_shell.cpp" \
     "$comps/adb/src/adb_sync.cpp" \
-    "$comps/embedded_adb/src/adb_protocol.cpp" "$comps/embedded_adb/src/adb_crypto.cpp" \
-    "$comps/embedded_adb/src/adb_keystore.cpp" "$comps/embedded_adb/src/adb_connection.cpp" \
-    "$comps/embedded_adb/src/adb_stream.cpp" "$comps/embedded_adb/src/transport_libusb.cpp" \
-    "$comps/embedded_adb/src/transport_tcp.cpp" \
+    "$comps/adb/src/core/adb_protocol.cpp" "$comps/adb/src/core/adb_crypto.cpp" \
+    "$comps/adb/src/core/adb_keystore.cpp" "$comps/adb/src/core/adb_spake2.cpp" \
+    "$comps/adb/src/core/adb_pairing_crypto.cpp" \
+    "$comps/adb/src/core/adb_pairing_protocol.cpp" \
+    "$comps/adb/src/core/adb_pairing.cpp" \
+    "$comps/adb/src/core/adb_connection.cpp" "$comps/adb/src/core/adb_stream.cpp" \
+    "$comps/adb/src/core/transport_libusb.cpp" \
+    "$comps/adb/src/core/adb_tcp_socket.cpp" \
+    "$comps/adb/src/core/adb_tls_stream.cpp" \
+    "$comps/adb/src/core/transport_tcp.cpp" \
     $objs \
     $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson libjpeg) \
     -lpthread -o "$bin"
 
 # Default the jar path to build.sh's output unless the caller overrides argv[1].
 jar=${1:-"$root/android-agent/build/tab5adb-agent.jar"}
+
+if [ "${BUILD_ONLY:-0}" = 1 ]; then
+    echo "[build-only] $TEST"
+    exit 0
+fi
 
 echo "[run] adb kill-server; $TEST"
 adb kill-server >/dev/null 2>&1 || true

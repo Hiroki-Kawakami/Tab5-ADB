@@ -33,7 +33,7 @@ simulator modeled on `NameCardKnot`.
 - [`docs/bsp.md`](docs/bsp.md) — the `esp-devkit` BSP integration (display/
   touch/audio/SD, the DisplayManager touch callback).
 - [`docs/adb.md`](docs/adb.md) — the ADB host-side client
-  (`embedded_adb`/`adb`/`agent_link` layering, USB/TCP transport design).
+  (`adb` public/private layering, `agent_link`, USB/TCP transport design).
 - [`docs/agent.md`](docs/agent.md) — `tab5adb-agent` (the Android-side
   companion) and the Tab5-side mirror/media/input pipeline.
 - [`docs/ui.md`](docs/ui.md) — `app/`'s screen navigation map and the
@@ -43,7 +43,8 @@ simulator modeled on `NameCardKnot`.
 Some components already own their own docs — read those first for API detail,
 they take priority over anything said here:
 - `components/adb/README.md` + `components/adb/docs/*.md` — the app-facing ADB
-  API (`Client`/`Shell`/`Sync`/`Stream`) contract.
+  API (`Client`/`Shell`/`Sync`/`Stream`) contract, owned by the
+  `esp-adb-host` submodule.
 - `components/wifi/README.md` + `components/wifi/docs/wifi.md` — `wifi::Manager`.
 - `esp-devkit/libs/jpeg_decode_enhanced/README.md` — the enhanced JPEG decode API.
 - `android-agent/README.md` + `android-agent/docs/protocol.md` +

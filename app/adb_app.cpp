@@ -9,8 +9,6 @@
 #include <utility>
 
 #include "adb.hpp"  // adb::Client, adb::ClientListener
-#include "adb_keystore.hpp"
-#include "adb_transport.hpp"  // adb::set_usb_host_power_hook
 #include "agent_client.hpp"
 #include "bsp.h"
 #include "display_manager.hpp"
@@ -60,11 +58,7 @@ void pair_task(void *arg) {
     std::unique_ptr<PairTaskContext> context(
         static_cast<PairTaskContext *>(arg));
     adb::PairingResult result{adb::PairingError::Crypto, {}};
-    auto key = adb::load_or_create_key();
-    if (key) {
-        result = adb::pair_tcp(
-            context->host, context->port, context->code, *key);
-    }
+    result = adb::pair_tcp(context->host, context->port, context->code);
     std::fill(context->code.begin(), context->code.end(), '\0');
     auto callback = std::move(context->on_result);
     lv_async_call([
@@ -252,7 +246,7 @@ void adb_app() {
 
     // Teach the USB transport how to reset the host port (called once after the
     // host stack is up, so a device plugged in before Connect re-attaches with a
-    // clean connect edge). embedded_adb stays board-agnostic — it knows only
+    // clean connect edge). adb stays board-agnostic — it knows only
     // "reset"; the VBUS power-cycle (USB5V_EN off→settle→on) lives here. No-op on
     // the simulator (the libusb transport never calls it).
     adb::set_usb_host_reset_hook([] {

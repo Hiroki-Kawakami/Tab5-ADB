@@ -152,7 +152,7 @@ Created/destroyed with the mirror screen; only used in the Tab5Only audio mode
 `components/agent_link/` is the Tab5 end of the protocol
 (`android-agent/docs/protocol.md`): one TYPE-multiplexed ADB stream carrying
 control + video + audio. **Dependency direction:** `agent_link` (app-specific)
-→ `adb` (generic) → `embedded_adb` — the generic `adb::Client` never knows
+→ `adb` (generic; wire engine private) — the generic `adb::Client` never knows
 `agent_link` exists (see [adb.md](adb.md#adbs-generic-raw-stream--why-it-exists)).
 `Link::open()` opens `adb::Client::open_stream("localabstract:tab5adb-agent",
 …)` and layers framing on top; unlike `Sync`'s worker+pipe, the parser is

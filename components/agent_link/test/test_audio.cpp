@@ -1,5 +1,5 @@
 // Headless test for the tab5adb-agent AUDIO stream (§6), the Tab5 role played by
-// the real embedded_adb/adb + agent_link stack over libusb vs a real Android device
+// the real adb + agent_link stack over libusb vs a real Android device
 // — NO LVGL/SDL. Same bring-up as test_mirror (connect -> Sync::push the jar ->
 // open_shell app_process -> Link::open -> HELLO), then:
 //

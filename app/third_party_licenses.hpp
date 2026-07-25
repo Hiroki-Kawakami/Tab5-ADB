@@ -26,7 +26,7 @@ share the single copy of that license at the end of this document.
 ACKNOWLEDGEMENTS
 ==========================================================================
 
-The ADB host client (the embedded_adb / adb components) and the Android
+The ADB host client (`adb` component) and the Android
 companion (android-agent / tab5adb-agent) in this project were written
 independently for this firmware, but they learned from two reference projects:
 

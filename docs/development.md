@@ -8,7 +8,7 @@ shell is inherited from the pinned `esp-devkit` submodule. **Always run commands
 through `nix develop -c <cmd>`** (or from inside a `nix develop` shell) — never
 invoke `idf.py` / `cmake` / `esptool` directly.
 
-Initialize the submodule after cloning an existing checkout with
+Initialize the submodules after cloning an existing checkout with
 `git submodule update --init --recursive`. Nix flakes only see git-tracked
 files. After adding new files, `git add` them
 (staging is enough) or `nix develop` won't pick up `flake.nix` changes / the
@@ -106,8 +106,8 @@ header silently keeps testing the old agent.
 ## Host test runners
 
 Every component with host-testable logic has its own `test/run.sh`, invoked via
-`nix develop -c <path>/run.sh` with `TEST=<name>` selecting `test/<name>.cpp`
-(default is the first/no-phone test). Artifacts go to each `test/build/`
+`nix develop -c <path>/run.sh` with `TEST=<name>` selecting a test source.
+Artifacts go to each `test/build/`
 (gitignored).
 
 | Component | Runner | Notes |
@@ -115,8 +115,7 @@ Every component with host-testable logic has its own `test/run.sh`, invoked via
 | `app/` (parsers) | `app/test/run.sh` | `test_device_info` / `test_apk_info` / `test_media_session` / `test_sysclock` — no phone, no LVGL |
 | `esp-devkit/bsp/` | `esp-devkit/bsp/test/run.sh` | `test_audio_dsp` (default, pure math) / `test_bsp_audio` (dispatch policy vs stub) / `test_sdl_audio` (audible pacing check) — no device |
 | `components/term_emu/` | `components/term_emu/test/run.sh` | VT parser + grid, incl. a chunk-split fuzz — no phone |
-| `components/embedded_adb/` | `components/embedded_adb/test/run.sh` | `test_crypto` (default), `test_spake2`, `test_spake2_boringssl`, `test_pairing_crypto_boringssl`, `test_tls_exporter_boringssl`, and `test_pairing_protocol` need no phone; `test_connect` / `test_shell` need an authorized phone over libusb; `test_connect_tcp` uses `TAB5ADB_TCP_TARGET=host:port`; `test_pair_tcp` uses `TAB5ADB_PAIR_TARGET=host:port` and `TAB5ADB_PAIR_CODE` |
-| `components/adb/` | `components/adb/test/run.sh` | `test_client` (default) / `test_shell` / `test_sync` — all need a phone connected + authorized over libusb |
+| `components/adb/` | `components/adb/test/run.sh` | The default `unit` suite runs the six offline private-core tests. Public API tests `test_client` / `test_shell` / `test_sync` need an authorized phone; `core/test_connect` / `core/test_shell` use libusb; `core/test_connect_tcp` and `core/test_pair_tcp` use the corresponding target/code environment variables. `BUILD_ONLY=1` links one selected test without touching a phone or adb-server. |
 | `components/agent_link/` | `components/agent_link/test/run.sh` | `test_hello` (default) / `test_mirror` — libusb vs a real phone; decodes strips with host libjpeg |
 | `android-agent/` | `android-agent/test/run.sh` | host-JVM `ProjectionTest` — no phone |
 
@@ -128,8 +127,8 @@ the simulator links BoringSSL. To exercise the complete pairing exchange
 against a phone while its six-digit dialog is open:
 
 ```sh
-TAB5ADB_PAIR_TARGET=PAIR_HOST:PAIR_PORT \
-TAB5ADB_PAIR_CODE=PAIR_CODE \
-TEST=test_pair_tcp \
-nix develop -c components/embedded_adb/test/run.sh
+ADB_PAIR_TARGET=PAIR_HOST:PAIR_PORT \
+ADB_PAIR_CODE=PAIR_CODE \
+TEST=core/test_pair_tcp \
+nix develop -c components/adb/test/run.sh
 ```

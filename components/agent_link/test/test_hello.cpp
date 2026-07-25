@@ -1,6 +1,6 @@
 // Headless test for the tab5adb-agent HELLO handshake (run on the desktop
 // against a real Android device — the Tab5 role, played by the real
-// embedded_adb/adb stack over libusb, NO LVGL/SDL). This is testing.md's slices
+// adb stack over libusb, NO LVGL/SDL). This is testing.md's slices
 // A–C end to end: connect_usb -> Sync::push the agent jar -> launch it via a
 // Shell (app_process) -> agent_link::Link::open localabstract:tab5adb-agent ->
 // answer the agent's HELLO -> verify on_link_hello fires and the agent logs

@@ -1,8 +1,8 @@
 # 通信仕様 — Tab5 ⇄ tab5adb-agent
 
 Tab5（ESP32-P4。組み込み ADB ホスト）と Android 側の `tab5adb-agent`（app_process で起動する
-サーバ）の間で交わす通信の契約。**この文書を単一の情報源 (SoT) とし、Tab5 側（`embedded_adb`/
-`adb` + app）と agent 側はこれに従う。** プロトコルを変更するときは、まずこの文書を更新してから
+サーバ）の間で交わす通信の契約。**この文書を単一の情報源 (SoT) とし、Tab5 側（`adb` + app）と
+agent 側はこれに従う。** プロトコルを変更するときは、まずこの文書を更新してから
 実装する。
 
 - すべての多バイト値は **リトルエンディアン (LE)**（ESP32-P4 / Android-ARM とも LE ネイティブ）。

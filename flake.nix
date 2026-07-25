@@ -36,6 +36,7 @@
       in {
         devShells.default = pkgs.mkShell {
           inputsFrom = [ esp-devkit.devShells.${system}.default ];
+          ADB_IDF_COMPAT_DIR = "${esp-devkit.outPath}/idf_compat";
           packages = [
             pkgs.libusb1
             pkgs.mbedtls_4

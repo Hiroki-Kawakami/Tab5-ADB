@@ -1,28 +1,30 @@
-# ADB host-side client (`embedded_adb`, `adb`, `agent_link`)
+# ADB host-side client (`adb`, `agent_link`)
 
 Tab5 plays the **ADB host** (like WebADB / ya-webadb): it drives a
 USB- or TCP-connected Android device. Only the host side of the protocol is
 implemented, modeled on the upstream ADB sources (a read-only local reference,
 not vendored — see `[[local-reference-clones]]` in memory).
 
-Two components, split so the low-level engine can keep thread-model-agnostic
-host tests while the app-facing layer is free to spend a FreeRTOS task on the
-reader loop:
+The host stack is one `adb` IDF component, sourced from the pinned
+`esp-adb-host` submodule at `components/adb`. Its public layer may spend FreeRTOS
+tasks on lifecycle and service work, while its private `src/core` engine remains
+thread-model-agnostic and can be compiled directly by host tests:
 
 ```
 app/                 UI, marshals callbacks onto the LVGL thread
-  └── adb            app-facing object API: Client/Shell/Sync/Stream, owns the reader task
-        └── embedded_adb   protocol engine (AdbConnection/AdbStream), thread-agnostic
+  └── adb            public Client/Shell/Sync/Stream/pairing API
+        └── src/core private protocol/crypto/identity/transport engine
 ```
 
 **`components/adb/README.md` + `components/adb/docs/<surface>.md` are the
-front door for the `adb` layer's API contract** (archetypes, threading,
+front door for the public API contract** (archetypes, threading,
 lifetime rules, per-surface wire detail for `Client`/`Shell`/`Sync`/`Stream`) —
-read those before touching that code. This page covers what those docs don't:
-the lower `embedded_adb` engine, the transport layer, and the app-level
-integration decisions.
+read those before touching that code. Implementation and component API changes
+belong in `esp-adb-host`; this repository advances the submodule pointer after
+those changes land. This page covers what those docs don't: the private engine,
+the transport layer, and the app-level integration decisions.
 
-## `embedded_adb` layering
+## Private core layering
 
 One concern per file pair, all portable C++ **except the transport**:
 
@@ -50,22 +52,23 @@ One concern per file pair, all portable C++ **except the transport**:
 
 USB bulk transfer to the ADB interface (class `0xFF`/subclass `0x42`/protocol
 `0x01`) is the **only** device/simulator split in this component:
-`transport_usbhost.cpp` (esp-idf `usb_host`, async API wrapped as a synchronous
-`Transport` with a binary semaphore per direction) vs `transport_libusb.cpp`
+`components/adb/src/core/transport_usbhost.cpp` (esp-idf `usb_host`, async API
+wrapped as a synchronous `Transport` with a binary semaphore per direction) vs
+`transport_libusb.cpp`
 (libusb) — same `ESP_PLATFORM`-branch pattern as `esp-devkit/bsp`. It lives inside
-`embedded_adb`, not the BSP, because the `usb_host` API is too large to
+`adb`, not the BSP, because the `usb_host` API is too large to
 reimplement on the host and the need (claim interface, open bulk endpoints,
 transfer) is ADB-specific, not a generic board seam. See
-[gotchas.md](gotchas.md#usb-host-componentsembedded_adbsrctransport_usbhostcpp)
+[gotchas.md](gotchas.md#usb-host-componentsadbsrccoretransport_usbhostcpp)
 for the FIFO-bias, RX-starvation, VBUS-enumeration and teardown pitfalls this
 transport had to work around.
 
-**VBUS is the app's concern, not `embedded_adb`'s.** The library only knows
+**VBUS is the app's concern, not `adb`'s.** The component only knows
 "reset the port" (`adb::set_usb_host_reset_hook`, called once after
 `usb_host_install`); what a reset *is* — a `USB5V_EN` power-cycle via
 `bsp_power_set_switch(BSP_POWER_SWITCH_USB5V, ...)` — and when VBUS is on at all
 (the persisted **USB Power** setting: Always-on so a plugged phone charges, vs
-Connected-only) both live in `adb_app.cpp`. No `embedded_adb → bsp` dependency.
+Connected-only) both live in `adb_app.cpp`. No `adb → bsp` dependency.
 
 `transport_tcp.cpp` — **ADB-over-TCP** — is the one transport shared verbatim
 between both targets (lwip on device, BSD sockets on the simulator): ADB's wire
@@ -83,14 +86,14 @@ an Espressif API, so no `idf_compat` shim either. Two flavours:
    over USB is accepted for wireless TLS with no separate pairing step.
 
 Six-digit wireless-debugging pairing is a separate, one-shot protocol exposed
-by `adb::pair_tcp(host, pairing_port, code, key)`. The pairing port shown by
+by `adb::pair_tcp(host, pairing_port, code)`. The pairing port shown by
 Android is not the later ADB connection port. The call performs TLS 1.3,
 combines the six ASCII digits with the 64-byte `adb-label\0` TLS exporter,
 runs the legacy BoringSSL SPAKE2 exchange, and sends the Android RSA public-key
-record under HKDF-SHA256/AES-128-GCM. A successful call returns the device GUID;
-the same persisted `RsaKey` must then be supplied to the normal TCP connection.
-It is blocking and owns an end-to-end deadline, so the caller must keep it off
-the LVGL thread.
+record under HKDF-SHA256/AES-128-GCM. A successful call returns the device GUID.
+The component loads the same persisted identity used by `Client::connect_*`,
+so key objects never cross the public API. The call is blocking and owns an
+end-to-end deadline, so the caller must keep it off the LVGL thread.
 
 The firmware does not link BoringSSL. `adb_spake2` implements the exact legacy
 Edwards25519 transcript required by Android, including BoringSSL's password
@@ -114,8 +117,8 @@ Beyond `Shell`/`Sync`, `adb` exposes a generic, service-agnostic
 (`adb_raw_stream.hpp`) — essentially `Shell` minus the PTY semantics. Its
 reason to exist is **dependency direction**: app-specific protocols in other
 components (`agent_link`) build on this generic stream so they depend on
-`adb`, never on `embedded_adb` directly, and the generic `adb::Client` never
-grows knowledge of any one app protocol (no `open_agent_link()` on `Client`).
+`adb`, never on its private core, and the generic `adb::Client` never grows
+knowledge of any one app protocol (no `open_agent_link()` on `Client`).
 
 ## App-level integration (`adb_app.cpp`)
 
@@ -128,7 +131,7 @@ branch on the link kind — the mirror screen uses it to drop JPEG quality/bump
 strip count over the slower TCP/Wi-Fi link (see [agent.md](agent.md)), and the
 Wi-Fi power-save policy uses it too (see `components/wifi/README.md`).
 
-Test running for both components is covered in
+Test running for the public layer and private core is covered in
 [development.md](development.md#host-test-runners); the dev loop for the
 protocol/auth/stream layers runs against a **real phone plugged into the PC**
 via the simulator's libusb transport, so only `transport_usbhost.cpp` needs

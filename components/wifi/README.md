@@ -3,7 +3,7 @@
 The app-facing component that gets the Tab5 onto a Wi-Fi network. It is the
 prerequisite for **ADB-over-TCP** (the eventual "Wireless (TCP/IP)" connect path):
 once an IP is up, the ADB TCP transport is a plain socket and lives in
-`embedded_adb`, independent of this component.
+the `adb` component's private transport, independent of this component.
 
 This is the front door. The single public surface is `wifi::Manager` (see
 `inc/wifi_manager.hpp`); the per-surface contract detail is in `docs/wifi.md`.
@@ -38,7 +38,7 @@ this component is plain `esp_wifi` with no board-specific bring-up.
 
 The component is portable C++ (`wifi_manager.cpp`: state machine, NVS, timeout,
 listener dispatch) over **one** device/simulator backend split — the same shape
-as `embedded_adb`'s USB transport:
+as `adb`'s private USB transport:
 
 ```
 inc/wifi_manager.hpp   public API (Manager, Listener, Status, AP, Result)
@@ -80,5 +80,5 @@ call in don't race a destroyed mutex.
 - **Done:** component scaffold, portable Manager, device esp_wifi backend, sim
   fake backend, simverify wiring. Builds on both targets.
 - **Next:** Wi-Fi UI from the HomeScreen Wireless card; real-HW bring-up on the
-  Tab5 (verify the C6 esp-hosted link + sdkconfig pins); then the `embedded_adb`
+  Tab5 (verify the C6 esp-hosted link + sdkconfig pins); then the `adb`
   TCP transport + `adb::Client::connect_tcp()`.

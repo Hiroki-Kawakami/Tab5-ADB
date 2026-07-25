@@ -41,8 +41,8 @@ the host-JVM `test/ProjectionTest` for the projection math.
 The wire protocol — single-socket framing, the agent-initiated HELLO (link-only)
 handshake, the Tab5-initiated MIRROR_START / MIRROR_STOP, and the JPEG strip stream (audio
 reserved) — is specified in [`docs/protocol.md`](docs/protocol.md); that doc is
-the contract between the agent and the Tab5 side (`embedded_adb`/`adb` + the
-`agent_link` component).
+the contract between the agent and the Tab5 side (`adb` + the `agent_link`
+component).
 
 ## Layout
 
@@ -71,7 +71,7 @@ nix develop -c android-agent/build.sh      # -> build/tab5adb-agent.jar
 ```
 
 **Primary verification = the headless Tab5-side harnesses** (the real
-`embedded_adb`/`adb` + `agent_link` stack over libusb, no GUI). They push the jar,
+`adb` + `agent_link` stack over libusb, no GUI). They push the jar,
 launch `app_process`, open `localabstract:tab5adb-agent`, and drive the protocol
 against the phone:
 

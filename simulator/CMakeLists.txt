@@ -8,7 +8,6 @@ devkit_simulator(
     LV_CONF_DIR .
     MAIN_SRCS platform/main.cpp
     COMPONENT_DIRS
-        ../components/embedded_adb
         ../components/adb
         ../components/agent_link
         ../components/wifi

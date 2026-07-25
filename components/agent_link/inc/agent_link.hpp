@@ -6,7 +6,8 @@
 // agent-initiated HELLO, and (in later slices) receives the JPEG strip stream.
 //
 // Dependency direction is deliberate: agent_link (App-specific) -> adb (generic
-// raw stream) -> embedded_adb. The generic adb::Client never knows about
+// raw stream; the wire engine is private inside adb. The generic adb::Client
+// never knows about
 // agent_link; the entry point lives here (Link::open takes the Client).
 //
 // Layering of the receive path: the framing / HELLO / (later) strip-placement

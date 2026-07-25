@@ -1,5 +1,5 @@
 // Headless test for the tab5adb-agent JPEG strip mirror (Phase 2), the Tab5 role
-// played by the real embedded_adb/adb + agent_link stack over libusb vs a real
+// played by the real adb + agent_link stack over libusb vs a real
 // Android device — NO LVGL/SDL. Continues test_hello's bring-up (connect ->
 // Sync::push the jar -> open_shell app_process -> Link::open -> HELLO) and then:
 //

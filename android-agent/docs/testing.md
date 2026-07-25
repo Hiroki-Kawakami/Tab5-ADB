@@ -1,6 +1,6 @@
 # テスト — tab5adb-agent / Tab5⇄agent 通信
 
-android-agent（`tab5adb-agent`）と Tab5 側（`embedded_adb`/`adb` + `agent_link`）の
+android-agent（`tab5adb-agent`）と Tab5 側（`adb` + `agent_link`）の
 **通信のテスト方法**をまとめたドキュメント。`protocol.md` が通信の確定仕様（契約）、
 本書はその**検証手段**。
 
@@ -10,7 +10,7 @@ android-agent（`tab5adb-agent`）と Tab5 側（`embedded_adb`/`adb` + `agent_l
 ハーネス**（`components/agent_link/test/`）。`components/adb/test/test_*.cpp` と同じ host
 テストパターン。
 
-- **本番の Tab5 側コードをそのままリンク**して回す: `embedded_adb` / `adb` / `agent_link` を
+- **本番の Tab5 側コードをそのままリンク**して回す: `adb` / `agent_link` を
   そのまま使い、host ランタイムは simulator と同じ `esp-devkit/idf_compat`（`freertos`=pthread 実装 /
   `nvs`=JSON / `esp_*` shim）+ `transport_libusb`。**SDL/LVGL/`app/` は持ち込まない**。
 - libusb で **PC 直結の実機**を叩くので、Tab5 実機を待たずに Tab5 経路を検証できる。受信スタックの
@@ -32,14 +32,14 @@ nix develop -c components/agent_link/test/run.sh [jar-path]
 
 `components/agent_link/test/run.sh` が:
 
-- `esp-devkit/idf_compat` の `.o`（`nvs`/`esp_err` は gcc、`freertos_*`/`esp_timer` も）+ `embedded_adb` 全
-  `.cpp` + `transport_libusb` + `adb` 全 `.cpp` + `agent_link` + テスト本体を **1 コマンドでビルド**、
+- `esp-devkit/idf_compat` の `.o`（`nvs`/`esp_err` は gcc、`freertos_*`/`esp_timer` も）+ `adb`
+  の public/core 全 `.cpp` + `transport_libusb` + `agent_link` + テスト本体を **1 コマンドでビルド**、
 - `adb kill-server` してから実行。
 - 成果物（`.o`・バイナリ）は `test/build/`（gitignore の `build` 規則で無視。`.o` キャッシュで再ビルド高速）。
 - jar パスは `build.sh` の出力を既定、argv で上書き可。
 - テストを増やしたら `TEST=<name>` で `test/<name>.cpp` を選択。
 
-毎回 g++ を手打ちしない（`embedded_adb`/`adb` の「ヘッダにコマンドを書く」流儀の runner 版）。
+毎回 g++ を手打ちしない（`adb` の host-test runner と同じ流儀）。
 
 ## 4. 現在のテスト
 
@@ -98,7 +98,7 @@ nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'
 | 対象 | headless ハーネスで |
 |---|---|
 | agent ビルド/起動（`app_process`） | ✅（ハーネスが push + `open_shell` 起動） |
-| localabstract 接続経路（`A_OPEN localabstract:`） | ✅ **embedded_adb 実装で**（標準 adb forward ではなく真の経路） |
+| localabstract 接続経路（`A_OPEN localabstract:`） | ✅ **adb の private core 実装で**（標準 adb forward ではなく真の経路） |
 | フレーム framing（MAGIC/TYPE/FLAGS/SEQ/LENGTH）/ HELLO（protocol.md §3,§4） | ✅ Tab5 側パーサ + HELLO 応答 |
 | `MIRROR_START` 往復 / JPEG ストリップ受信→デコード | ✅ `test_mirror`（agent パイプライン＋framing＋host libjpeg デコード＋タイリング検証） |
 | 実画面 capture（`SurfaceControl`→`ImageReader`） | ✅ `test_mirror` `TAB5ADB_REAL=1` スモーク（実機画面が PPM に写る） |
@@ -107,7 +107,7 @@ nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'
 
 ## 6. デバッグ用フォールバック — 標準 adb
 
-`embedded_adb` の localabstract が疎通しないとき、**原因が agent 側か Tab5 側かを切り分ける用途のみ**
+`adb` の localabstract が疎通しないとき、**原因が agent 側か Tab5 側かを切り分ける用途のみ**
 （合否判定には使わない）。`run.sh`（android-agent）で agent を起動し、別シェルから:
 
 ```sh
@@ -117,7 +117,7 @@ nix develop -c python3 -c 'import socket; print(socket.create_connection(("local
 
 agent は **binary な HELLO フレームを喋り応答を待つ**ので、素の `recv` はテキストにならない（HELLO
 REQUEST のバイト列が返り、その後 agent は応答待ちでブロックする）。「agent が正しく listen・送信して
-いる」と確認できれば原因は Tab5 側（embedded_adb の open/retry/フレーム解釈）に絞れる（逆も同様）。
+いる」と確認できれば原因は Tab5 側（adb core の open/retry/フレーム解釈）に絞れる（逆も同様）。
 
 ## 7. Phase 2（JPEG ストリップ）— 実装・検証済み
 

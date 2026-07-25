@@ -5,7 +5,7 @@ quirks that cost real debugging time and would otherwise get rediscovered.
 Grouped by area; each entry names the file that carries the fix so you can jump
 to the code and its comments.
 
-## USB host (`components/embedded_adb/src/transport_usbhost.cpp`)
+## USB host (`components/adb/src/core/transport_usbhost.cpp`)
 
 - **FIFO bias caps bulk OUT at 256 bytes.** The default `usb_host_config_t` FIFO
   bias (`BALANCED`) gives the non-periodic TX FIFO only `dfifo_depth/16` lines,
@@ -34,7 +34,7 @@ to the code and its comments.
   root-port-power does **not** fix it (the phone's physical VBUS never cycles).
   Fix: after `usb_host_install`, power-cycle VBUS itself (off → 200ms → on) via
   an app-supplied hook (`adb::set_usb_host_reset_hook`) — a real re-attach edge.
-  `embedded_adb` only knows "reset the port"; the VBUS policy lives in
+  `adb` only knows "reset the port"; the VBUS policy lives in
   `adb_app` (see [adb.md](adb.md)).
 - **Teardown must fully uninstall the usb_host stack or reconnect fails with
   `ESP_ERR_INVALID_STATE`.** `usb_host_install` refuses if the previous instance

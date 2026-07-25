@@ -1,6 +1,6 @@
 // Pure wire format for the tab5adb-agent protocol — the contract in
 // android-agent/docs/protocol.md, with NO I/O (the agent_link counterpart of
-// embedded_adb's adb_protocol.hpp). Both the Tab5 side (this component) and the
+// adb's private core protocol codec). Both the Tab5 side (this component) and the
 // agent (Java) follow protocol.md; keep this header in sync with §3/§4 there.
 //
 // All multi-byte values are little-endian (ESP32-P4 and Android-ARM are both LE).

@@ -2,8 +2,8 @@
 # android-agent/docs/protocol.md).
 #
 # App-specific protocol layer on top of the `adb` component's generic raw
-# stream (adb::Client::open_stream). Depends on `adb`, never on embedded_adb
-# directly, so the dependency arrow stays agent_link -> adb -> embedded_adb.
+# stream (adb::Client::open_stream). The wire engine stays private inside adb,
+# so the dependency arrow is simply agent_link -> adb.
 # Portable C++ on both targets; the headless test links these same sources.
 idf_component_register(
     SRCS "src/agent_link.cpp"

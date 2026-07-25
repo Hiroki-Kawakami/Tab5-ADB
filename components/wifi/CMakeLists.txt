@@ -1,7 +1,7 @@
 # wifi — app-facing Wi-Fi STA connection manager (see README.md).
 #
 # Portable Manager (state machine, NVS persistence, listener dispatch, timeout)
-# plus ONE device/simulator backend split — the same shape as embedded_adb's
+# plus ONE device/simulator backend split — the same shape as adb's private
 # transport: the esp_wifi API is too large to reimplement on the host, so the
 # backend is ESP_PLATFORM-branched rather than an idf_compat esp_wifi shim.
 #   device:    backend_espwifi.cpp (esp_wifi / esp_netif / esp_event; on the P4

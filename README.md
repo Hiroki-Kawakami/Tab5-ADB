@@ -2,7 +2,7 @@
 
 ADB (Android Debug Bridge) client on M5Stack Tab5 (ESP32-P4).
 
-Clone with the shared development kit submodule:
+Clone with the required submodules:
 
 ```sh
 git clone --recurse-submodules https://github.com/Hiroki-Kawakami/Tab5-ADB.git
@@ -25,6 +25,10 @@ nix develop -c ./run.sh simverify simulator/verify/home.txt
 
 Reusable BSP, simulator compatibility, image and LVGL infrastructure comes
 from the pinned [`esp-devkit`](esp-devkit/) submodule.
+The ADB host stack comes from the pinned
+[`esp-adb-host`](components/adb/) submodule. It is mounted at
+`components/adb`, so both the ESP-IDF build and the simulator consume the same
+`adb` component without target-specific dependency setup.
 
 See [`docs/development.md`](docs/development.md) for every build/flash/test
 command, and [`docs/architecture.md`](docs/architecture.md) for the component

@@ -1,3 +1,6 @@
 [submodule "esp-devkit"]
 	path = esp-devkit
 	url = https://github.com/Hiroki-Kawakami/esp-devkit
+[submodule "components/adb"]
+	path = components/adb
+	url = https://github.com/Hiroki-Kawakami/esp-adb-host
