@@ -1,10 +1,8 @@
-// USB transport seam — the ONLY device/simulator split in embedded_adb.
+// ADB packet transport seam for USB and TCP.
 //
-// The connection layer reads/writes whole ADB packets through this interface; it
-// does not know whether the bytes go over esp-idf usb_host (device) or libusb
-// (simulator). open_usb_transport() finds and opens the first Android device on
-// the bus; its implementation is the per-target piece selected by ESP_PLATFORM
-// in the component CMakeLists.txt.
+// The connection layer does not know whether bytes go over USB or a socket. USB
+// is the only device/simulator split (esp-idf usb_host vs libusb); TCP uses the
+// same BSD-socket contract on both targets and can upgrade in place to TLS.
 #pragma once
 
 #include <cstdint>

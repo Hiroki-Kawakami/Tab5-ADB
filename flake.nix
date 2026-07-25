@@ -39,6 +39,7 @@
           packages = [
             pkgs.libusb1
             pkgs.mbedtls_4
+            pkgs.boringssl
             pkgs.jdk
             pkgs.android-tools
             androidSdk

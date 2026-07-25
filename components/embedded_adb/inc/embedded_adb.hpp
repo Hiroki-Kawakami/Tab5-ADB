@@ -7,8 +7,8 @@
 //   adb_protocol   — pure wire format (amessage/apacket, checksum, codec)
 //   adb_crypto     — RSA-2048 keygen / signing / Android pubkey (mbedTLS, shared)
 //   adb_keystore   — RSA private key persistence in NVS (C API, shared)
-//   transport      — USB bulk transfer; the ONLY device/simulator split
-//                    (esp-idf usb_host vs libusb), selected in CMakeLists.txt
+//   transport      — USB/TCP byte pipes; USB is the device/simulator split
+//   adb_pairing    — TLS/SPAKE2 six-digit wireless-debugging pairing
 //   adb_connection — CNXN handshake + AUTH state machine, packet dispatch
 //   adb_stream     — A_OPEN/OKAY/WRTE/CLSE stream multiplexing
 //   adb_client     — high-level API (connect, shell, ...)
@@ -19,6 +19,7 @@
 #include "adb_protocol.hpp"
 #include "adb_crypto.hpp"
 #include "adb_keystore.hpp"
+#include "adb_pairing.hpp"
 #include "adb_transport.hpp"
 #include "adb_stream.hpp"
 #include "adb_connection.hpp"

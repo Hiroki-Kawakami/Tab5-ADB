@@ -71,6 +71,7 @@ Connected-only) both live in `adb_app.cpp`. No `embedded_adb → bsp` dependency
 between both targets (lwip on device, BSD sockets on the simulator): ADB's wire
 protocol is identical over a socket, and sockets are a standard contract, not
 an Espressif API, so no `idf_compat` shim either. Two flavours:
+
 1. **classic `adb tcpip 5555`** — same RSA AUTH as USB.
 2. **Android 11+ wireless debugging** — the device replies `A_STLS`
    (STARTTLS) and the link upgrades to **TLS 1.3** before the banner exchange.
@@ -80,6 +81,24 @@ an Espressif API, so no `idf_compat` shim either. Two flavours:
    ephemeral cert; adbd authenticates *us* by the client cert). **No RSA AUTH
    challenge follows** — the cert *is* the auth, and a key already authorized
    over USB is accepted for wireless TLS with no separate pairing step.
+
+Six-digit wireless-debugging pairing is a separate, one-shot protocol exposed
+by `adb::pair_tcp(host, pairing_port, code, key)`. The pairing port shown by
+Android is not the later ADB connection port. The call performs TLS 1.3,
+combines the six ASCII digits with the 64-byte `adb-label\0` TLS exporter,
+runs the legacy BoringSSL SPAKE2 exchange, and sends the Android RSA public-key
+record under HKDF-SHA256/AES-128-GCM. A successful call returns the device GUID;
+the same persisted `RsaKey` must then be supplied to the normal TCP connection.
+It is blocking and owns an end-to-end deadline, so the caller must keep it off
+the LVGL thread.
+
+The firmware does not link BoringSSL. `adb_spake2` implements the exact legacy
+Edwards25519 transcript required by Android, including BoringSSL's password
+scalar representation, while PSA Crypto supplies SHA-512, HKDF, AES-GCM, and
+random bytes. Host-only oracle tests link Nix's BoringSSL and compare both
+SPAKE2 roles and encrypted records byte-for-byte. The transcript identities
+`"adb pair client\0"` and `"adb pair server\0"` are protocol constants,
+including their terminating NUL; they are never displayed to the user.
 
 TCP throughput tuning (lwip window sizing) and the mbedTLS TLS1.3/serial-write
 gotchas are in [gotchas.md](gotchas.md#wi-fi--esp-hosted-componentswifi-esp32p4sdkconfigdefaults).

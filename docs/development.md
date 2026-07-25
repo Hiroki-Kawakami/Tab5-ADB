@@ -114,10 +114,21 @@ Every component with host-testable logic has its own `test/run.sh`, invoked via
 | `app/` (parsers) | `app/test/run.sh` | `test_device_info` / `test_apk_info` / `test_media_session` / `test_sysclock` — no phone, no LVGL |
 | `esp-devkit/bsp/` | `esp-devkit/bsp/test/run.sh` | `test_audio_dsp` (default, pure math) / `test_bsp_audio` (dispatch policy vs stub) / `test_sdl_audio` (audible pacing check) — no device |
 | `components/term_emu/` | `components/term_emu/test/run.sh` | VT parser + grid, incl. a chunk-split fuzz — no phone |
-| `components/embedded_adb/` | `components/embedded_adb/test/run.sh` | `test_crypto` (default, no phone) / `test_connect` / `test_shell` (need an authorized phone over libusb) / `test_connect_tcp` (`TAB5ADB_TCP_TARGET=host:port` env, no IP committed to git) |
+| `components/embedded_adb/` | `components/embedded_adb/test/run.sh` | `test_crypto` (default), `test_spake2`, `test_spake2_boringssl`, `test_pairing_crypto_boringssl`, `test_tls_exporter_boringssl`, and `test_pairing_protocol` need no phone; `test_connect` / `test_shell` need an authorized phone over libusb; `test_connect_tcp` uses `TAB5ADB_TCP_TARGET=host:port`; `test_pair_tcp` uses `TAB5ADB_PAIR_TARGET=host:port` and `TAB5ADB_PAIR_CODE` |
 | `components/adb/` | `components/adb/test/run.sh` | `test_client` (default) / `test_shell` / `test_sync` — all need a phone connected + authorized over libusb |
 | `components/agent_link/` | `components/agent_link/test/run.sh` | `test_hello` (default) / `test_mirror` — libusb vs a real phone; decodes strips with host libjpeg |
 | `android-agent/` | `android-agent/test/run.sh` | host-JVM `ProjectionTest` — no phone |
 
 All the libusb-based runners run `adb kill-server` first so the host adb-server
 doesn't hold the USB interface.
+
+The BoringSSL tests are host-only compatibility oracles; neither firmware nor
+the simulator links BoringSSL. To exercise the complete pairing exchange
+against a phone while its six-digit dialog is open:
+
+```sh
+TAB5ADB_PAIR_TARGET=PAIR_HOST:PAIR_PORT \
+TAB5ADB_PAIR_CODE=PAIR_CODE \
+TEST=test_pair_tcp \
+nix develop -c components/embedded_adb/test/run.sh
+```

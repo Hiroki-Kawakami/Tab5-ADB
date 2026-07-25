@@ -85,10 +85,12 @@ to the code and its comments.
   `CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y` (+~64KB binary). IDF 6 also disables X.509
   creation by default, but STARTTLS creates its client certificate at runtime;
   `CONFIG_MBEDTLS_X509_CREATE_C` and `CONFIG_MBEDTLS_X509_CRT_WRITE_C` must stay
-  enabled. Both targets use Mbed TLS 4's PSA Crypto API, and the host flake pins
-  `mbedtls_4` so the simulator cannot silently keep compiling the removed 3.x
-  APIs. Mbed TLS 4 reports a successfully processed TLS 1.3 post-handshake
-  `NewSessionTicket` from `mbedtls_ssl_read()` as
+  enabled. Six-digit pairing also needs
+  `CONFIG_MBEDTLS_SSL_KEYING_MATERIAL_EXPORT`; without it TLS succeeds but the
+  SPAKE2 password cannot match Android. Both targets use Mbed TLS 4's PSA Crypto
+  API, and the host flake pins `mbedtls_4` so the simulator cannot silently keep
+  compiling the removed 3.x APIs. Mbed TLS 4 reports a successfully processed
+  TLS 1.3 post-handshake `NewSessionTicket` from `mbedtls_ssl_read()` as
   `MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET`; it must be retried rather than
   treated as a fatal read error, or ADB closes before receiving the encrypted
   `CNXN`.

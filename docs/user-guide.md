@@ -24,8 +24,10 @@ The Device screen opens once the connection is established.
 
 ### TCP/IP
 
-Tab5-ADB does not support Wireless debugging pairing with a QR code or six-digit
-pairing code. Pair the device once over USB before connecting over TCP/IP.
+The Home screen does not yet expose QR-code or six-digit Wireless debugging
+pairing. Pair the device once over USB or with another ADB host before
+connecting over TCP/IP. The lower-level `embedded_adb` component supports
+six-digit pairing for developer integration.
 
 1. Connect the Tab5 to a network from `Settings > Wi-Fi`.
 2. Enter `host` or `host:port` under `Wireless (TCP/IP)` on the Home screen.
