@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 
+#include "adb_pairing.hpp"
+
 // Panel geometry (M5Stack Tab5 / ILI9881C MIPI-DSI), native portrait.
 constexpr int PANEL_W = 720;
 constexpr int PANEL_H = 1280;
@@ -43,6 +45,13 @@ void adb_connect_async(std::function<void(bool ok)> on_result);
 // link.
 void adb_connect_tcp_async(const std::string& host, uint16_t port,
                            std::function<void(bool ok)> on_result);
+
+// Pair the persisted ADB identity with an Android Wireless debugging pairing
+// endpoint. Crypto and network work run on a background task; on_result runs on
+// the LVGL thread.
+void adb_pair_async(const std::string& host, uint16_t port,
+                    const std::string& code,
+                    std::function<void(adb::PairingResult)> on_result);
 
 // The live Client, valid after a successful connect (else nullptr). Use it for
 // everything connection-scoped, e.g. adb_client()->banner() / adb_client()->exec().

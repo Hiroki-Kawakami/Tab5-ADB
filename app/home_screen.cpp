@@ -2,6 +2,8 @@
 
 #include <functional>
 #include <memory>
+#include <src/core/lv_obj_style_gen.h>
+#include <src/widgets/button/lv_button.h>
 
 #include "about_screen.hpp"
 #include "adb_app.hpp"
@@ -9,6 +11,7 @@
 #include "agent_client.hpp"
 #include "app_version.hpp"
 #include "modal.hpp"
+#include "pair_device_screen.hpp"
 #include "resources/resources.h"
 #include "screen_manager.hpp"
 #include "sd_file_browser_screen.hpp"
@@ -23,7 +26,7 @@ const char *const kTcpKeyboardMap[] = {
     " ", "1", "2", "3", " ", "\n",
     " ", "4", "5", "6", LV_SYMBOL_BACKSPACE, "\n",
     LV_SYMBOL_LEFT, "7", "8", "9", LV_SYMBOL_RIGHT, "\n",
-    LV_SYMBOL_CLOSE, "0", ".", ":", LV_SYMBOL_OK, "",
+    LV_SYMBOL_CLOSE, ":", "0", ".", LV_SYMBOL_OK, "",
 };
 
 constexpr lv_buttonmatrix_ctrl_t kKeyW1 = LV_BUTTONMATRIX_CTRL_WIDTH_1;
@@ -139,9 +142,7 @@ void HomeScreen::build_body() {
     lv_obj_add_event_fn(connect_btn_, LV_EVENT_CLICKED,
                         [this](lv_event_t *) { start_connect(); });
 
-    // ---- Wireless (TCP/IP) card. The Wi-Fi setup is wired now (gets the Tab5
-    // onto a LAN); the phone-IP connect row is still a placeholder — ADB-over-TCP
-    // (the embedded_adb TCP transport) lands later, on top of this Wi-Fi link. ----
+    // ---- Wireless (TCP/IP) card ----
     lv_obj_t *tcp_card = make_card(body);
     lv_obj_set_flex_grow(tcp_card, 1);
     card_title(make_row(tcp_card), LUCIDE_WIFI, "Wireless (TCP/IP)");
@@ -151,10 +152,30 @@ void HomeScreen::build_body() {
     lv_obj_set_style_text_color(wifi_status_, lv_color_hex(0x90a4ae), 0);
     refresh_wifi_status();  // Wi-Fi is set up from Settings; this card just shows status
 
+    tcp_pair_btn_ = lv_button_create(tcp_card);
+    lv_obj_remove_style_all(tcp_pair_btn_);
+    lv_obj_set_size(tcp_pair_btn_, 160, 60);
+    lv_obj_add_flag(tcp_pair_btn_, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(tcp_pair_btn_, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_set_style_pad_all(tcp_pair_btn_, 10, 0);
+    lv_obj_set_style_border_width(tcp_pair_btn_, 1, 0);
+    lv_obj_set_style_radius(tcp_pair_btn_, 13, 0);
+    lv_obj_set_style_bg_opa(tcp_pair_btn_, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(tcp_pair_btn_, lv_color_hex(0xe0e0e0), LV_STATE_PRESSED);
+    lv_obj_set_style_opa(tcp_pair_btn_, LV_OPA_50, LV_STATE_DISABLED);
+    lv_obj_set_style_border_opa(tcp_pair_btn_, LV_OPA_TRANSP, LV_STATE_DISABLED);
+    lv_obj_t *pair_label = lv_label_create(tcp_pair_btn_);
+    lv_label_set_text(pair_label, "Pair Device");
+    lv_obj_set_style_text_font(pair_label, &lv_font_montserrat_20, 0);
+    lv_obj_center(pair_label);
+    lv_obj_add_event_fn(tcp_pair_btn_, LV_EVENT_CLICKED, [this](lv_event_t *) {
+        screen_manager.push(std::make_shared<PairDeviceScreen>());
+    });
+
     lv_obj_t *input_row = make_row(tcp_card);
     tcp_addr_ = lv_textarea_create(input_row);
     lv_textarea_set_one_line(tcp_addr_, true);
-    lv_textarea_set_placeholder_text(tcp_addr_, "192.168.1.100:5555");
+    lv_textarea_set_placeholder_text(tcp_addr_, "192.168.x.x:5555");
     lv_obj_set_style_text_font(tcp_addr_, &lv_font_montserrat_20, 0);
     lv_obj_set_height(tcp_addr_, 60);
     // One-line textarea places its label at pad_top, so the default padding leaves
@@ -357,6 +378,7 @@ void HomeScreen::update_tcp_controls_enabled() {
     };
     set_enabled(tcp_addr_);
     set_enabled(tcp_connect_btn_);
+    set_enabled(tcp_pair_btn_);
 
     // Recent-target rows: disable (block taps) + dim the whole list when offline.
     // The "No recent connections" placeholder isn't clickable, so it's left alone.
@@ -460,7 +482,7 @@ void HomeScreen::start_connect_tcp(const std::string &addr) {
     if (!parse_host_port(addr, host, port)) {
         app::modal_message(root_, "Invalid address",
                            "Enter the device address as host or host:port "
-                           "(e.g. 192.168.1.100:5555).");
+                           "using the value shown by Android.");
         return;
     }
     hide_tcp_keyboard();

@@ -1,0 +1,13 @@
+# Pair-device form and its two numeric keyboard layouts.
+settle 2500
+wait 800
+tap 600 560
+settle 800
+capture simulator/verify/out/pair_device.jpg
+tap 360 476
+settle 500
+capture simulator/verify/out/pair_device_address_keyboard.jpg
+tap 360 603
+settle 500
+capture simulator/verify/out/pair_device_code_keyboard.jpg
+quit

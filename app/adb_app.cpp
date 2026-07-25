@@ -3,9 +3,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <algorithm>
 #include <memory>
+#include <new>
+#include <utility>
 
 #include "adb.hpp"  // adb::Client, adb::ClientListener
+#include "adb_keystore.hpp"
 #include "adb_transport.hpp"  // adb::set_usb_host_power_hook
 #include "agent_client.hpp"
 #include "bsp.h"
@@ -42,6 +46,36 @@ bool g_connection_is_usb = true;
 // pulled, device rebooted). Only the unexpected case shows the "Disconnected"
 // notice and unwinds to the home screen; the button already navigates itself.
 bool g_user_disconnect = false;
+
+constexpr uint32_t kPairTaskStack = 20 * 1024;
+
+struct PairTaskContext {
+    std::string host;
+    uint16_t port;
+    std::string code;
+    std::function<void(adb::PairingResult)> on_result;
+};
+
+void pair_task(void *arg) {
+    std::unique_ptr<PairTaskContext> context(
+        static_cast<PairTaskContext *>(arg));
+    adb::PairingResult result{adb::PairingError::Crypto, {}};
+    auto key = adb::load_or_create_key();
+    if (key) {
+        result = adb::pair_tcp(
+            context->host, context->port, context->code, *key);
+    }
+    std::fill(context->code.begin(), context->code.end(), '\0');
+    auto callback = std::move(context->on_result);
+    lv_async_call([
+        callback = std::move(callback),
+        result = std::move(result)
+    ]() mutable {
+        if (callback) callback(std::move(result));
+    });
+    context.reset();
+    vTaskDelete(nullptr);
+}
 
 // The Tab5 has no RTC, so set the system clock from the phone once per link.
 // Fire-and-forget: the exec completion is on the reader thread (no LVGL), parses
@@ -139,6 +173,29 @@ void adb_connect_async(std::function<void(bool)> on_result) {
 void adb_connect_tcp_async(const std::string& host, uint16_t port,
                            std::function<void(bool)> on_result) {
     g_holder->start_tcp(g_holder, host, port, std::move(on_result));
+}
+
+void adb_pair_async(const std::string& host, uint16_t port,
+                    const std::string& code,
+                    std::function<void(adb::PairingResult)> on_result) {
+    auto *context = new (std::nothrow) PairTaskContext{
+        host, port, code, std::move(on_result),
+    };
+    if (!context) {
+        if (on_result) {
+            on_result({adb::PairingError::Crypto, {}});
+        }
+        return;
+    }
+    if (xTaskCreate(pair_task, "adb_pair", kPairTaskStack,
+                    context, 5, nullptr) != pdPASS) {
+        std::fill(context->code.begin(), context->code.end(), '\0');
+        auto callback = std::move(context->on_result);
+        delete context;
+        if (callback) {
+            callback({adb::PairingError::Crypto, {}});
+        }
+    }
 }
 
 void apply_usb_host_power() {

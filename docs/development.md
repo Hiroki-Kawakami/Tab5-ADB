@@ -64,6 +64,7 @@ interpreter and `simulator/verify/` for examples.
 nix develop -c ./run.sh simverify simulator/verify/home.txt
 nix develop -c ./run.sh simverify simulator/verify/mirror.txt
 nix develop -c ./run.sh simverify simulator/verify/wifi.txt
+nix develop -c ./run.sh simverify simulator/verify/pair_device.txt
 ```
 
 Script commands: `wait <ms>`, `settle [<max_ms>]`, `capture <path.jpg>`,

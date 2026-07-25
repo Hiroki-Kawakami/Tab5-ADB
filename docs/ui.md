@@ -42,6 +42,7 @@ the still-active screen inside its own event handler segfaults).
 HomeScreen                          USB / Wireless(TCP) connect, About, Settings, Files(SD, adb-less)
 ├─ AboutScreen                      app identity, links (QR modals), acknowledgements
 ├─ SettingsScreen → WiFiScreen      Wi-Fi on/off, scan/connect (wifi::Manager — see components/wifi/)
+├─ PairDeviceScreen                 six-digit Wireless debugging pairing
 ├─ SDFileBrowserScreen               local SD card, adb-less (browse/pick/pick-dir modes)
 └─ ADBDeviceScreen                   summary header, live preview, nav row, media card, tool grid
    ├─ ADBDeviceInfoScreen → ADBMetricsScreen   device detail / live CPU+mem

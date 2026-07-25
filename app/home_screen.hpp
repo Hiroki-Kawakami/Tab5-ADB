@@ -22,6 +22,7 @@ private:
     lv_obj_t *progress_label_ = nullptr;  // its message line
     lv_obj_t *wifi_status_ = nullptr;     // Wireless card status line
     lv_obj_t *tcp_addr_ = nullptr;        // Wireless card target input (host:port)
+    lv_obj_t *tcp_pair_btn_ = nullptr;    // Wireless card pair button
     lv_obj_t *tcp_connect_btn_ = nullptr; // Wireless card connect button
     lv_obj_t *tcp_history_box_ = nullptr; // recent-targets list; placeholder when empty
     lv_obj_t *tcp_keyboard_ = nullptr;    // on-screen keyboard for the address; null when hidden

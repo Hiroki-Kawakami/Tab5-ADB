@@ -24,14 +24,19 @@ The Device screen opens once the connection is established.
 
 ### TCP/IP
 
-The Home screen does not yet expose QR-code or six-digit Wireless debugging
-pairing. Pair the device once over USB or with another ADB host before
-connecting over TCP/IP. The lower-level `embedded_adb` component supports
-six-digit pairing for developer integration.
-
 1. Connect the Tab5 to a network from `Settings > Wi-Fi`.
-2. Enter `host` or `host:port` under `Wireless (TCP/IP)` on the Home screen.
-3. Tap `Connect`. If the port is omitted, port `5555` is used.
+2. On Android, open `Developer options > Wireless debugging`, then select
+   pairing with a six-digit code.
+3. Tap `Pair Device` under `Wireless (TCP/IP)` on Tab5.
+4. Enter the pairing address and six-digit code shown by Android, then tap
+   `Pair`.
+5. Return to the Home screen and enter the separate connection address shown
+   on Android's main Wireless debugging screen.
+6. Tap `Connect`.
+
+The pairing port is valid only for the pairing exchange and is different from
+the connection port used afterward. For classic `adb tcpip`, the Home screen
+also accepts `host` without a port and defaults it to port `5555`.
 
 ## Device screen
 
@@ -134,6 +139,7 @@ Turns Wi-Fi on or off, scans for access points, and connects to a network.
 | The mirroring control overlay cannot be restored after hiding it | Swipe from the bottom-left corner as viewed in the mirrored content |
 | `Adapt` is unavailable | The Android display size may already be customized |
 | Wi-Fi settings are grayed out | Wi-Fi settings cannot be changed during an ADB connection. Disconnect, then open Settings from the Home screen |
+| Wireless pairing fails | Keep Android's pairing-code dialog open, confirm both devices are on the same Wi-Fi network, and retry with a newly generated code |
 | `Install` is not shown for an APK on the Android device | Copy the APK to the SD card, then open it there |
 
 For internal design details and implementation constraints, see
