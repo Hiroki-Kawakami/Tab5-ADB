@@ -10,7 +10,6 @@ devkit_simulator(
     COMPONENT_DIRS
         ../components/adb
         ../components/agent_link
-        ../components/wifi
         ../components/term_emu
         ../app)
 

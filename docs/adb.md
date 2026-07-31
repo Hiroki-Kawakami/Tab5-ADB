@@ -129,7 +129,7 @@ callbacks onto the LVGL thread. `app::connection_transport()`
 (`Transport::{Usb,Tcp}`) is the general-purpose hook for any feature that must
 branch on the link kind — the mirror screen uses it to drop JPEG quality/bump
 strip count over the slower TCP/Wi-Fi link (see [agent.md](agent.md)), and the
-Wi-Fi power-save policy uses it too (see `components/wifi/README.md`).
+Wi-Fi power-save policy uses it too (see `esp-devkit/libs/wifi/README.md`).
 
 Test running for the public layer and private core is covered in
 [development.md](development.md#host-test-runners); the dev loop for the

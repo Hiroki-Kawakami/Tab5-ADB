@@ -41,7 +41,7 @@ the still-active screen inside its own event handler segfaults).
 ```
 HomeScreen                          USB / Wireless(TCP) connect, About, Settings, Files(SD, adb-less)
 ├─ AboutScreen                      app identity, links (QR modals), acknowledgements
-├─ SettingsScreen → WiFiScreen      Wi-Fi on/off, scan/connect (wifi::Manager — see components/wifi/)
+├─ SettingsScreen → WiFiScreen      Wi-Fi on/off, scan/connect (wifi::Manager — see esp-devkit/libs/wifi/)
 ├─ PairDeviceScreen                 six-digit Wireless debugging pairing
 ├─ SDFileBrowserScreen               local SD card, adb-less (browse/pick/pick-dir modes)
 └─ ADBDeviceScreen                   summary header, live preview, nav row, media card, tool grid
@@ -58,7 +58,7 @@ HomeScreen                          USB / Wireless(TCP) connect, About, Settings
 Tapping the device preview column on `ADBDeviceScreen` is the mirror entry
 point in Normal mode (Limited mode explains why it can't, via a modal). See
 [agent.md](agent.md) for the mirror rendering pipeline, and
-`components/wifi/README.md`/`docs/wifi.md` for the `wifi::Manager` API the
+`esp-devkit/libs/wifi/README.md` for the `wifi::Manager` API the
 `WiFiScreen`/HomeScreen Wi-Fi card drive.
 
 `HomeScreen`'s USB Connect button is tapped by fixed coordinates in several

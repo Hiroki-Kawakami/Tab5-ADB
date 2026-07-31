@@ -46,19 +46,19 @@ to the code and its comments.
   the stack installed. Device-only; the sim's libusb transport can't reproduce
   it and it still needs a real-HW flash check.
 
-## Wi-Fi / esp-hosted (`components/wifi/`, `esp32p4/sdkconfig.defaults`)
+## Wi-Fi / esp-hosted (`esp-devkit/libs/wifi/`, `esp32p4/sdkconfig.defaults`)
 
 - **Host `esp_hosted` version must exactly match the ESP32-C6 slave firmware.**
   A 1.x-host/2.x-slave mismatch runs, but very slowly. Pinned in
-  `components/wifi/idf_component.yml`. Reset GPIO polarity also flipped
+  `esp-devkit/libs/wifi/idf_component.yml`. Reset GPIO polarity also flipped
   between major versions (1.x = active-low, 2.x = active-high) — wrong polarity
   holds the C6 in reset and the SDIO bring-up loops on `send_op_cond`.
 - **C6 firmware fires redundant `WIFI_EVENT_STA_START`/`STOP` events**, which
   crashes IDF's default `wifi_default_action_sta_start` handler (registered by
   `esp_netif_create_default_wifi_sta()`) on the second invocation. Fix:
-  `backend_espwifi.cpp` creates the STA netif manually and registers its own
-  **idempotent** start/stop handlers instead of the IDF default. Device-only,
-  not reproducible in the sim fake.
+  `esp-devkit/libs/wifi/src/wifi_netif_remote.cpp` creates the STA netif
+  manually and registers its own **idempotent** start/stop handlers instead of
+  the IDF default. Device-only, not reproducible in the sim fake.
 - **SD card and the C6 Wi-Fi link share one SDMMC host with two slots — they
   must not collide.** The C6 SDIO link must stay on slot 1 (`esp-hosted`
   default) and the SD card on slot 0; `SDMMC_HOST_DEFAULT()` picks slot 1, so the

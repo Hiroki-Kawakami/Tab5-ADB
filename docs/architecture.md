@@ -10,13 +10,13 @@ app/                         # SHARED  app logic / screens (a single component)
 components/                  # PROJECT-SPECIFIC SHARED components (both targets)
   adb/                          git submodule: esp-adb-host component + private core — see adb.md
   agent_link/                   Tab5-side link to tab5adb-agent — see agent.md
-  wifi/                         Wi-Fi STA connection manager — see components/wifi/README.md + docs/wifi.md
   term_emu/                     VT100/xterm-subset terminal emulator (no LVGL/adb deps)
 esp-devkit/                   # git submodule: reusable cross-project infrastructure
   bsp/                          board support (bsp_*) — see bsp.md
   ui_framework/                 LVGL C++ helpers, Screen base + ScreenManager
   libs/image_framework/         streaming image decode/resize pipeline
   libs/jpeg_decode_enhanced/    enhanced P4 HW JPEG decode
+  libs/wifi/                    Wi-Fi STA connection manager
   idf_compat/                   host ESP-IDF compatibility component
   sim_harness/                  scripted headless simulator driver
 esp32p4/                     # DEVICE build root (IDF project) — main/ is app_main + esp_lvgl_port
@@ -32,11 +32,11 @@ land in esp-devkit first, then this repository advances the submodule pointer.
 `components/adb` is the external `esp-adb-host` dependency: ADB implementation
 changes land there first, then this repository advances that submodule pointer.
 
-Every shared component with non-trivial docs owns a `README.md` (front door) and
-a `docs/<surface>.md` per API surface (`components/adb/`, `components/wifi/`).
-The submodule-owned surfaces are documented in their respective repositories;
-this repository only documents its integration decisions and app-specific use
-of them.
+Every shared component with non-trivial docs owns a `README.md` (front door)
+and, where needed, a `docs/<surface>.md` per API surface. The submodule-owned
+surfaces (`components/adb/`, `esp-devkit/libs/wifi/`) are documented in their
+respective repositories; this repository only documents its integration
+decisions and app-specific use of them.
 
 ## Components are self-describing (`idf_component_register`)
 

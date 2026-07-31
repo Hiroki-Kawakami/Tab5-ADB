@@ -23,8 +23,8 @@ nix develop -c ./run.sh
 nix develop -c ./run.sh simverify simulator/verify/home.txt
 ```
 
-Reusable BSP, simulator compatibility, image and LVGL infrastructure comes
-from the pinned [`esp-devkit`](esp-devkit/) submodule.
+Reusable BSP, simulator compatibility, Wi-Fi, image and LVGL infrastructure
+comes from the pinned [`esp-devkit`](esp-devkit/) submodule.
 The ADB host stack comes from the pinned
 [`esp-adb-host`](components/adb/) submodule. It is mounted at
 `components/adb`, so both the ESP-IDF build and the simulator consume the same

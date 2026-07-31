@@ -45,7 +45,7 @@ they take priority over anything said here:
 - `components/adb/README.md` + `components/adb/docs/*.md` — the app-facing ADB
   API (`Client`/`Shell`/`Sync`/`Stream`) contract, owned by the
   `esp-adb-host` submodule.
-- `components/wifi/README.md` + `components/wifi/docs/wifi.md` — `wifi::Manager`.
+- `esp-devkit/libs/wifi/README.md` — `wifi::Manager`.
 - `esp-devkit/libs/jpeg_decode_enhanced/README.md` — the enhanced JPEG decode API.
 - `android-agent/README.md` + `android-agent/docs/protocol.md` +
   `android-agent/docs/testing.md` — the agent process and its wire protocol.

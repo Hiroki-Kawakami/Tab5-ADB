@@ -114,6 +114,7 @@ Artifacts go to each `test/build/`
 |---|---|---|
 | `app/` (parsers) | `app/test/run.sh` | `test_device_info` / `test_apk_info` / `test_media_session` / `test_sysclock` — no phone, no LVGL |
 | `esp-devkit/bsp/` | `esp-devkit/bsp/test/run.sh` | `test_audio_dsp` (default, pure math) / `test_bsp_audio` (dispatch policy vs stub) / `test_sdl_audio` (audible pacing check) — no device |
+| `esp-devkit/libs/wifi/` | `esp-devkit/libs/wifi/test/run.sh` | manager state, scan/connect, NVS persistence, and radio enable/disable against the deterministic simulator backend — no device |
 | `components/term_emu/` | `components/term_emu/test/run.sh` | VT parser + grid, incl. a chunk-split fuzz — no phone |
 | `components/adb/` | `components/adb/test/run.sh` | The default `unit` suite runs the six offline private-core tests. Public API tests `test_client` / `test_shell` / `test_sync` need an authorized phone; `core/test_connect` / `core/test_shell` use libusb; `core/test_connect_tcp` and `core/test_pair_tcp` use the corresponding target/code environment variables. `BUILD_ONLY=1` links one selected test without touching a phone or adb-server. |
 | `components/agent_link/` | `components/agent_link/test/run.sh` | `test_hello` (default) / `test_mirror` — libusb vs a real phone; decodes strips with host libjpeg |
