@@ -33,9 +33,12 @@ std::shared_ptr<AgentAudio> AgentAudio::create() {
         AgentAudio::kOpusQueueCap * AgentAudio::kOpusPacketCap, MALLOC_CAP_SPIRAM));
     a->opus_lengths_ = static_cast<uint16_t*>(heap_caps_malloc(
         AgentAudio::kOpusQueueCap * sizeof(uint16_t), MALLOC_CAP_SPIRAM));
-    if (!a->opus_packets_ || !a->opus_lengths_) return nullptr;
+    a->opus_pcm_frames_ = static_cast<uint8_t*>(heap_caps_malloc(
+        AgentAudio::kOpusPcmQueueCap * AgentAudio::kOpusPcmBytes, MALLOC_CAP_SPIRAM));
+    if (!a->opus_packets_ || !a->opus_lengths_ || !a->opus_pcm_frames_) return nullptr;
     a->done_ = xSemaphoreCreateBinary();
-    if (!a->done_) return nullptr;
+    a->decoder_done_ = xSemaphoreCreateBinary();
+    if (!a->done_ || !a->decoder_done_) return nullptr;
     return a;
 }
 
@@ -47,6 +50,8 @@ AgentAudio::~AgentAudio() {
     if (ring_) heap_caps_free(ring_);
     if (opus_packets_) heap_caps_free(opus_packets_);
     if (opus_lengths_) heap_caps_free(opus_lengths_);
+    if (opus_pcm_frames_) heap_caps_free(opus_pcm_frames_);
+    if (decoder_done_) vSemaphoreDelete(static_cast<SemaphoreHandle_t>(decoder_done_));
 }
 
 void AgentAudio::start() {
@@ -59,6 +64,7 @@ void AgentAudio::start() {
         std::lock_guard<std::mutex> lk(ring_mtx_);
         ring_head_ = ring_tail_ = ring_count_ = 0;
         opus_head_ = opus_tail_ = opus_count_ = 0;
+        opus_pcm_head_ = opus_pcm_tail_ = opus_pcm_count_ = 0;
         opus_reset_ = false;
     }
 
@@ -67,8 +73,16 @@ void AgentAudio::start() {
         // Core 1, priority 4 — above the preview decoder, below the adb reader /
         // LVGL: an audio underrun is more audible than a dropped video frame.
         xTaskCreatePinnedToCore(&AgentAudio::audio_trampoline, "agent_audio",
-                                20 * 1024, this, 4, &t, 1);
+                                8192, this, 4, &t, 1);
         task_ = t;
+    }
+    if (!decoder_task_) {
+        TaskHandle_t t = nullptr;
+        // Keep codec CPU work off the I2S owner. esp_audio_codec recommends a
+        // roughly 20 KiB decoder stack; Core 0 lets output continue on Core 1.
+        xTaskCreatePinnedToCore(&AgentAudio::decoder_trampoline, "opus_decode",
+                                20 * 1024, this, 4, &t, 0);
+        decoder_task_ = t;
     }
     link->set_audio_listener(weak_from_this());
 }
@@ -82,6 +96,11 @@ void AgentAudio::stop() {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(done_), portMAX_DELAY);
         task_ = nullptr;
     }
+    if (decoder_task_) {
+        stop_.store(true);
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(decoder_done_), portMAX_DELAY);
+        decoder_task_ = nullptr;
+    }
 }
 
 void AgentAudio::on_audio_started(agent_link::Link*, const agent_link::AudioInfo& info) {
@@ -89,6 +108,7 @@ void AgentAudio::on_audio_started(agent_link::Link*, const agent_link::AudioInfo
         std::lock_guard<std::mutex> lk(ring_mtx_);
         ring_head_ = ring_tail_ = ring_count_ = 0;
         opus_head_ = opus_tail_ = opus_count_ = 0;
+        opus_pcm_head_ = opus_pcm_tail_ = opus_pcm_count_ = 0;
         opus_reset_ = false;
     }
     rate_.store(info.sample_rate ? info.sample_rate : 48000);
@@ -162,12 +182,88 @@ bool AgentAudio::opus_read(uint8_t* out, size_t cap, size_t* len) {
     return true;
 }
 
-size_t AgentAudio::opus_count() {
+bool AgentAudio::opus_pcm_write(const uint8_t* pcm, size_t len) {
+    if (!pcm || len != kOpusPcmBytes) return false;
     std::lock_guard<std::mutex> lk(ring_mtx_);
-    return opus_count_;
+    if (opus_pcm_count_ == kOpusPcmQueueCap) {
+        while (opus_pcm_count_ >= kOpusPrebufferPackets) {
+            opus_pcm_tail_ = (opus_pcm_tail_ + 1) % kOpusPcmQueueCap;
+            opus_pcm_count_--;
+        }
+    }
+    std::memcpy(opus_pcm_frames_ + opus_pcm_head_ * kOpusPcmBytes, pcm, len);
+    opus_pcm_head_ = (opus_pcm_head_ + 1) % kOpusPcmQueueCap;
+    opus_pcm_count_++;
+    return true;
+}
+
+bool AgentAudio::opus_pcm_read(uint8_t* pcm, size_t cap) {
+    if (!pcm || cap < kOpusPcmBytes) return false;
+    std::lock_guard<std::mutex> lk(ring_mtx_);
+    if (opus_pcm_count_ == 0) return false;
+    std::memcpy(pcm, opus_pcm_frames_ + opus_pcm_tail_ * kOpusPcmBytes, kOpusPcmBytes);
+    opus_pcm_tail_ = (opus_pcm_tail_ + 1) % kOpusPcmQueueCap;
+    opus_pcm_count_--;
+    return true;
+}
+
+size_t AgentAudio::opus_pcm_count() {
+    std::lock_guard<std::mutex> lk(ring_mtx_);
+    return opus_pcm_count_;
 }
 
 void AgentAudio::audio_trampoline(void* arg) { static_cast<AgentAudio*>(arg)->audio_loop(); }
+void AgentAudio::decoder_trampoline(void* arg) { static_cast<AgentAudio*>(arg)->decoder_loop(); }
+
+void AgentAudio::decoder_loop() {
+    while (!started_.load() && !stop_.load()) vTaskDelay(pdMS_TO_TICKS(5));
+
+    uint32_t seen_generation = 0;
+    std::unique_ptr<OpusPacketDecoder> opus;
+    uint8_t packet[kOpusPacketCap];
+    uint8_t pcm[kOpusPcmBytes];
+    while (!stop_.load()) {
+        uint32_t generation = generation_.load();
+        if (generation != seen_generation) {
+            opus.reset();
+            seen_generation = generation;
+            if (codec_.load() == agent_link::kAudioCodecOpus) {
+                opus = OpusPacketDecoder::create(rate_.load(), channels_.load());
+            }
+            continue;
+        }
+        if (codec_.load() != agent_link::kAudioCodecOpus || !opus) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+
+        bool reset = false;
+        {
+            std::lock_guard<std::mutex> lk(ring_mtx_);
+            reset = opus_reset_;
+            opus_reset_ = false;
+        }
+        if (reset) opus->reset();
+
+        size_t packet_len = 0;
+        if (!opus_read(packet, sizeof(packet), &packet_len)) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        size_t pcm_len = 0;
+        if (!opus->decode(packet, packet_len, pcm, sizeof(pcm), &pcm_len)
+                || pcm_len != sizeof(pcm)) {
+            std::memset(pcm, 0, sizeof(pcm));
+            pcm_len = sizeof(pcm);
+            opus->reset();
+        }
+        opus_pcm_write(pcm, pcm_len);
+    }
+
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(decoder_done_));
+    vTaskDelete(nullptr);
+}
 
 void AgentAudio::audio_loop() {
     // Wait for the format (on_audio_started) before opening the sink.
@@ -177,24 +273,19 @@ void AgentAudio::audio_loop() {
     bool prebuffering = false;
     bool played_opus = false;
     uint32_t seen_generation = 0;
-    std::unique_ptr<OpusPacketDecoder> opus;
     uint8_t buf[kChunk];
-    uint8_t opus_packet[kOpusPacketCap];
-    constexpr size_t kOpusPcmBytes = 48000 * 2 * 2 * 20 / 1000;
     uint8_t opus_pcm[kOpusPcmBytes];
     while (!stop_.load()) {
         uint32_t generation = generation_.load();
         if (generation != seen_generation) {
             if (opened) bsp_audio_close();
             opened = false;
-            opus.reset();
             seen_generation = generation;
             if (bsp_audio_open(rate_.load(), 16, channels_.load()) == ESP_OK) {
                 bsp_audio_set_volume(app::master_volume());
                 opened = true;
             }
             if (codec_.load() == agent_link::kAudioCodecOpus) {
-                opus = OpusPacketDecoder::create(rate_.load(), channels_.load());
                 prebuffering = true;
                 played_opus = false;
             }
@@ -211,21 +302,7 @@ void AgentAudio::audio_loop() {
             continue;
         }
 
-        bool reset = false;
-        {
-            std::lock_guard<std::mutex> lk(ring_mtx_);
-            reset = opus_reset_;
-            opus_reset_ = false;
-        }
-        if (reset && opus) {
-            opus->reset();
-            prebuffering = true;
-        }
-        if (!opus) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        if (prebuffering && opus_count() < kOpusPrebufferPackets) {
+        if (prebuffering && opus_pcm_count() < kOpusPrebufferPackets) {
             if (played_opus && opened) {
                 std::memset(opus_pcm, 0, sizeof(opus_pcm));
                 bsp_audio_write(opus_pcm, sizeof(opus_pcm));
@@ -236,19 +313,11 @@ void AgentAudio::audio_loop() {
         }
         prebuffering = false;
 
-        size_t packet_len = 0;
-        if (!opus_read(opus_packet, sizeof(opus_packet), &packet_len)) {
+        if (!opus_pcm_read(opus_pcm, sizeof(opus_pcm))) {
             prebuffering = true;
             continue;
         }
-        size_t pcm_len = 0;
-        if (!opus->decode(opus_packet, packet_len,
-                          opus_pcm, sizeof(opus_pcm), &pcm_len)) {
-            std::memset(opus_pcm, 0, sizeof(opus_pcm));
-            pcm_len = sizeof(opus_pcm);
-            opus->reset();
-        }
-        if (opened) bsp_audio_write(opus_pcm, pcm_len);
+        if (opened) bsp_audio_write(opus_pcm, sizeof(opus_pcm));
         played_opus = true;
     }
 

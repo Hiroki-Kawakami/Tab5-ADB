@@ -142,10 +142,13 @@ opposite handedness).
 The audio analogue of the video pipeline. USB keeps the low-latency 48 kHz
 stereo PCM path; TCP/Wi-Fi requests 96 kbps VBR Opus in 20 ms raw packets.
 `on_audio_data` fires on the adb reader thread and only copies the codec unit
-into PSRAM, while a private FreeRTOS task decodes (when needed) and writes PCM
-to `bsp_audio_write`, so audio cannot stall video flow control. The Wi-Fi path
-starts and resumes after five packets (100 ms), and caps burst backlog at one
-second. Created/destroyed with the mirror screen and used only in Tab5Only mode.
+into PSRAM, so audio cannot stall video flow control. On Wi-Fi, `opus_decode`
+(Core 0, priority 4) converts packets into a decoded PCM-frame queue while
+`agent_audio` (Core 1, priority 4) independently drains PCM to
+`bsp_audio_write`. This keeps decoder stalls out of the I2S pacing task. Playback
+starts and resumes after five decoded frames (100 ms); both queues cap burst
+backlog at one second. The pipeline is created/destroyed with the mirror screen
+and used only in Tab5Only mode.
 
 ## `agent_link` — the Tab5-side wire client
 
