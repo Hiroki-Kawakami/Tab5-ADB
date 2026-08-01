@@ -65,7 +65,7 @@ g++ -std=c++17 \
     "$comps/adb/src/core/adb_tls_stream.cpp" \
     "$comps/adb/src/core/transport_tcp.cpp" \
     $objs \
-    $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson libjpeg) \
+    $(pkg-config --cflags --libs mbedtls mbedcrypto mbedx509 libusb-1.0 libcjson libjpeg opus) \
     -lpthread -o "$bin"
 
 # Default the jar path to build.sh's output unless the caller overrides argv[1].

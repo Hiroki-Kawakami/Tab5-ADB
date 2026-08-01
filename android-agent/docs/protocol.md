@@ -17,7 +17,7 @@ agent 側はこれに従う。** プロトコルを変更するときは、ま�
 
 > **ステータス。** フレーム層（§3）・HELLO + `MIRROR_START`（§4）・映像（§5）・音声（§6）は
 > この版で確定。音声は **Tab5Only / PhoneOnly の2モード**（`MIRROR_START` の `streams` の `AUDIO`
-> ビット ON/OFF で選択）、コーデックは v1 = 生 PCM（Opus 予約）、**ターゲットは Android 12 以降**。
+> ビット ON/OFF で選択）、USB は生 PCM、ADB-over-TCP/Wi-Fi は Opus、**ターゲットは Android 12 以降**。
 > 実機で詰める数値（`max_payload`/`SPLIT_COUNT` の最適値、音声チャンク長/リング深さなど）は §10。
 
 ---
@@ -103,7 +103,7 @@ USB bulk のリンク層 CRC/再送 + ADB のメッセージ整合の上に、Wi
 | `0x03` | `EVENT`            | 双方向（非同期通知。ORIENTATION=A→T） | §4 |
 | `0x04` | `INPUT`            | Tab5→Android（一方向・応答なし） | §4.7（入力注入） |
 | `0x10` | `JPEG`             | Android→Tab5 | §5（映像フレームのブロック） |
-| `0x11` | `AUDIO`            | Android→Tab5 | §6（音声。**予約・枠のみ**） |
+| `0x11` | `AUDIO`            | Android→Tab5 | §6（音声。PCM / Opus） |
 
 `0x05..0x0F` は制御系の予約、`0x12..0x1F` は media 系の予約。その他は受信側で破棄（前方互換）。
 （A=Android/agent, T=Tab5）
@@ -242,7 +242,11 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
  +10  u8      split_count         ストリップ分割数（§5.3）。0 = agent 既定（現行 4）。preview は 1
                                   （= フレーム全体を 1 JPEG で送る。転送前の分割をしない）
  +11  u8      reserved            0
- (= 12 bytes。将来は末尾に append-only。+8 以降を欠く旧要求は 0 = 既定とみなす)
+ +12  u8      audio_codec         AUDIO の要求コーデック。0=agent既定（PCM） / 1=PCM_S16LE /
+                                  2=Opus。USBは1、ADB-over-TCP/Wi-Fiは2を指定する
+ +13  u8      reserved            0
+ +14  u16     reserved            0
+ (= 16 bytes。将来は末尾に append-only。+8 以降を欠く旧要求は 0 = 既定とみなす)
 ```
 
 - `target_width`/`target_height` は **Tab5 パネルとは限らないビューア面のサイズ**（mirror 画面は
@@ -260,7 +264,7 @@ mirror を開始させ、表示パラメータ（パネル寸法・スケール�
  +8   u16     out_width           実際に流すフレームの幅 [px] (LE)。fit/fill = target_width、
                                   aspect = agent が決めたサイズ（§5.3）。受信側はこれでバッファを確保する
  +10  u16     out_height          実際に流すフレームの高さ [px] (LE)
- +12  u8      audio_codec         音声コーデック。0x01=PCM_S16LE（§6）。0x02 以降を Opus 等に予約。
+ +12  u8      audio_codec         実際の音声コーデック。0x01=PCM_S16LE / 0x02=Opus（§6）。
                                   AUDIO を開始しないとき（streams に AUDIO 無し / agent が音声非対応）は +12 以降が不在
  +13  u8      audio_channels      音声チャンネル数（2=ステレオ）
  +14  u16     reserved            0
@@ -722,13 +726,18 @@ agent は Android 画面を取り込み、Tab5 の 720×1280 パネルへ表示�
 
 ### 6.2 フォーマット（agent が決め、MIRROR_START 応答が運ぶ）
 
-agent が音声フォーマットを決定し、`MIRROR_START` 応答（§4.4）の末尾フィールド（`audio_codec` /
+Tab5 が接続種別に応じたコーデックを要求し、agent が実際の音声フォーマットを
+`MIRROR_START` 応答（§4.4）の末尾フィールド（`audio_codec` /
 `audio_channels` / `audio_rate`）で Tab5 へ伝える。Tab5 はこれで音声出力（`bsp_audio_open`）を
-構成する。Tab5 側からのネゴシエーションはしない。v1 は **生 PCM**:
+構成する:
 
-- `audio_codec` = `0x01` (PCM_S16LE)。`0x02` 以降を Opus 等に予約。
+- USB: `audio_codec` = `0x01` (PCM_S16LE)。低遅延を優先する。
+- ADB-over-TCP/Wi-Fi: `audio_codec` = `0x02` (raw Opus)。96 kbps VBR、20 ms/packet。
 - `audio_channels` = 2（ステレオ。Tab5 の BSP がスピーカー用にモノミックス、HP はステレオ）。
 - `audio_rate` = 48000。
+
+Opus を要求されたのに agent のエンコーダが利用できない場合はPCMへ暗黙フォールバックせず、音声なしで
+映像だけを開始する。Wi-Fiへ1.536 MbpsのPCMを流して元の不安定さを再発させないためである。
 
 ### 6.3 AUDIO フレーム payload
 
@@ -737,17 +746,18 @@ agent が音声フォーマットを決定し、`MIRROR_START` 応答（§4.4）
 
 - **PCM (codec=0x01)**: payload = インターリーブ 16bit LE PCM チャンク（任意長。低レイテンシと
   JPEG とのバースト回避のため **~10ms 刻み**で送る運用）。
-- **Opus (将来 codec=0x02)**: payload = 1 Opus パケット（フレーム層の `LENGTH` がパケット境界を
-  与えるので追加のサブヘッダは不要）。
+- **Opus (codec=0x02)**: payload = 1 raw Opus パケット、48 kHz/stereo/20 ms。フレーム層の
+  `LENGTH` がパケット境界を与えるのでOggコンテナや追加サブヘッダは持たない。
 
 `FRAME_START`/`FRAME_END` は両方立てる（各 AUDIO フレームが自己完結）。タイムスタンプ/通し番号が
 要るようになったら §6 にサブヘッダを後付けする（フレーム層 §3 は不変）。
 
 映像と同じ 1 本のストリーム上を `TYPE` で多重化するので、音声追加でフレーム層（§3）は変えない。
 agent は **音声送出を JPEG 送出と別スレッド**で行い、`Conn.writeFrame` の直列化（§3）でワイヤ整合を
-保つ。Tab5 側は受信スレッドでは PCM をリングへコピーするだけにして、別の音声タスクが
-`bsp_audio_write`（I2S DMA で自然ペーシング）で吐き出す — 受信スレッドを音声出力でブロックさせない
-（映像のフロー制御を守る。リング満杯時は最古を捨てる＝音声グリッチ ≪ 映像ストール）。
+保つ。Tab5 側は受信スレッドでは PCM をリング、Opus をパケット境界つきキューへコピーするだけにして、
+別の音声タスクがデコードして `bsp_audio_write`（I2S DMA で自然ペーシング）へ吐き出す。Opus は5 packet
+= 100 msを貯めてから開始・アンダーラン復帰し、最大50 packet = 1秒を保持する。上限超過時は古い
+パケットを100 ms分までまとめて落とし、decoderをresetして遅延の固定化を避ける。
 
 ---
 
@@ -764,7 +774,7 @@ agent は **音声送出を JPEG 送出と別スレッド**で行い、`Conn.wri
 
 - `IDLE`: 未接続、または接続直後 HELLO 前。
 - `READY`: HELLO 確立後（agent_link 接続済み、mirror 未開始）。制御メッセージのやりとりは可能。
-- `STREAMING`: `MIRROR_START` 後。agent が JPEG（将来は AUDIO も）を流す。
+- `STREAMING`: `MIRROR_START` 後。agent が JPEG（要求時は AUDIO も）を流す。
 - `STREAMING` で `MIRROR_STOP`（§4.4）を受けると **`READY` に戻る**（リンクは維持。再度 `MIRROR_START`
   で `STREAMING` へ）。
 - 切断で `IDLE` に戻り、§2.2 のシーケンスで再接続する。
@@ -833,6 +843,6 @@ A5 10 01 07 <LEN u32 LE> 00 00 00 00 D0 02 40 01 <jpeg…>
 - **`SPLIT_COUNT` の最適値**（§5.3）: 既定 4。負荷分散と転送効率の兼ね合いで実機調整。
 - **JPEG の細部**: HW JPEG デコーダの制約（最小タイルサイズ・整列。16 整列は §5.2 で前提化）と
   YUV420 サブサンプルの相性を実機確認。
-- **音声（§6）の実機調整**: PCM チャンク長（~10ms 仮）と Tab5 側リングバッファ深さ（~200–300ms
-  仮）、HW JPEG デコードの AXI 占有が音声 realtime に与える影響（`SPLIT_COUNT` との兼ね合い）。
-  形式は確定（PCM_S16LE / 48k / stereo、Opus 予約）。
+- **音声（§6）の実機調整**: Wi-Fi Opus の開始・復帰バッファは100 ms。実環境で不足する場合だけ
+  増やす。HW JPEG デコードの AXI 占有が音声 realtime に与える影響（`SPLIT_COUNT` との兼ね合い）も
+  継続して確認する。

@@ -7,10 +7,8 @@
 //     and the audio are deterministic (a 440 Hz sine), not the live screen / capture;
 //   - on_link_hello -> set_audio_listener + set_video_listener -> start_mirror()
 //     with streams = VIDEO|AUDIO (MIRROR_START round trip);
-//   - validates on_audio_started's format (PCM_S16LE / stereo / 48 kHz from the §6.2
-//     response tail) and that AUDIO frames flow concurrently with video, each a
-//     4-byte-aligned (stereo s16) PCM chunk whose RMS is well above silence (the
-//     test tone), so the demux + framing + format plumbing is exercised end to end.
+//   - validates PCM by default, or raw Opus with TAB5ADB_OPUS=1; both paths decode
+//     to stereo/48 kHz PCM whose RMS is well above silence.
 //
 // Pass = HELLO + on_audio_started (correct format) + >= kMinAudioFrames clean,
 // non-silent audio frames + video also flowing + the link closes once. With
@@ -21,6 +19,7 @@
 #include "agent_link.hpp"
 
 #include <nvs_flash.h>
+#include <opus/opus.h>
 
 #include <atomic>
 #include <chrono>
@@ -41,6 +40,7 @@ constexpr const char* kRemoteJar = "/data/local/tmp/tab5adb-agent.jar";
 constexpr const char* kBaseCmd =
     "CLASSPATH=/data/local/tmp/tab5adb-agent.jar app_process / com.tab5adb.agent.Server";
 const bool kReal = std::getenv("TAB5ADB_REAL") != nullptr;
+const bool kOpus = std::getenv("TAB5ADB_OPUS") != nullptr;
 // Default: deterministic test pattern (video) + test tone (audio). TAB5ADB_REAL=1
 // smoke-tests the live screen + real REMOTE_SUBMIX capture (RMS check relaxed).
 const std::string kLaunchCmd =
@@ -59,6 +59,9 @@ class Listener : public adb::ClientListener,
                  public agent_link::VideoListener,
                  public agent_link::AudioListener {
 public:
+    ~Listener() override {
+        if (opus_) opus_decoder_destroy(opus_);
+    }
     // --- ClientListener ---
     void on_state(adb::Client*, adb::ConnectionState s) override {
         std::printf(">>> state: %s\n", adb::to_string(s));
@@ -113,22 +116,46 @@ public:
         audio_codec_ = info.codec;
         audio_channels_ = info.channels;
         audio_rate_ = info.sample_rate;
+        if (info.codec == agent_link::kAudioCodecOpus) {
+            int error = OPUS_OK;
+            opus_ = opus_decoder_create(info.sample_rate, info.channels, &error);
+            if (!opus_ || error != OPUS_OK) bad_audio_++;
+        }
         audio_started_ = true;
     }
-    void on_audio_data(agent_link::Link*, const uint8_t* pcm, size_t len) override {
-        if (len == 0 || (len % 4) != 0) {  // stereo s16 = 4 bytes/frame (§6.3)
+    void on_audio_data(agent_link::Link*, const uint8_t* data, size_t len) override {
+        if (len == 0) {
             bad_audio_++;
             return;
         }
         if (audio_frames_ == 0) std::printf(">>> first AUDIO frame: %zu bytes\n", len);
+        if (audio_codec_ == agent_link::kAudioCodecOpus) {
+            int16_t pcm[960 * 2];
+            int samples = opus_ ? opus_decode(opus_, data, static_cast<opus_int32>(len),
+                                              pcm, 960, 0) : OPUS_INVALID_STATE;
+            if (samples != 960) {
+                bad_audio_++;
+                return;
+            }
+            accumulate_pcm(pcm, static_cast<size_t>(samples) * 2);
+            audio_frames_++;
+            return;
+        }
+        if ((len % 4) != 0) {  // stereo s16 = 4 bytes/frame (§6.3)
+            bad_audio_++;
+            return;
+        }
+        accumulate_pcm(reinterpret_cast<const int16_t*>(data), len / 2);
+        audio_frames_++;
+    }
+
+    void accumulate_pcm(const int16_t* pcm, size_t n) {
         // Accumulate sum-of-squares for the RMS / silence check (integer, atomic).
-        const int16_t* s = reinterpret_cast<const int16_t*>(pcm);
         uint64_t sq = 0;
-        const size_t n = len / 2;
-        for (size_t i = 0; i < n; ++i) sq += static_cast<uint64_t>(s[i] * s[i]);
+        for (size_t i = 0; i < n; ++i)
+            sq += static_cast<uint64_t>(static_cast<int32_t>(pcm[i]) * pcm[i]);
         sumsq_ += sq;
         nsamp_ += n;
-        audio_frames_++;
     }
 
     bool hello() const { return hello_; }
@@ -166,6 +193,7 @@ private:
     std::atomic<uint32_t> audio_rate_{0};
     std::atomic<uint64_t> sumsq_{0};
     std::atomic<uint64_t> nsamp_{0};
+    OpusDecoder* opus_ = nullptr;
 };
 
 struct BufSource {
@@ -267,6 +295,8 @@ int main(int argc, char** argv) {
         link->set_audio_listener(listener);
         agent_link::MirrorConfig cfg;
         cfg.streams = agent_link::kCapVideo | agent_link::kCapAudio;  // §6.1 Tab5Only
+        cfg.audio_codec = kOpus ? agent_link::kAudioCodecOpus
+                                : agent_link::kAudioCodecPcmS16le;
         adb::Error e = link->start_mirror(cfg);
         std::printf(">>> start_mirror(VIDEO|AUDIO): %s\n", adb::to_string(e));
     }
@@ -276,8 +306,10 @@ int main(int argc, char** argv) {
         sleep_ms(100);
 
     bool hello = listener->hello();
+    uint8_t expected_codec = kOpus ? agent_link::kAudioCodecOpus
+                                   : agent_link::kAudioCodecPcmS16le;
     bool audio_ok = listener->audio_started() &&
-                    listener->audio_codec() == agent_link::kAudioCodecPcmS16le &&
+                    listener->audio_codec() == expected_codec &&
                     listener->audio_channels() == 2 && listener->audio_rate() == 48000;
     int aframes = listener->audio_frames();
     int vframes = listener->video_frames();
@@ -302,7 +334,7 @@ int main(int argc, char** argv) {
               listener->bad_audio() == 0 && not_silent &&
               vframes >= kMinVideoFrames && one_close;
     std::printf("%s (audio_frames=%d video_frames=%d rms=%.1f hello_link_closes=%d)\n",
-                ok ? "PASSED: AUDIO streams clean PCM alongside video, link closes once"
+                ok ? "PASSED: AUDIO streams clean alongside video, link closes once"
                    : "FAILED",
                 aframes, vframes, rms, listener->hello_link_closes());
     return ok ? 0 : 1;

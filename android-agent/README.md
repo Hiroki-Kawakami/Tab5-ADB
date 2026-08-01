@@ -38,9 +38,12 @@ driven). Verified against a real Android device by the Tab5-side harnesses `test
 (HELLO) and `test_mirror.cpp` (strip mirror, incl. a real-capture smoke test), and
 the host-JVM `test/ProjectionTest` for the projection math.
 
+Audio capture runs in parallel: USB requests raw PCM while ADB-over-TCP/Wi-Fi
+requests 96 kbps raw Opus packets from Android's platform `MediaCodec` encoder.
+
 The wire protocol — single-socket framing, the agent-initiated HELLO (link-only)
-handshake, the Tab5-initiated MIRROR_START / MIRROR_STOP, and the JPEG strip stream (audio
-reserved) — is specified in [`docs/protocol.md`](docs/protocol.md); that doc is
+handshake, the Tab5-initiated MIRROR_START / MIRROR_STOP, and the JPEG/audio streams
+— is specified in [`docs/protocol.md`](docs/protocol.md); that doc is
 the contract between the agent and the Tab5 side (`adb` + the `agent_link`
 component).
 
@@ -53,6 +56,8 @@ src/com/tab5adb/agent/
   Projection.java     # pure GPU-projection math (rotate/scale-fit/center); host-JVM testable
   TestPattern.java    # deterministic source frame for --test-pattern verification
   ScreenCapture.java  # real capture -> 720x1280 ImageReader: DisplayManager.createVirtualDisplay (A14/15) | SurfaceControl projection fallback
+  AudioCapture.java   # 48 kHz stereo output capture / test tone
+  OpusEncoder.java    # MediaCodec raw Opus encoder used for TCP/Wi-Fi
 test/                 # host-JVM unit test (ProjectionTest) + run.sh — no phone
 build.sh              # javac + d8  -> build/tab5adb-agent.jar
 run.sh                # adb push + app_process (dev loop)
@@ -78,6 +83,7 @@ against the phone:
 ```sh
 nix develop -c components/agent_link/test/run.sh                       # HELLO (test_hello)
 nix develop -c sh -c 'TEST=test_mirror components/agent_link/test/run.sh'   # JPEG strip mirror
+nix develop -c sh -c 'TAB5ADB_OPUS=1 TEST=test_audio components/agent_link/test/run.sh'
 #   TAB5ADB_REAL=1 on test_mirror smoke-tests real SurfaceControl capture
 ```
 
@@ -97,7 +103,7 @@ nix develop -c android-agent/run.sh        # push + app_process, stays in foregr
 # clean up:  adb shell pkill -f com.tab5adb.agent.Server
 ```
 
-Verified against a real Android device (Android 14, API 34).
+Verified against a Pixel 10 (Android 16) as well as Android 14.
 
 ## Build notes
 

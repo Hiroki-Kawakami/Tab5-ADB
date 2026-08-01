@@ -10,6 +10,7 @@ app/                         # SHARED  app logic / screens (a single component)
 components/                  # PROJECT-SPECIFIC SHARED components (both targets)
   adb/                          git submodule: esp-adb-host component + private core — see adb.md
   agent_link/                   Tab5-side link to tab5adb-agent — see agent.md
+  opus_decoder/                 Raw Opus decode middleware; device/simulator backend split
   term_emu/                     VT100/xterm-subset terminal emulator (no LVGL/adb deps)
 esp-devkit/                   # git submodule: reusable cross-project infrastructure
   bsp/                          board support (bsp_*) — see bsp.md
@@ -54,8 +55,13 @@ the simulator shim consistent across projects:
 - **Simulator:** `devkit_simulator(BOARD tab5 ...)` supplies SDL/LVGL,
   `idf_compat`, `sim_harness`, the Tab5 BSP, UI/image libraries and the
   `idf_component_register` shim. `simulator/CMakeLists.txt` lists only this
-  project's component directories and host-only libusb/mbedTLS/zlib links.
+  project's component directories and host-only libusb/mbedTLS/zlib/opus links.
   `simulator/platform/main.cpp` remains the executable entry point.
+
+The `components/opus_decoder` middleware owns the raw-Opus target seam: its
+device backend uses the version-pinned `espressif/esp_audio_codec` managed
+component while its simulator backend uses libopus. Codec-specific APIs and
+target checks stay out of `app`; `AgentAudio` sees only `OpusPacketDecoder`.
 
 ## Where a device/simulator-divergent API goes — the rule
 

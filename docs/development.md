@@ -3,7 +3,7 @@
 ## Build environment
 
 The ESP-IDF (v6.0.2) toolchain and the host-simulator tools (cmake, ninja, gcc,
-SDL2, cjson, libusb, Mbed TLS 4) all come from a Nix flake. The base development
+SDL2, cjson, libusb, Mbed TLS 4, libopus) all come from a Nix flake. The base development
 shell is inherited from the pinned `esp-devkit` submodule. **Always run commands
 through `nix develop -c <cmd>`** (or from inside a `nix develop` shell) — never
 invoke `idf.py` / `cmake` / `esptool` directly.
@@ -117,7 +117,7 @@ Artifacts go to each `test/build/`
 | `esp-devkit/libs/wifi/` | `esp-devkit/libs/wifi/test/run.sh` | manager state, scan/connect, NVS persistence, and radio enable/disable against the deterministic simulator backend — no device |
 | `components/term_emu/` | `components/term_emu/test/run.sh` | VT parser + grid, incl. a chunk-split fuzz — no phone |
 | `components/adb/` | `components/adb/test/run.sh` | The default `unit` suite runs the six offline private-core tests. Public API tests `test_client` / `test_shell` / `test_sync` need an authorized phone; `core/test_connect` / `core/test_shell` use libusb; `core/test_connect_tcp` and `core/test_pair_tcp` use the corresponding target/code environment variables. `BUILD_ONLY=1` links one selected test without touching a phone or adb-server. |
-| `components/agent_link/` | `components/agent_link/test/run.sh` | `test_hello` (default) / `test_mirror` — libusb vs a real phone; decodes strips with host libjpeg |
+| `components/agent_link/` | `components/agent_link/test/run.sh` | `test_hello` (default) / `test_mirror` / `test_audio` — libusb vs a real phone; mirror uses host libjpeg, audio uses PCM by default or Opus with `TAB5ADB_OPUS=1` |
 | `android-agent/` | `android-agent/test/run.sh` | host-JVM `ProjectionTest` — no phone |
 
 All the libusb-based runners run `adb kill-server` first so the host adb-server

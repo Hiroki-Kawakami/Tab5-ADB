@@ -13,6 +13,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.1.5
+  espressif/esp_audio_codec:
+    component_hash: 16e2880dbdd5a72264051f750f33a6e5a38fd25621c83e3a32a85a152d2d2643
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.5.0
   espressif/esp_hosted:
     component_hash: d1f01fbe9b7ee867e1c330754fe46cb550375e27edf2159e9b670f29bd36b682
     dependencies:
@@ -120,12 +130,13 @@ dependencies:
       type: service
     version: 9.5.0
 direct_dependencies:
+- espressif/esp_audio_codec
 - espressif/esp_hosted
 - espressif/esp_lvgl_port
 - espressif/esp_wifi_remote
 - espressif/usb
 - espressif/zlib
 - idf
-manifest_hash: 2ac761482120e4dd68282a6f44ddc61686b286be7256035b0ea21acbfc104905
+manifest_hash: ea9c1478fec00bd05ed8d1dc60f57b4528930f52a9251d316cf5e82112588545
 target: esp32p4
 version: 3.0.0

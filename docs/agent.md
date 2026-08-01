@@ -139,13 +139,13 @@ opposite handedness).
 
 ## Audio (`app::AgentAudio`)
 
-The audio analogue of the video pipeline: `on_audio_data` fires on the adb
-reader thread and only copies PCM into a PSRAM ring (drop-oldest on overflow,
-never blocks), and a private FreeRTOS task drains the ring into
-`bsp_audio_write` (whose blocking I2S DMA write provides the real-time
-pacing) — so audio can never stall the video stream's flow control either.
-Created/destroyed with the mirror screen; only used in the Tab5Only audio mode
-(see the `mirror-audio-plan` project memory for the mode design).
+The audio analogue of the video pipeline. USB keeps the low-latency 48 kHz
+stereo PCM path; TCP/Wi-Fi requests 96 kbps VBR Opus in 20 ms raw packets.
+`on_audio_data` fires on the adb reader thread and only copies the codec unit
+into PSRAM, while a private FreeRTOS task decodes (when needed) and writes PCM
+to `bsp_audio_write`, so audio cannot stall video flow control. The Wi-Fi path
+starts and resumes after five packets (100 ms), and caps burst backlog at one
+second. Created/destroyed with the mirror screen and used only in Tab5Only mode.
 
 ## `agent_link` — the Tab5-side wire client
 

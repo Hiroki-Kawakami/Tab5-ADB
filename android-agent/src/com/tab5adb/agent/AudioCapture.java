@@ -40,7 +40,6 @@ import java.lang.reflect.Method;
 final class AudioCapture {
     static final int SAMPLE_RATE = 48000;     // WIRE/output rate (§6.2), after resampling
     static final int CHANNELS = 2;            // stereo (the Tab5 BSP downmixes for speaker)
-    static final int CODEC_PCM_S16LE = 0x01;  // protocol.md §6 audio_codec
     // ~10 ms stereo chunk at the OUTPUT rate: 480 frames * 2 ch * 2 bytes. Small for
     // low latency and so it interleaves with the JPEG flow without bursts (§6.3).
     static final int CHUNK_BYTES = (SAMPLE_RATE / 100) * CHANNELS * 2;  // 1920

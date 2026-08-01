@@ -90,6 +90,8 @@ adb::Error Link::start_mirror(const MirrorConfig& cfg) {
     a[9] = cfg.jpeg_quality;
     a[10] = cfg.split_count;
     a[11] = 0;  // reserved
+    a[kMirrorAudioCodecRequestOff] = cfg.audio_codec;
+    a[13] = a[14] = a[15] = 0;  // reserved
 
     uint8_t frame[kFrameHeaderSize + sizeof(payload)];
     write_header(frame, kTypeControlRequest, /*flags=*/0,
@@ -487,8 +489,8 @@ void Link::handle_jpeg(const FrameHeader& h, const uint8_t* payload) {
 }
 
 // AUDIO (§6.3): one frame = one codec unit. There is no per-frame subheader — the
-// whole payload is the codec data (raw PCM for codec=PCM; the format came in the
-// MIRROR_START response). Hand it to the audio channel (it copies into its ring).
+// whole payload is the codec data (raw PCM or one raw Opus packet; the format came
+// in the MIRROR_START response). Hand it to the audio channel for a quick copy.
 void Link::handle_audio(const FrameHeader& h, const uint8_t* payload) {
     std::shared_ptr<AudioListener> a;
     { std::lock_guard<std::mutex> lk(audio_mtx_); a = audio_.lock(); }

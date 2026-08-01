@@ -191,6 +191,9 @@ agent_link::MirrorConfig ADBMirroringScreen::mirror_config_for(int mode) const {
         cfg.jpeg_quality = 40;
         cfg.max_fps = 15;
         cfg.split_count = 16;
+        cfg.audio_codec = agent_link::kAudioCodecOpus;
+    } else {
+        cfg.audio_codec = agent_link::kAudioCodecPcmS16le;
     }
     return cfg;
 }

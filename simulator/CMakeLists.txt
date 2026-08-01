@@ -10,6 +10,7 @@ devkit_simulator(
     COMPONENT_DIRS
         ../components/adb
         ../components/agent_link
+        ../components/opus_decoder
         ../components/term_emu
         ../app)
 
@@ -17,7 +18,9 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(MBEDTLS REQUIRED IMPORTED_TARGET mbedtls mbedcrypto mbedx509)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 pkg_check_modules(ZLIB REQUIRED IMPORTED_TARGET zlib)
+pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 target_link_libraries(simulator
     PkgConfig::MBEDTLS
     PkgConfig::LIBUSB
-    PkgConfig::ZLIB)
+    PkgConfig::ZLIB
+    PkgConfig::OPUS)

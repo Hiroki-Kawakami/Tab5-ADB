@@ -44,7 +44,8 @@ source on GitHub plus prebuilt binaries; it comes with **no warranty and no
 support** (as stated in the MIT disclaimer).
 
 The firmware bundles third-party fonts, icons, libraries, and components under
-their own licenses (Apache-2.0, SIL OFL 1.1, ISC, zlib, and MIT). Their full
+their own licenses (Apache-2.0, SIL OFL 1.1, ISC, zlib, MIT, and Espressif's
+modified MIT license). Their full
 texts and the project acknowledgements (including the adb / scrcpy reference
 projects) are reproduced in [`app/third_party_licenses.hpp`](app/third_party_licenses.hpp),
 which is also viewable on-device under **About → Acknowledgements**.

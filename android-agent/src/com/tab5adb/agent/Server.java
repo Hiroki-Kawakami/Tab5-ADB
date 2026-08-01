@@ -74,11 +74,14 @@ public final class Server {
     private static final int CAP_APPINFO = 0x0004;
     private static final int CAP_MEDIA = 0x0008;
     private static final int VIDEO_CODEC_JPEG = 0x01;
+    private static final int AUDIO_CODEC_DEFAULT = 0x00;
+    private static final int AUDIO_CODEC_PCM_S16LE = 0x01;
+    private static final int AUDIO_CODEC_OPUS = 0x02;
     private static final int SCALE_ASPECT = 2;  // scale_mode (§5.3)
     private static final int SCALE_ADAPT = 3;   // scale_mode (§5.3): resize the source
 
     private static final int AGENT_VER_MAJOR = 0;
-    private static final int AGENT_VER_MINOR = 5;
+    private static final int AGENT_VER_MINOR = 6;
     private static final int AGENT_VER_PATCH = 0;
 
     // Mirror stream defaults (§5.1).
@@ -250,7 +253,7 @@ public final class Server {
             AudioStreamer audio = null;
             if (mp.audio) {
                 try {
-                    audio = new AudioStreamer(conn);
+                    audio = new AudioStreamer(conn, mp.audioCodec);
                     audio.start();
                 } catch (Throwable t) {
                     System.err.println("tab5adb-agent: audio start failed, video-only: " + t);
@@ -572,7 +575,7 @@ public final class Server {
     // --- MIRROR_START / MIRROR_STOP (§4.4) ---
 
     private static final class MirrorParams {
-        int targetW, targetH, scaleMode, streams, maxFps, quality, split;
+        int targetW, targetH, scaleMode, streams, maxFps, quality, split, audioCodec;
         boolean audio;  // start the AUDIO stream (streams has AUDIO and we can capture)
     }
 
@@ -589,9 +592,12 @@ public final class Server {
         mp.maxFps = p.length >= 2 + 9 ? (p[10] & 0xFF) : 0;
         mp.quality = p.length >= 2 + 10 ? (p[11] & 0xFF) : 0;
         mp.split = p.length >= 2 + 11 ? (p[12] & 0xFF) : 0;
+        mp.audioCodec = p.length >= 2 + 13 ? (p[14] & 0xFF) : AUDIO_CODEC_DEFAULT;
+        if (mp.audioCodec == AUDIO_CODEC_DEFAULT) mp.audioCodec = AUDIO_CODEC_PCM_S16LE;
         System.out.println("tab5adb-agent: MIRROR_START target=" + mp.targetW + "x" + mp.targetH
                 + " scale=" + mp.scaleMode + " streams=0x" + Integer.toHexString(mp.streams)
-                + " max_fps=" + mp.maxFps + " q=" + mp.quality + " split=" + mp.split);
+                + " max_fps=" + mp.maxFps + " q=" + mp.quality + " split=" + mp.split
+                + " audio_codec=" + mp.audioCodec);
 
         // Adapt mode (§5.3): resize the SOURCE itself (wm size) to the viewer's
         // aspect so a plain fit fills it with no letterbox/crop (the source app
@@ -640,7 +646,9 @@ public final class Server {
 
         // Audio is started only if requested AND we can capture it (Android 12+ /
         // test-tone); otherwise we proceed video-only and omit the §6.2 audio tail.
-        mp.audio = (mp.streams & CAP_AUDIO) != 0 && audioAvailable();
+        mp.audio = (mp.streams & CAP_AUDIO) != 0 && audioAvailable()
+                && (mp.audioCodec == AUDIO_CODEC_PCM_S16LE
+                    || (mp.audioCodec == AUDIO_CODEC_OPUS && OpusEncoder.isAvailable()));
 
         int[] src = sourceSize();
         byte[] result = new byte[mp.audio ? 20 : 12];
@@ -651,8 +659,8 @@ public final class Server {
         writeU16(result, 6, 0);               // reserved
         writeU16(result, 8, mp.targetW);      // out_width (== target after the remap)
         writeU16(result, 10, mp.targetH);     // out_height
-        if (mp.audio) {  // §6.2 audio tail: PCM_S16LE / stereo / 48 kHz
-            result[12] = (byte) AudioCapture.CODEC_PCM_S16LE;  // audio_codec
+        if (mp.audio) {  // §6.2 audio tail: chosen codec / stereo / 48 kHz
+            result[12] = (byte) mp.audioCodec;                 // audio_codec
             result[13] = (byte) AudioCapture.CHANNELS;         // audio_channels
             writeU16(result, 14, 0);                           // reserved
             writeU32(result, 16, AudioCapture.SAMPLE_RATE);    // audio_rate
@@ -812,19 +820,21 @@ public final class Server {
      * Captures device audio ({@link AudioCapture}) and writes it as TYPE=AUDIO frames
      * on a dedicated thread, so audio never blocks the JPEG flow and vice versa
      * (frame writes serialize in {@link Conn#writeFrame}). Each chunk is one
-     * self-contained PCM frame (FRAME_START|FRAME_END, §6.3). Stops when streaming
+     * self-contained PCM chunk or Opus packet (FRAME_START|FRAME_END, §6.3). Stops when streaming
      * ends — the session loop {@link #stop}s it after {@code streamVideo} returns,
      * and the loop also exits on the same {@code conn} flags.
      */
     private final class AudioStreamer {
         private final Conn conn;
         private final AudioCapture cap;
+        private final int codec;
         private final Thread thread;
         private volatile boolean running = true;
 
-        AudioStreamer(Conn conn) {
+        AudioStreamer(Conn conn, int codec) {
             this.conn = conn;
             this.cap = new AudioCapture(testTone);
+            this.codec = codec;
             this.thread = new Thread(this::loop, "tab5adb-audio");
             this.thread.setDaemon(true);
         }
@@ -836,19 +846,9 @@ public final class Server {
         }
 
         private void loop() {
-            byte[] buf = new byte[AudioCapture.CHUNK_BYTES];
             long chunks = 0;
             try {
-                while (running && !conn.closed && !conn.stopRequested
-                        && conn.pendingStart == null) {
-                    int n = cap.read(buf);
-                    if (n <= 0) break;
-                    // writeFrame is synchronous, so reusing `buf` next iteration is safe;
-                    // copy only the short last chunk.
-                    byte[] payload = (n == buf.length) ? buf : java.util.Arrays.copyOf(buf, n);
-                    conn.writeFrame(TYPE_AUDIO, FLAG_FRAME_START | FLAG_FRAME_END, payload);
-                    chunks++;
-                }
+                chunks = codec == AUDIO_CODEC_OPUS ? streamOpus() : streamPcm();
             } catch (IOException eof) {
                 synchronized (conn.lock) {
                     conn.closed = true;
@@ -860,6 +860,52 @@ public final class Server {
                 cap.close();
             }
             System.out.println("tab5adb-agent: audio stopped after " + chunks + " chunks");
+        }
+
+        private long streamPcm() throws IOException {
+            byte[] buf = new byte[AudioCapture.CHUNK_BYTES];
+            long chunks = 0;
+            while (keepRunning()) {
+                int n = cap.read(buf);
+                if (n <= 0) break;
+                byte[] payload = n == buf.length ? buf : java.util.Arrays.copyOf(buf, n);
+                conn.writeFrame(TYPE_AUDIO, FLAG_FRAME_START | FLAG_FRAME_END, payload);
+                chunks++;
+            }
+            return chunks;
+        }
+
+        private long streamOpus() throws Exception {
+            byte[] captureBuf = new byte[OpusEncoder.PCM_BYTES_PER_FRAME];
+            byte[] pcmFrame = new byte[OpusEncoder.PCM_BYTES_PER_FRAME];
+            int filled = 0;
+            long packets = 0;
+            try (OpusEncoder encoder = new OpusEncoder()) {
+                while (keepRunning()) {
+                    int n = cap.read(captureBuf);
+                    if (n <= 0) break;
+                    int off = 0;
+                    while (off < n) {
+                        int copy = Math.min(n - off, pcmFrame.length - filled);
+                        System.arraycopy(captureBuf, off, pcmFrame, filled, copy);
+                        off += copy;
+                        filled += copy;
+                        if (filled != pcmFrame.length) continue;
+                        for (byte[] packet : encoder.encode(pcmFrame)) {
+                            conn.writeFrame(TYPE_AUDIO,
+                                    FLAG_FRAME_START | FLAG_FRAME_END, packet);
+                            packets++;
+                        }
+                        filled = 0;
+                    }
+                }
+            }
+            return packets;
+        }
+
+        private boolean keepRunning() {
+            return running && !conn.closed && !conn.stopRequested
+                    && conn.pendingStart == null;
         }
 
         /** Stop the send thread and release capture (idempotent; unblocks read()). */

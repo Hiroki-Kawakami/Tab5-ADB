@@ -37,7 +37,7 @@ enum Flag : uint8_t {
 // Control commands (§4.4).
 enum Cmd : uint8_t {
     kCmdHello = 0x01,         // A->T: agent_link link establishment (link-only)
-    kCmdMirrorStart = 0x10,   // T->A: start mirror (video + future audio)
+    kCmdMirrorStart = 0x10,   // T->A: start mirror (video + optional audio)
     kCmdMirrorStop = 0x11,    // T->A: stop mirror -> READY (link kept), §4.4
     kCmdMirrorSetParam = 0x12,  // T->A: live param change (reserved)
     kCmdGetAppList = 0x20,    // T->A: installed apps (pkg/label/flags), §4.4
@@ -169,8 +169,9 @@ constexpr uint8_t kVideoCodecJpeg = 0x01;
 // audio_codec (MIRROR_START response audio tail, §6). One AUDIO frame carries one
 // codec unit; the codec is fixed here so the frame body needs no per-frame header.
 enum AudioCodec : uint8_t {
-    kAudioCodecPcmS16le = 0x01,  // interleaved 16-bit LE PCM (v1)
-    kAudioCodecOpus = 0x02,      // reserved (frame body = one Opus packet)
+    kAudioCodecDefault = 0x00,    // request only: let the agent choose
+    kAudioCodecPcmS16le = 0x01,   // interleaved 16-bit LE PCM
+    kAudioCodecOpus = 0x02,       // raw Opus packet (48 kHz, stereo, 20 ms)
 };
 
 // --- INPUT channel (§4.7) — TYPE=INPUT, Tab5->agent, fire-and-forget ---
@@ -222,7 +223,8 @@ constexpr size_t kHelloResultLen = 8;  // after cmd+req_id+status
 // max_fps at +8 and the result carries out_width/out_height at +8; both tails
 // are append-only, so a peer may omit them (max_fps=0 / out=target assumed) —
 // the *Base lengths are the minimum a parser requires.
-constexpr size_t kMirrorStartArgsLen = 12;       // after cmd+req_id (what we send)
+constexpr size_t kMirrorStartArgsLen = 16;       // after cmd+req_id (what we send)
+constexpr size_t kMirrorAudioCodecRequestOff = 12;  // u8; +13..15 reserved
 constexpr size_t kMirrorStartResultBaseLen = 8;  // after cmd+req_id+status (minimum)
 constexpr size_t kMirrorStartResultLen = 12;     // with out_width/out_height (video only)
 

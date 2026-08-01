@@ -1,7 +1,7 @@
 // agent_link — the Tab5-side link to tab5adb-agent.
 //
 // This component owns the Tab5 end of the single TYPE-multiplexed ADB stream
-// defined in android-agent/docs/protocol.md (control + video + future audio). It
+// defined in android-agent/docs/protocol.md (control + video + audio). It
 // opens `localabstract:tab5adb-agent` over an Online adb::Client, answers the
 // agent-initiated HELLO, and (in later slices) receives the JPEG strip stream.
 //
@@ -28,7 +28,7 @@
 //     screen) implements it and registers it with set_video_listener(); it comes
 //     and goes independently of the link, which the owner keeps alive across
 //     features.
-//   - AudioListener — the PCM mirror stream (§6), registered with
+//   - AudioListener — the PCM/Opus mirror stream (§6), registered with
 //     set_audio_listener(); the same independent come-and-go as VideoListener.
 #pragma once
 
@@ -67,7 +67,7 @@ struct AgentInfo {
 // this) and the features Tab5 can accept. Link-only — no mirror params here.
 struct HelloConfig {
     uint32_t max_payload = 256 * 1024;
-    uint16_t capabilities = kCapVideo | kCapAppInfo | kCapMedia;  // §4.6
+    uint16_t capabilities = kCapVideo | kCapAudio | kCapAppInfo | kCapMedia;  // §4.6
 };
 
 // Mirror parameters Tab5 hands the agent in MIRROR_START (protocol.md §4.4 args).
@@ -84,6 +84,7 @@ struct MirrorConfig {
     uint8_t jpeg_quality = 0;      // 1..100; 0 = the agent's default (80)
     uint8_t split_count = 0;       // strips per frame; 0 = the agent's default (4),
                                    // 1 = whole frame as one JPEG (the preview)
+    uint8_t audio_codec = kAudioCodecDefault;  // exact codec when AUDIO is requested
 };
 
 // The agent's MIRROR_START response (protocol.md §4.4 result): the source it is
@@ -99,7 +100,7 @@ struct MirrorInfo {
 
 // The audio format the agent chose, from the MIRROR_START response audio tail
 // (§6.2). Delivered to the AudioListener as on_audio_started when AUDIO was
-// started; open the audio sink (bsp_audio_open) with these. v1 codec is PCM_S16LE.
+// started; PCM is used over USB and Opus over TCP/Wi-Fi.
 struct AudioInfo {
     uint32_t sample_rate = 0;  // e.g. 48000
     uint8_t channels = 0;      // e.g. 2 (stereo; the Tab5 BSP downmixes for speaker)
@@ -188,25 +189,25 @@ public:
     virtual void on_video_strip(Link* /*link*/, const VideoStrip& /*strip*/) = 0;
 };
 
-// Audio channel delegate — the PCM mirror stream (TYPE=AUDIO, §6). The AUDIO
+// Audio channel delegate — the mirror audio stream (TYPE=AUDIO, §6). The AUDIO
 // analogue of VideoListener: a feature registers it with Link::set_audio_listener()
 // while it wants audio and clears it ({}) to detach; the link survives. Held weakly
 // (lock()ed before each dispatch). Callbacks fire on the reader thread, so NEVER
-// block here — copy the PCM into a ring and let an audio task drain it (§6.3);
+// block here — copy the codec unit and let an audio task drain it (§6.3);
 // blocking would stall the per-A_WRTE flow control that gates the video stream.
 class AudioListener {
 public:
     virtual ~AudioListener() = default;
 
     // The MIRROR_START response carried the §6.2 audio tail: the audio stream is
-    // about to flow with `info`'s format. Open the audio sink (bsp_audio_open) from
-    // this. Fires once per start_mirror() that requested (and got) AUDIO.
+    // about to flow with `info`'s format. Fires once per start_mirror() that
+    // requested (and got) AUDIO.
     virtual void on_audio_started(Link* /*link*/, const AudioInfo& /*info*/) {}
 
-    // One AUDIO frame = one codec unit (§6.3): for codec=PCM, `pcm`/`len` is a raw
-    // interleaved 16-bit-LE PCM chunk. `pcm` points into the Link's rx buffer and is
-    // valid only for the duration of this call — copy what you keep.
-    virtual void on_audio_data(Link* /*link*/, const uint8_t* /*pcm*/, size_t /*len*/) = 0;
+    // One AUDIO frame = one codec unit (§6.3): raw interleaved PCM for codec=PCM,
+    // one raw Opus packet for codec=Opus. `data` points into the Link's rx buffer
+    // and is valid only for the duration of this call — copy what you keep.
+    virtual void on_audio_data(Link* /*link*/, const uint8_t* /*data*/, size_t /*len*/) = 0;
 };
 
 // Media channel delegate — now-playing notifications (the MEDIA event, §4.4). A

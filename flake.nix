@@ -43,6 +43,7 @@
             pkgs.boringssl
             pkgs.jdk
             pkgs.android-tools
+            pkgs.libopus
             androidSdk
           ];
           shellHook = ''
