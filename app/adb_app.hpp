@@ -35,6 +35,11 @@ Transport connection_transport();
 // Convenience: true when the live (or most recent) connection is over ADB-over-TCP.
 inline bool connection_is_tcp() { return connection_transport() == Transport::Tcp; }
 
+// The process-wide ADB host name sent to Android during authorization and
+// Wireless debugging pairing. Configured once from the Tab5 factory MAC during
+// adb_app() startup and stable for the rest of the process.
+const std::string &adb_host_name();
+
 // Connect to the first USB device in the background. `on_result` runs on the LVGL
 // thread: true once Online, false on failure. (Single-device: one connection.)
 void adb_connect_async(std::function<void(bool ok)> on_result);

@@ -104,6 +104,11 @@ The simulator runs this same code against `idf_compat`'s persistent factory-MAC
 shim. Changing the comment does not rename an authorization already stored on a
 phone because an accepted key is not sent again.
 
+The Pair Device screen shows this exact host name above the Wi-Fi status so the
+user can match the entry displayed by Android before entering the pairing
+address and code. `app::adb_host_name()` exposes the startup-configured value to
+the UI; it is app state rather than another crypto-layer getter.
+
 The firmware does not link BoringSSL. `adb_spake2` implements the exact legacy
 Edwards25519 transcript required by Android, including BoringSSL's password
 scalar representation, while PSA Crypto supplies SHA-512, HKDF, AES-GCM, and

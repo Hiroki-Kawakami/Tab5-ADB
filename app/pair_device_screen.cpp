@@ -225,6 +225,13 @@ void PairDeviceScreen::build() {
     lv_obj_set_style_text_color(
         instructions_text, lv_color_hex(0x455a64), 0);
 
+    lv_obj_t *host_name = lv_label_create(instructions);
+    lv_label_set_text(host_name, app::adb_host_name().c_str());
+    lv_obj_set_style_text_font(
+        host_name, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(
+        host_name, lv_color_hex(0x1565c0), 0);
+
     wifi_status_ = lv_label_create(instructions);
     lv_obj_set_width(wifi_status_, LV_PCT(100));
     lv_label_set_long_mode(wifi_status_, LV_LABEL_LONG_WRAP);

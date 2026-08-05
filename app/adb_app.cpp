@@ -32,6 +32,11 @@ namespace {
 // listener weakly, so the holder is owned by a shared_ptr it hands in.
 std::shared_ptr<adb::Client> g_client;
 
+// The name sent in the ADB public-key record and shown by Android. Startup
+// replaces the component default with a name derived from this Tab5's factory
+// MAC; retain the default if the hardware identity cannot be read.
+std::string g_adb_host_name = "esp-adb-host";
+
 // Tracks whether ADB is currently connected, so apply_usb_host_power() can decide
 // the VBUS state. Written from the reader thread (Holder::on_state); a plain bool
 // is fine — apply_usb_host_power() only flips an I2C load switch.
@@ -57,7 +62,8 @@ void configure_adb_public_key_comment() {
     std::snprintf(comment, sizeof(comment),
                   "Tab5-ADB@%02X%02X%02X%02X",
                   mac[2], mac[3], mac[4], mac[5]);
-    adb::set_public_key_comment(comment);
+    g_adb_host_name = comment;
+    adb::set_public_key_comment(g_adb_host_name);
 }
 
 struct PairTaskContext {
@@ -214,6 +220,10 @@ void apply_usb_host_power() {
 
 Transport connection_transport() {
     return g_connection_is_usb ? Transport::Usb : Transport::Tcp;
+}
+
+const std::string &adb_host_name() {
+    return g_adb_host_name;
 }
 
 adb::Client* adb_client() { return g_client.get(); }
