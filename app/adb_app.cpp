@@ -1,9 +1,11 @@
 #include "adb_app.hpp"
 
+#include <esp_mac.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <memory>
 #include <new>
 #include <utility>
@@ -46,6 +48,17 @@ bool g_connection_is_usb = true;
 bool g_user_disconnect = false;
 
 constexpr uint32_t kPairTaskStack = 20 * 1024;
+
+void configure_adb_public_key_comment() {
+    uint8_t mac[6];
+    if (esp_efuse_mac_get_default(mac) != ESP_OK) return;
+
+    char comment[sizeof("Tab5-ADB@") + 8];
+    std::snprintf(comment, sizeof(comment),
+                  "Tab5-ADB@%02X%02X%02X%02X",
+                  mac[2], mac[3], mac[4], mac[5]);
+    adb::set_public_key_comment(comment);
+}
 
 struct PairTaskContext {
     std::string host;
@@ -242,6 +255,7 @@ void adb_app() {
                                     ? BSP_AUDIO_SPEAKER_MODE_OFF
                                     : BSP_AUDIO_SPEAKER_MODE_AUTO;
     ESP_ERROR_CHECK(bsp_init(&config));
+    app::configure_adb_public_key_comment();
     app::apply_usb_host_power();
 
     // Teach the USB transport how to reset the host port (called once after the

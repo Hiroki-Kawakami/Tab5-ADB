@@ -95,6 +95,15 @@ The component loads the same persisted identity used by `Client::connect_*`,
 so key objects never cross the public API. The call is blocking and owns an
 end-to-end deadline, so the caller must keep it off the LVGL thread.
 
+The public-key comment shown by Android is process-wide host identity metadata,
+not part of the persisted RSA key. At startup, `adb_app.cpp` reads the factory
+MAC through `esp_efuse_mac_get_default()` and sets it to
+`Tab5-ADB@XXXXXXXX`, using the final four octets without separators. Both RSA
+AUTH and Wireless debugging pairing then serialize the key with the same name.
+The simulator runs this same code against `idf_compat`'s persistent factory-MAC
+shim. Changing the comment does not rename an authorization already stored on a
+phone because an accepted key is not sent again.
+
 The firmware does not link BoringSSL. `adb_spake2` implements the exact legacy
 Edwards25519 transcript required by Android, including BoringSSL's password
 scalar representation, while PSA Crypto supplies SHA-512, HKDF, AES-GCM, and
