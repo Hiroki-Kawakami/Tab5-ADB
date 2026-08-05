@@ -52,10 +52,11 @@ the simulator shim consistent across projects:
   `app`; `app/CMakeLists.txt` carries the remaining reusable dependency graph.
   This explicit root edge is required because the `COMPONENTS main` trim turns
   off IDF's usual main-to-everything implicit dependency.
-- **Simulator:** `devkit_simulator(BOARD tab5 ...)` supplies SDL/LVGL,
-  `idf_compat`, `sim_harness`, the Tab5 BSP, UI/image libraries and the
+- **Simulator:** `devkit_simulator(...)` supplies SDL/LVGL, `idf_compat`,
+  `sim_harness`, the Kconfig-selected Tab5 BSP, UI/image libraries and the
   `idf_component_register` shim. `simulator/CMakeLists.txt` lists only this
-  project's component directories and host-only libusb/mbedTLS/zlib/opus links.
+  project's component directories and host-only libusb/mbedTLS/zlib/opus links;
+  `simulator/sdkconfig.defaults` owns the simulator-specific Kconfig choices.
   `simulator/platform/main.cpp` remains the executable entry point.
 
 The `components/opus_decoder` middleware owns the raw-Opus target seam: its

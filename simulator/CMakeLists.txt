@@ -4,7 +4,6 @@ devkit_simulator_init()
 project(simulator C CXX)
 
 devkit_simulator(
-    BOARD tab5
     LV_CONF_DIR .
     MAIN_SRCS platform/main.cpp
     COMPONENT_DIRS

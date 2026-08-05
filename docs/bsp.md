@@ -6,10 +6,10 @@ repository does not carry a fork or a second porting layer. Reusable board or
 simulator changes belong in esp-devkit first, followed by a submodule-pointer
 update here.
 
-The device selects Tab5 with `CONFIG_BSP_BOARD_TAB5=y` in
-`esp32p4/sdkconfig.defaults`. The simulator passes `BOARD tab5` to
-`devkit_simulator`. Both select the same model-agnostic public API in
-`esp-devkit/bsp/inc/bsp.h`, with device and SDL providers chosen by the build.
+The device and simulator select Tab5 with `CONFIG_BSP_BOARD_TAB5=y` in their
+respective `sdkconfig.defaults` files. Both select the same model-agnostic
+public API in `esp-devkit/bsp/inc/bsp.h`, with device and SDL providers chosen
+by the build.
 
 The Tab5 implementation is under `esp-devkit/bsp/boards/tab5/`:
 

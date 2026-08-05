@@ -51,6 +51,11 @@ overwritten.
 `nix develop -c cmake --fresh -S simulator -B build -G Ninja` to force a clean
 reconfigure after changing the simulator component graph.
 
+The simulator has its own gitignored `simulator/sdkconfig`, generated from the
+tracked `simulator/sdkconfig.defaults`. Shared component Kconfig options and the
+Tab5 board selection must be set there independently of the device config. Use
+the `menuconfig` and `save-defconfig` build targets for interactive changes.
+
 ## Headless UI verification (simverify)
 
 Drives the UI from a script with no host window — synthetic touch in, captured
