@@ -9,6 +9,7 @@
 #include "adb_app.hpp"
 #include "adb_client.hpp"
 #include "driver/jpeg_decode.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -79,11 +80,7 @@ void ScreencapPreview::stop() {
     }
     // The decode task (sole owner of the pipeline) is now joined, so it's safe to
     // release the JPEG HW engine / PPA client / ring buffers here.
-    if (jpeg_pipe_) {
-        jpeg_ppa_pipeline_del(static_cast<jpeg_ppa_pipeline_handle_t>(jpeg_pipe_));
-        jpeg_pipe_ = nullptr;
-        jpeg_pipe_max_ = 0;
-    }
+    release_jpeg_pipe();
     // present() pointed image_'s source at our dsc_ / img_buf_. The image outlives
     // this preview (it belongs to the screen), so drop that reference before the
     // dtor frees the buffers — otherwise a redraw after we're gone reads freed
@@ -170,6 +167,16 @@ void ScreencapPreview::on_stream_close(adb::Stream*, adb::Error) {
     if (work_sem_) xSemaphoreGive(static_cast<SemaphoreHandle_t>(work_sem_));
 }
 
+void ScreencapPreview::release_jpeg_pipe() {
+    if (jpeg_pipe_) jpeg_ppa_pipeline_del(static_cast<jpeg_ppa_pipeline_handle_t>(jpeg_pipe_));
+    jpeg_pipe_ = nullptr;
+    jpeg_pipe_max_ = 0;
+    for (auto& b : jpeg_strip_bufs_) {
+        heap_caps_free(b);
+        b = nullptr;
+    }
+}
+
 bool ScreencapPreview::decode_jpeg(const uint8_t* data, size_t len, int idx) {
     jpeg_decode_picture_info_t pi;
     if (jpeg_decoder_get_info(data, len, &pi) != ESP_OK) return false;
@@ -178,24 +185,29 @@ bool ScreencapPreview::decode_jpeg(const uint8_t* data, size_t len, int idx) {
     // both axes, MCU-aligned) so a portrait<->landscape rotation needs no rebuild.
     uint32_t maxdim = (std::max(pi.width, pi.height) + 15u) & ~15u;
     if (!jpeg_pipe_ || jpeg_pipe_max_ < maxdim) {
-        if (jpeg_pipe_) jpeg_ppa_pipeline_del(static_cast<jpeg_ppa_pipeline_handle_t>(jpeg_pipe_));
-        jpeg_pipe_ = nullptr;
+        release_jpeg_pipe();
+        size_t strip_size = 16 * maxdim * 2;
+        for (auto& b : jpeg_strip_bufs_) {
+            b = heap_caps_aligned_alloc(64, strip_size, MALLOC_CAP_SPIRAM);
+            if (!b) {
+                ESP_LOGW(TAG, "jpeg strip buffer alloc failed (%u bytes)", (unsigned)strip_size);
+                release_jpeg_pipe();
+                return false;
+            }
+        }
         jpeg_ppa_pipeline_cfg_t cfg = {};
-        cfg.max_pic_w = maxdim;
-        cfg.max_pic_h = maxdim;
-        cfg.strip_h_hint = 16;
-        cfg.ring_count = 4;
+        cfg.strip_bufs[0] = jpeg_strip_bufs_[0];
+        cfg.strip_bufs[1] = jpeg_strip_bufs_[1];
+        cfg.strip_buf_size = strip_size;
         cfg.strip_color_mode = PPA_SRM_COLOR_MODE_RGB565;
         cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // R-high RGB565 for LVGL
         cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
         cfg.yuv_full_range = true;                       // JFIF/UltraHDR base is full-range
-        cfg.strip_alloc_caps = MALLOC_CAP_SPIRAM;        // PSRAM ring; rate isn't critical
-        cfg.worker_core = 1;
-        cfg.worker_priority = 3;                         // low, like our decode task
         jpeg_ppa_pipeline_handle_t p = nullptr;
         if (jpeg_ppa_pipeline_new(&cfg, &p) != ESP_OK) {
             ESP_LOGW(TAG, "jpeg pipeline new failed (%ux%u)", (unsigned)pi.width,
                      (unsigned)pi.height);
+            release_jpeg_pipe();
             return false;
         }
         jpeg_pipe_ = p;

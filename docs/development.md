@@ -2,8 +2,8 @@
 
 ## Build environment
 
-The ESP-IDF (v6.0.2) toolchain and the host-simulator tools (cmake, ninja, gcc,
-SDL2, cjson, libusb, Mbed TLS 4, libopus) all come from a Nix flake. The base development
+The ESP-IDF (v6.1) toolchain and the host-simulator tools (cmake, ninja, gcc,
+SDL2, libusb, Mbed TLS 4, libopus) all come from a Nix flake. The base development
 shell is inherited from the pinned `esp-devkit` submodule. **Always run commands
 through `nix develop -c <cmd>`** (or from inside a `nix develop` shell) — never
 invoke `idf.py` / `cmake` / `esptool` directly.
@@ -61,9 +61,9 @@ the `menuconfig` and `save-defconfig` build targets for interactive changes.
 Drives the UI from a script with no host window — synthetic touch in, captured
 JPEG frames out — instead of clicking/screenshotting the real SDL window
 (fragile, host-state-dependent, hands the agent host-PC control). The same
-`simulator` binary runs the same app/BSP code with `SIMULATOR_HEADLESS=1` +
-`SIMULATOR_SCRIPT=<path>`; see `esp-devkit/sim_harness/` for the
-interpreter and `simulator/verify/` for examples.
+`simulator` binary runs the same app/BSP code headless, driven over stdin by
+`esp-devkit/tools/harness/harness.py` (the script interpreter; firmware side in
+`esp-devkit/libs/harness/`); see `simulator/verify/` for examples.
 
 ```sh
 nix develop -c ./run.sh simverify simulator/verify/home.txt
@@ -85,7 +85,7 @@ Two gotchas baked into the harness, worth knowing before writing a new script:
 - `tap` spans a press *and* release edge so both a BSP dispatch-task sample
   and an LVGL indev read see it; `down`/`move`/`up` scripts need `wait`s between
   steps for a drag to be sampled (each step only writes the touch snapshot).
-- `settle` pumps `lv_timer_handler` until no animation runs for a few frames —
+- `settle` waits until the UI reports idle (no LVGL animation running) —
   capturing before the frame settles is a scripting bug, not a harness one.
 
 ## Android agent — `android-agent/`

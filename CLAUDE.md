@@ -31,7 +31,7 @@ simulator modeled on `NameCardKnot`.
   JPEG/display, `app_process` Android quirks, LVGL). Check here before
   re-debugging something that looks like a vendor-stack bug.
 - [`docs/bsp.md`](docs/bsp.md) — the `esp-devkit` BSP integration (display/
-  touch/audio/SD, the DisplayManager touch callback).
+  touch/audio/SD, the ADBDisplayManager touch callback).
 - [`docs/adb.md`](docs/adb.md) — the ADB host-side client
   (`adb` public/private layering, `agent_link`, USB/TCP transport design).
 - [`docs/agent.md`](docs/agent.md) — `tab5adb-agent` (the Android-side

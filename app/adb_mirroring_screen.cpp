@@ -16,7 +16,7 @@
 #include "adb.hpp"  // adb::Error, adb::to_string
 #include "adb_app.hpp"
 #include "agent_client.hpp"
-#include "display_manager.hpp"
+#include "adb_display_manager.hpp"
 #include "esp_heap_caps.h"
 #include "settings.hpp"  // app::audio_output_mode
 #include "esp_timer.h"
@@ -42,13 +42,13 @@ ADBMirroringScreen::~ADBMirroringScreen() {
     if (!exited()) {
         if (auto l = app::agent_client().link()) l->set_video_listener({});
         release_all_pointers();
-        display_manager.set_touch_listener({});
+        adb_display_manager.set_touch_listener({});
         if (decode_task_) {
             decode_stop_ = true;
             xSemaphoreTake(static_cast<SemaphoreHandle_t>(decode_done_), portMAX_DELAY);
             decode_task_ = nullptr;
         }
-        if (overlay_active_) { display_manager.exit_overlay(); overlay_active_ = false; }
+        if (overlay_active_) { adb_display_manager.exit_overlay(); overlay_active_ = false; }
     }
     if (decode_done_) { vSemaphoreDelete(static_cast<SemaphoreHandle_t>(decode_done_)); decode_done_ = nullptr; }
     if (ready_q_) { vQueueDelete(static_cast<QueueHandle_t>(ready_q_)); ready_q_ = nullptr; }
@@ -77,7 +77,7 @@ void ADBMirroringScreen::build() {
     // cleared to black in start_mirror_ui via enter_overlay(clear_framebuffers) —
     // once the main display is isolated from them — so the letterbox stays black.
     for (int i = 0; i < kFbCount; ++i)
-        fb_[i] = static_cast<uint8_t*>(display_manager.framebuffer(i));
+        fb_[i] = static_cast<uint8_t*>(adb_display_manager.framebuffer(i));
     back_ = 0;
     front_ = -1;
 
@@ -119,7 +119,7 @@ void ADBMirroringScreen::onEnter() {
 }
 
 void ADBMirroringScreen::start_mirror_ui() {
-    // Drop the waiting label, switch the DisplayManager into overlay mode (the
+    // Drop the waiting label, switch the ADBDisplayManager into overlay mode (the
     // mirror owns the framebuffers; a small LVGL display renders the control strip
     // DM composites at flush time), register as the link's video listener, and
     // MIRROR_START. Build the strip BEFORE start_mirror so any on_orientation /
@@ -127,7 +127,7 @@ void ADBMirroringScreen::start_mirror_ui() {
     if (waiting_label_) { lv_obj_delete(static_cast<lv_obj_t*>(waiting_label_)); waiting_label_ = nullptr; }
 
     apply_overlay(cur_rot_, /*first=*/true);  // cur_rot_ defaults to 0 (portrait)
-    display_manager.set_overlay_visible(true);
+    adb_display_manager.set_overlay_visible(true);
     batch_touch_ = app::connection_is_tcp();
     touch_batch_.clear();
     has_last_touch_snapshot_ = false;
@@ -135,8 +135,8 @@ void ADBMirroringScreen::start_mirror_ui() {
     // Observe raw touch (pushed from the BSP dispatch task): a swipe out of
     // the bottom-left corner reveals a hidden strip. on_touch fires off the LVGL
     // thread, but the swipe logic only flips DM flags (no LVGL access).
-    display_manager.set_touch_listener(
-        std::static_pointer_cast<DisplayManager::TouchListener>(
+    adb_display_manager.set_touch_listener(
+        std::static_pointer_cast<ADBDisplayManager::TouchListener>(
             std::static_pointer_cast<ADBMirroringScreen>(shared_from_this())));
 
     // Register on the established link, then start mirroring. The video channel
@@ -291,19 +291,19 @@ void ADBMirroringScreen::apply_overlay(uint8_t rot, bool first) {
     // visibility (a rotation-change rebuild keeps the strip shown if it was).
     // Footprint = the cross x len strip flush against the viewer's bottom-left
     // corner; enter_overlay derives the (rotation-swapped) content size from it.
-    bool was_visible = !first && display_manager.overlay_visible();
+    bool was_visible = !first && adb_display_manager.overlay_visible();
     bool right, bottom;
     anchor_corner(rot, &right, &bottom);
     int x1 = right ? PANEL_W - kStripCross : 0;
     int y1 = bottom ? PANEL_H - kStripLen : 0;
     lv_area_t rect = {x1, y1, x1 + kStripCross - 1, y1 + kStripLen - 1};
 
-    DisplayManager::OverlayConfig cfg{rect, view_rot(rot) * 90, 1.0f, /*clear=*/first};
-    lv_obj_t* scr = display_manager.enter_overlay(cfg);
+    ADBDisplayManager::OverlayConfig cfg{rect, view_rot(rot) * 90, 1.0f, /*clear=*/first};
+    lv_obj_t* scr = adb_display_manager.enter_overlay(cfg);
     overlay_active_ = true;
     cur_rot_ = rot;
     if (scr) build_overlay_buttons(scr, rot_landscape(rot));
-    if (was_visible) display_manager.set_overlay_visible(true);
+    if (was_visible) adb_display_manager.set_overlay_visible(true);
 }
 
 void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
@@ -393,7 +393,7 @@ void ADBMirroringScreen::build_overlay_buttons(lv_obj_t* scr, bool land) {
         switch (id) {
             case HIDE:
                 lv_obj_add_event_fn(b, LV_EVENT_CLICKED, [](lv_event_t*) {
-                    display_manager.set_overlay_visible(false);
+                    adb_display_manager.set_overlay_visible(false);
                 });
                 break;
             case BACK:     wire_key(b, agent_link::kKeyBack); break;
@@ -553,7 +553,7 @@ void ADBMirroringScreen::release_all_pointers() {
 
 void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
     const bool po = passthrough_.load();
-    const bool visible = display_manager.overlay_visible();
+    const bool visible = adb_display_manager.overlay_visible();
     const uint8_t rot = cur_rot_;
     auto link = app::agent_client().link();
 
@@ -607,8 +607,8 @@ void ADBMirroringScreen::on_touch(const bsp_touch_point_t* pts, int count) {
                     // Reveal, masking this same press from the indev until the
                     // finger lifts so the gesture isn't delivered as a tap on a
                     // freshly-shown button. consume FIRST (close the unmasked window).
-                    display_manager.consume_overlay_touch();
-                    display_manager.set_overlay_visible(true);
+                    adb_display_manager.consume_overlay_touch();
+                    adb_display_manager.set_overlay_visible(true);
                     p.kind = PtKind::Ignore;  // gesture consumed
                 }
             }
@@ -675,7 +675,7 @@ void ADBMirroringScreen::onExit() {
     // in-flight one keeps us alive via its weak lock). UP any still-down
     // passthrough pointer first (link still alive) so the source sees no stuck finger.
     release_all_pointers();
-    display_manager.set_touch_listener({});
+    adb_display_manager.set_touch_listener({});
     // Producer detached; join the decode task before the framebuffers are reclaimed
     // by the previous screen's re-render, so it can't flush into a buffer being
     // reused.
@@ -687,7 +687,7 @@ void ADBMirroringScreen::onExit() {
     // Both threads are stopped, so no DM.flush can race the teardown: drop the
     // overlay (restores the indev to the main display + frees the overlay display).
     // The previous screen's re-render reclaims the panel.
-    if (overlay_active_) { display_manager.exit_overlay(); overlay_active_ = false; }
+    if (overlay_active_) { adb_display_manager.exit_overlay(); overlay_active_ = false; }
 }
 
 void ADBMirroringScreen::on_mirror_started(agent_link::Link*,
@@ -773,7 +773,7 @@ void ADBMirroringScreen::decode_trampoline(void* arg) {
 
 void ADBMirroringScreen::decode_loop() {
     // Consumer: drain finished frames, HW-decode each strip straight into the back
-    // framebuffer, and present it via DisplayManager.flush() — which composites the
+    // framebuffer, and present it via ADBDisplayManager.flush() — which composites the
     // overlay strip (if visible) before presenting. The decode task owns fb_/back_
     // exclusively (DM.flush takes the LVGL lock only for the compose), so the double
     // buffer needs no lock of its own.
@@ -799,7 +799,7 @@ void ADBMirroringScreen::decode_loop() {
         int slot;
         bool got = xQueueReceive(static_cast<QueueHandle_t>(ready_q_), &slot,
                                  pdMS_TO_TICKS(100)) == pdTRUE;
-        bool visible = display_manager.overlay_visible();
+        bool visible = adb_display_manager.overlay_visible();
 
         if (!got) {
             // No new frame within the timeout (static screen, or stream stalled).
@@ -807,7 +807,7 @@ void ADBMirroringScreen::decode_loop() {
                 // Strip just hidden over a static frame: re-decode the last frame so
                 // the band it covered shows the video again (flush won't compose).
                 if (decode_all(held, fb_[back_])) {
-                    display_manager.flush(back_);
+                    adb_display_manager.flush(back_);
                     front_ = back_;
                     back_ = (back_ + 1) % kFbCount;
                 }
@@ -815,7 +815,7 @@ void ADBMirroringScreen::decode_loop() {
             } else if (visible && front_ >= 0) {
                 // Strip up with no fresh video: recomposite it onto the displayed
                 // buffer in place (no swap) so it stays responsive (e.g. on show).
-                display_manager.flush(front_);
+                adb_display_manager.flush(front_);
                 last_visible = true;
             }
             continue;  // re-check stop
@@ -827,7 +827,7 @@ void ADBMirroringScreen::decode_loop() {
         // frame's pixels). Drop it and keep showing the last good frame instead.
         bool ok = decode_all(slot, fb_[back_]);
         if (ok) {
-            display_manager.flush(back_);  // composites the strip if visible
+            adb_display_manager.flush(back_);  // composites the strip if visible
             front_ = back_;
             back_ = (back_ + 1) % kFbCount;
             last_visible = visible;
@@ -867,12 +867,12 @@ bool ADBMirroringScreen::decode_one(uint8_t* jpeg, uint32_t len, uint16_t y,
                                     uint16_t h, uint8_t* dst) {
     if (!jpeg || len == 0 || !dst) return false;
 
-    const bool rgb888 = (display_manager.format() == BSP_PIXEL_FORMAT_RGB888);
+    const bool rgb888 = (adb_display_manager.format() == BSP_PIXEL_FORMAT_RGB888);
     const size_t bpp = rgb888 ? 3 : 2;
 
     // Lazily create the decoder (decode task only). The pixel format is baked
     // into the handle, which is fine: it is chosen at bsp_init and fixed for the
-    // boot. ring_count = 0 — whole-frame decodes only, no strip ring (each strip
+    // boot. No strip_bufs — whole-frame decodes only (each strip
     // already lands straight in its framebuffer row band).
     if (!jpeg_) {
         jpeg_enh_strip_decoder_cfg_t cfg = {};
@@ -887,8 +887,6 @@ bool ADBMirroringScreen::decode_one(uint8_t* jpeg, uint32_t len, uint16_t y,
         cfg.decode.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
         cfg.decode.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
         cfg.decode.yuv_full_range = true;  // MJPEG/JFIF strips are full-range
-        cfg.max_pic_w = PANEL_W;
-        cfg.max_pic_h = PANEL_H;
         cfg.timeout_ms = 1000;
         if (jpeg_enh_strip_decoder_new(&cfg, &jpeg_) != ESP_OK) { jpeg_ = nullptr; return false; }
     }

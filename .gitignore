@@ -7,5 +7,6 @@ sdkconfig.old
 .direnv
 .DS_Store
 nvs_data.json
+nvs_data.toml
 simulator/verify/out
 screenshots/

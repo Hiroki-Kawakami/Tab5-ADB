@@ -14,15 +14,16 @@ components/                  # PROJECT-SPECIFIC SHARED components (both targets)
   term_emu/                     VT100/xterm-subset terminal emulator (no LVGL/adb deps)
 esp-devkit/                   # git submodule: reusable cross-project infrastructure
   bsp/                          board support (bsp_*) — see bsp.md
-  ui_framework/                 LVGL C++ helpers, Screen base + ScreenManager
+  libs/ui_framework/            LVGL C++ helpers, Screen base + ScreenManager
+  libs/lvgl/                    LVGL, configured through Kconfig
   libs/image_framework/         streaming image decode/resize pipeline
   libs/jpeg_decode_enhanced/    enhanced P4 HW JPEG decode
   libs/wifi/                    Wi-Fi STA connection manager
+  libs/harness/                 scripted UI test harness (driven by tools/harness/harness.py)
   idf_compat/                   host ESP-IDF compatibility component
-  sim_harness/                  scripted headless simulator driver
-esp32p4/                     # DEVICE build root (IDF project) — main/ is app_main + esp_lvgl_port
+esp32p4/                     # DEVICE build root (IDF project) — main/ is app_main + LVGL port
 simulator/                   # SIMULATOR build root
-  platform/                  #   SIM-only entry (main.cpp: LVGL loop + sim_harness wiring)
+  platform/                  #   SIM-only entry (main.cpp: LVGL loop + harness command wiring)
 android-agent/               # ANDROID  tab5adb-agent (scrcpy-style app_process server) — see its README.md
 ```
 
@@ -53,7 +54,7 @@ the simulator shim consistent across projects:
   This explicit root edge is required because the `COMPONENTS main` trim turns
   off IDF's usual main-to-everything implicit dependency.
 - **Simulator:** `devkit_simulator(...)` supplies SDL/LVGL, `idf_compat`,
-  `sim_harness`, the Kconfig-selected Tab5 BSP, UI/image libraries and the
+  the harness, the Kconfig-selected Tab5 BSP, UI/image libraries and the
   `idf_component_register` shim. `simulator/CMakeLists.txt` lists only this
   project's component directories and host-only libusb/mbedTLS/zlib/opus links;
   `simulator/sdkconfig.defaults` owns the simulator-specific Kconfig choices.
@@ -96,16 +97,16 @@ host, so `wifi` gets its own backend split instead of an `idf_compat` shim
   `ui_framework` LVGL port (`lvgl_port_init`) then calls `adb_app()`.
 - Simulator: `simulator/platform/main.cpp` initializes the same port surface,
   calls `adb_app()`, registers project-specific harness commands, then runs
-  `lvgl_sim_loop(sim_harness_frame)` on the main thread.
+  `lvgl_sim_loop()` on the main thread.
 
 `adb_app()` in `app/adb_app.cpp` is the shared entry: `bsp_init()` → apply the
 stored USB-host power preference through `BSP_POWER_SWITCH_USB5V` →
-`DisplayManager::init()` (owns the LVGL display, the touch indev, and the
+`ADBDisplayManager::init()` (owns the LVGL display, the touch indev, and the
 mirror overlay compositor — see [bsp.md](bsp.md#displaymanager-touch-input)) →
 push the first screen. Panel is 720×1280 portrait (`PANEL_W`/`PANEL_H` in
 `app/adb_app.hpp`). The pixel format is chosen once at `bsp_init` and fixed for
 the boot — RGB888 by default. **RGB888 framebuffers hold LVGL's native B,G,R
-byte order**; every framebuffer writer (the DisplayManager overlay's PPA
+byte order**; every framebuffer writer (the ADBDisplayManager overlay's PPA
 565→888 composite, the mirror's JPEG decode `BGR` rgb_order, the sim's
 `SDL_PIXELFORMAT_BGR24` texture) agrees on it, keyed off
 `bsp_display_get_pixel_format()` — that's the one switch if the boot format
@@ -116,8 +117,8 @@ ever changes.
 NVS is the worked example of the device/simulator-divergent-API rule above: the
 seam is the ESP-IDF `nvs.h`/`nvs_flash.h` **C API** itself, so shared code calls
 that C API directly on both targets — device gets the real flash-backed
-component, the simulator gets a JSON-backed compat impl in
-`esp-devkit/idf_compat/` (file defaults to `nvs_data.json` in the cwd; override
+component, the simulator gets a text-file-backed compat impl in
+`esp-devkit/idf_compat/` (file defaults to `nvs_data.toml` in the cwd; override
 with the sim-only `nvs_flash_sim_set_path()` before the first open). Keep NVS as
 the C API on both sides — a C++ convenience layer, if wanted, belongs in a
 shared component on top of the C API, not as a per-target file.
@@ -173,12 +174,13 @@ What this means for app code:
 `simulator/platform/main.cpp` runs `lv_timer_handler` there — the *only*
 main-thread rule, independent of task creation. LVGL is single-threaded on both
 targets, so a FreeRTOS task that touches LVGL marshals via `lv_async_call`
-(device: `lvgl_port_lock`) either way.
+(or takes `lv_lock()`) either way.
 
 ## Other simulator notes
 
-- LVGL config is `simulator/lv_conf.h` (via `LV_CONF_INCLUDE_SIMPLE`).
-  `LV_COLOR_DEPTH 16` (RGB565, matches the panel).
+- LVGL is configured through Kconfig (`esp-devkit/libs/lvgl/Kconfig`) on both
+  targets; the simulator's `CONFIG_LV_*` choices live in
+  `simulator/sdkconfig.defaults`. RGB565 (the Kconfig default) matches the panel.
 - `esp-devkit/idf_compat/README.md` is the source of truth for the host compat
   surface (layout, include-path rules, how to add a shim). Current surface:
   `esp_err`/`esp_log`/`esp_check`/`esp_timer`/`esp_heap_caps`, `nvs`/`nvs_flash`,

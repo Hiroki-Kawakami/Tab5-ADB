@@ -8,7 +8,7 @@
 #include "adb_app.hpp"     // PANEL_W, PANEL_H
 #include "agent_audio.hpp"  // AgentAudio (Tab5Only audio playback)
 #include "agent_link.hpp"  // agent_link::Link, agent_link::VideoListener
-#include "display_manager.hpp"   // DisplayManager::TouchListener
+#include "adb_display_manager.hpp"   // ADBDisplayManager::TouchListener
 #include "jpeg_decode_enhanced.h"  // jpeg_enh_strip_decoder_handle_t (P4 HW on device, libjpeg on host)
 #include "screen.hpp"
 
@@ -53,7 +53,7 @@
 // strip's End button, launch progress goes to the log.
 class ADBMirroringScreen : public Screen,
                            public agent_link::VideoListener,
-                           public DisplayManager::TouchListener {
+                           public ADBDisplayManager::TouchListener {
 public:
     ADBMirroringScreen();
     ~ADBMirroringScreen() override;
@@ -67,7 +67,7 @@ public:
     void on_video_strip(agent_link::Link* link, const agent_link::VideoStrip& strip) override;
     void on_orientation(agent_link::Link* link, const agent_link::OrientationInfo& info) override;
 
-    // DisplayManager::TouchListener — fires on the BSP dispatch task. Detects the
+    // ADBDisplayManager::TouchListener — fires on the BSP dispatch task. Detects the
     // bottom-left corner swipe that reveals a hidden control strip (see poll-free
     // note below).
     void on_touch(const bsp_touch_point_t* pts, int count) override;
@@ -195,7 +195,7 @@ private:
     // Decode one full-width strip straight into framebuffer `dst`, packed at row
     // `y` (decode task). Lazily creates the JPEG engine. Returns false on a decode
     // error or a non-full-width strip. `dst` is byte-addressed (the panel format —
-    // RGB565 or RGB888 — is resolved from the DisplayManager at decode time).
+    // RGB565 or RGB888 — is resolved from the ADBDisplayManager at decode time).
     bool decode_one(uint8_t* jpeg, uint32_t len, uint16_t y, uint16_t h,
                     uint8_t* dst);
     void free_decoder();

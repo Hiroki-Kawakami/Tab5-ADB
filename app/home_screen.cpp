@@ -2,8 +2,6 @@
 
 #include <functional>
 #include <memory>
-#include <src/core/lv_obj_style_gen.h>
-#include <src/widgets/button/lv_button.h>
 
 #include "about_screen.hpp"
 #include "adb_app.hpp"

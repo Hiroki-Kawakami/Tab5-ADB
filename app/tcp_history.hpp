@@ -5,7 +5,7 @@
 
 // Recent ADB-over-TCP targets ("host:port"), most-recent-first. Persisted in NVS
 // (namespace "tab5adb", key "tcp_history") as a newline-separated string — so a
-// dev tool can pre-seed it by editing the simulator's JSON-backed nvs_data.json
+// dev tool can pre-seed it by editing the simulator's text-backed nvs_data.toml
 // (gitignored), which the simverify TCP flow then reads back. The Wireless card on
 // HomeScreen renders the list; tapping an entry reconnects to that target (wired
 // once the TCP transport lands).

@@ -130,7 +130,7 @@ buffer** (decode into the one two frames behind the displayed one) so the
 decode task never blocks on panel scan-out before reusing a buffer.
 
 The control overlay (Back/Home/Recents/Vol/Power/OpMode/DispMode/Hide/End) is
-a small LVGL display composited at flush time by `DisplayManager`, anchored to
+a small LVGL display composited at flush time by `ADBDisplayManager`, anchored to
 whichever panel corner becomes the viewer's bottom-left after accounting for
 the *source* device's rotation (`agent_link`'s ORIENTATION event) — see
 `ADBMirroringScreen`'s `view_rot()` for the corner/angle mapping (verified

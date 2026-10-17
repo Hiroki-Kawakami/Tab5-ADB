@@ -1,7 +1,7 @@
 # HomeScreen Wireless card: recent ADB-over-TCP targets list.
 # Seed the targets first by writing tab5adb/tcp_history into the gitignored
-# nvs_data.json (newline-joined host:port, hex-encoded incl. the trailing NUL,
-# most-recent-first) — the sim NVS stores values as hex. With history present the
+# nvs_data.toml as a str (newline-joined host:port, most-recent-first; format in
+# esp-devkit/idf_compat/README.md). With history present the
 # "Recent" list renders; tapping a row fills the address field with that target.
 wait 600
 settle

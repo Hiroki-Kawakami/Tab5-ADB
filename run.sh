@@ -11,7 +11,7 @@ case "$TARGET" in
     ;;
   simverify)
     # Headless, scripted UI verification (no host window): build, then run the
-    # given sim-harness script (see esp-devkit/sim_harness/sim_harness.h). Captured
+    # given harness script (see esp-devkit/tools/harness/harness.py). Captured
     # frames go wherever the script's `capture` lines point.
     SCRIPT=$2
     if [ -z "$SCRIPT" ]; then
@@ -20,7 +20,7 @@ case "$TARGET" in
     fi
     [ -d build ] || cmake --fresh -S simulator -B build -G Ninja
     cmake --build build
-    SIMULATOR_HEADLESS=1 SIMULATOR_SCRIPT="$SCRIPT" ./build/simulator
+    python3 esp-devkit/tools/harness/harness.py --log --sim ./build/simulator "$SCRIPT"
     ;;
   esp32p4)
     idf.py -C esp32p4 flash monitor

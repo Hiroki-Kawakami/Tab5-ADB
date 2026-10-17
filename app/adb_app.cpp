@@ -13,7 +13,7 @@
 #include "adb.hpp"  // adb::Client, adb::ClientListener
 #include "agent_client.hpp"
 #include "bsp.h"
-#include "display_manager.hpp"
+#include "adb_display_manager.hpp"
 #include "lvgl.hpp"
 #include "modal.hpp"
 #include "screen_manager.hpp"
@@ -252,7 +252,7 @@ void adb_app() {
     config.display.fb_num = 3;
     // Panel pixel format is fixed for the boot (changing it needs a restart). The
     // Settings screen persists the user's choice (default RGB888 — avoids the 565
-    // banding on the mirror's gradients); the DisplayManager, the overlay compositor
+    // banding on the mirror's gradients); the ADBDisplayManager, the overlay compositor
     // and the mirror decode all honour bsp_display_get_pixel_format().
     config.display.pixel_format =
         (app::display_color_depth() == app::ColorDepth::Color16)
@@ -284,7 +284,7 @@ void adb_app() {
     bsp_audio_set_volume(app::master_volume());
     bsp_audio_set_eq_enabled(app::equalizer_enabled());
 
-    display_manager.init();
+    adb_display_manager.init();
     lv_async_call([](){
         screen_manager.push(std::make_shared<HomeScreen>());
     });

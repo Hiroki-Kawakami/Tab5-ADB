@@ -1,4 +1,4 @@
-#include "display_manager.hpp"
+#include "adb_display_manager.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -8,13 +8,13 @@
 #include "driver/ppa.h"
 #include "esp_heap_caps.h"
 
-DisplayManager display_manager;
+ADBDisplayManager adb_display_manager;
 
 // Two BSP frame buffers drive LVGL in DIRECT mode: LVGL renders straight into
 // the panel buffers and flush_cb hands the finished buffer to the BSP. The BSP
 // (device drivers or the simulator's SDL backend) is the single hardware seam,
 // so this setup is identical on both targets.
-void DisplayManager::init() {
+void ADBDisplayManager::init() {
     bsp_pixel_format_t fmt = bsp_display_get_pixel_format();
     void  *fb0 = bsp_display_get_frame_buffer(0);
     void  *fb1 = bsp_display_get_frame_buffer(1);
@@ -27,24 +27,24 @@ void DisplayManager::init() {
                                        : LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(main_disp_, fb0, fb1, PANEL_W * PANEL_H * bpp,
                            LV_DISPLAY_RENDER_MODE_DIRECT);
-    lv_display_set_flush_cb(main_disp_, &DisplayManager::main_flush_cb);
+    lv_display_set_flush_cb(main_disp_, &ADBDisplayManager::main_flush_cb);
 
     indev_ = lv_indev_create();
     lv_indev_set_type(indev_, LV_INDEV_TYPE_POINTER);
     lv_indev_set_user_data(indev_, this);
-    lv_indev_set_read_cb(indev_, &DisplayManager::indev_read_cb);
+    lv_indev_set_read_cb(indev_, &ADBDisplayManager::indev_read_cb);
 
     overlay_mtx_ = xSemaphoreCreateMutex();
     touch_mtx_ = xSemaphoreCreateMutex();
 
-    bsp_touch_set_event_cb(&DisplayManager::touch_event_cb, this);
+    bsp_touch_set_event_cb(&ADBDisplayManager::touch_event_cb, this);
 }
 
-void DisplayManager::main_flush_cb(lv_display_t *disp, const lv_area_t * /*area*/,
+void ADBDisplayManager::main_flush_cb(lv_display_t *disp, const lv_area_t * /*area*/,
                                    uint8_t *px_map) {
     // In overlay mode the main display renders into a scratch buffer and the mirror
     // owns the panel framebuffers, so don't present anything here.
-    if (display_manager.mode_ == Mode::Overlay) {
+    if (adb_display_manager.mode_ == Mode::Overlay) {
         lv_display_flush_ready(disp);
         return;
     }
@@ -53,8 +53,8 @@ void DisplayManager::main_flush_cb(lv_display_t *disp, const lv_area_t * /*area*
     lv_display_flush_ready(disp);
 }
 
-void DisplayManager::indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
-    auto *self = static_cast<DisplayManager *>(lv_indev_get_user_data(indev));
+void ADBDisplayManager::indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
+    auto *self = static_cast<ADBDisplayManager *>(lv_indev_get_user_data(indev));
     // The hardware read happens on the BSP dispatch task; here we consume the cached
     // single-tap feed. lvgl_suppress_ masks the press until the finger lifts (the
     // swipe-to-reveal gesture), so check it together with the press state.
@@ -106,15 +106,15 @@ void DisplayManager::indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     }
 }
 
-bsp_pixel_format_t DisplayManager::format() const {
+bsp_pixel_format_t ADBDisplayManager::format() const {
     return bsp_display_get_pixel_format();
 }
 
-void *DisplayManager::framebuffer(int index) const {
+void *ADBDisplayManager::framebuffer(int index) const {
     return bsp_display_get_frame_buffer(index);
 }
 
-void DisplayManager::flush(int index) {
+void ADBDisplayManager::flush(int index) {
     if (mode_ == Mode::Overlay && overlay_visible_) {
         // Composite the overlay bar into the framebuffer. This runs on the screen's
         // decode/worker thread and reads the overlay buffer the LVGL renderer
@@ -128,20 +128,20 @@ void DisplayManager::flush(int index) {
     bsp_display_flush(index);
 }
 
-void DisplayManager::set_touch_listener(std::weak_ptr<TouchListener> listener) {
+void ADBDisplayManager::set_touch_listener(std::weak_ptr<TouchListener> listener) {
     xSemaphoreTake(touch_mtx_, portMAX_DELAY);
     touch_listener_ = std::move(listener);
     xSemaphoreGive(touch_mtx_);
 }
 
-void DisplayManager::consume_overlay_touch() {
+void ADBDisplayManager::consume_overlay_touch() {
     xSemaphoreTake(touch_mtx_, portMAX_DELAY);
     lvgl_suppress_ = true;
     xSemaphoreGive(touch_mtx_);
 }
 
-void DisplayManager::touch_event_cb(const bsp_touch_point_t *points, int count, void *arg) {
-    auto *self = static_cast<DisplayManager *>(arg);
+void ADBDisplayManager::touch_event_cb(const bsp_touch_point_t *points, int count, void *arg) {
+    auto *self = static_cast<ADBDisplayManager *>(arg);
     if (count < 0) count = 0;
     if (count > kMaxTouch) count = kMaxTouch;
 
@@ -158,7 +158,7 @@ void DisplayManager::touch_event_cb(const bsp_touch_point_t *points, int count, 
 
 // MARK: Overlay mode
 
-lv_obj_t *DisplayManager::enter_overlay(const OverlayConfig &cfg) {
+lv_obj_t *ADBDisplayManager::enter_overlay(const OverlayConfig &cfg) {
     // Re-entrant: called both to first enter overlay mode and to rebuild the
     // overlay for a new footprint / rotation (e.g. the mirror flipping portrait
     // <-> landscape). Drop any existing overlay display first (LVGL thread → no
@@ -247,7 +247,7 @@ lv_obj_t *DisplayManager::enter_overlay(const OverlayConfig &cfg) {
     return lv_display_get_screen_active(overlay_disp_);
 }
 
-void DisplayManager::exit_overlay() {
+void ADBDisplayManager::exit_overlay() {
     if (mode_ != Mode::Overlay) return;
     mode_ = Mode::Normal;
     overlay_visible_ = false;
@@ -264,9 +264,9 @@ void DisplayManager::exit_overlay() {
     if (overlay_buf_) { heap_caps_free(overlay_buf_); overlay_buf_ = nullptr; }
 }
 
-void DisplayManager::set_overlay_visible(bool visible) { overlay_visible_ = visible; }
+void ADBDisplayManager::set_overlay_visible(bool visible) { overlay_visible_ = visible; }
 
-void DisplayManager::compose_overlay(int index) {
+void ADBDisplayManager::compose_overlay(int index) {
     // Hold overlay_mtx_ for the whole read+composite: reconfigure_overlay (LVGL
     // thread) frees and reallocates overlay_buf_ + geometry, so without this a
     // concurrent rotate-switch could free the buffer mid-PPA. A leaf lock (we
@@ -320,7 +320,7 @@ void DisplayManager::compose_overlay(int index) {
     xSemaphoreGive(overlay_mtx_);
 }
 
-void DisplayManager::panel_to_content(int px, int py, int *lx, int *ly) const {
+void ADBDisplayManager::panel_to_content(int px, int py, int *lx, int *ly) const {
     // Panel point relative to the footprint origin.
     float ox = px - overlay_rect_.x1;
     float oy = py - overlay_rect_.y1;

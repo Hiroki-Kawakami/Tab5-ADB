@@ -201,8 +201,6 @@ void AgentPreview::decode_loop() {
             cfg.decode.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
             cfg.decode.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
             cfg.decode.yuv_full_range = true;
-            cfg.max_pic_w = static_cast<uint32_t>(pad_w_);
-            cfg.max_pic_h = static_cast<uint32_t>(pad_h_);
             cfg.timeout_ms = 1000;
             if (jpeg_enh_strip_decoder_new(&cfg, &jpeg_) != ESP_OK) {
                 jpeg_ = nullptr;

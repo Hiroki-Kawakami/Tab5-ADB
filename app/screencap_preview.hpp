@@ -56,6 +56,7 @@ private:
     static void decode_trampoline(void* arg);
     void decode_loop();               // decode task (Core 1, low prio): PNG/JPEG -> img_buf_[back]
     bool decode_jpeg(const uint8_t* data, size_t len, int idx);  // decode task
+    void release_jpeg_pipe();
 
     lv_obj_t* image_;
     const int max_w_, max_h_;
@@ -100,7 +101,8 @@ private:
     // Android 16 device is available to verify it for real.
     std::atomic<bool> use_jpeg_{false};
     void* jpeg_pipe_ = nullptr;       // jpeg_ppa_pipeline_handle_t (lazy, decode task)
-    uint32_t jpeg_pipe_max_ = 0;      // max_pic dimension the pipeline was built for
+    uint32_t jpeg_pipe_max_ = 0;      // max dimension the pipeline was built for
+    void* jpeg_strip_bufs_[2] = {};
     const char* last_fmt_ = "?";      // "jpeg"/"png" for the timing log
 
     std::atomic<bool> stopped_{false};

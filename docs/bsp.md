@@ -22,7 +22,7 @@ The Tab5 implementation is under `esp-devkit/bsp/boards/tab5/`:
 
 ## Display and power
 
-`DisplayManager` (`app/display_manager.{hpp,cpp}`) owns the LVGL display,
+`ADBDisplayManager` (`app/adb_display_manager.{hpp,cpp}`) owns the LVGL display,
 framebuffer presentation, touch indev and mirror overlay compositor. App code
 uses it instead of writing panel state directly, while the manager delegates
 framebuffer allocation, format and flushing to `bsp_display_*`.
@@ -62,7 +62,7 @@ Plain `fread` is slow on the device path. APK push reads in 16 KiB chunks with
 ## Touch dispatch
 
 The shared BSP dispatch task owns touch sampling and delivers display-space
-snapshots through `bsp_touch_set_event_cb`. `DisplayManager::init()` registers
+snapshots through `bsp_touch_set_event_cb`. `ADBDisplayManager::init()` registers
 one callback; it caches pointer 0 for LVGL and forwards the complete sample to
 the active weak `TouchListener`. The callback runs off the LVGL thread, so
 listeners must synchronize their state and marshal any widget access.

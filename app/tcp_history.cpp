@@ -46,7 +46,7 @@ void write(const std::vector<std::string>& items) {
     nvs_handle_t h;
     if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
     if (items.empty()) {
-        nvs_erase_key(h, kKey);  // keep nvs_data.json clean when history is empty
+        nvs_erase_key(h, kKey);  // keep nvs_data.toml clean when history is empty
     } else {
         std::string joined;
         for (size_t i = 0; i < items.size(); i++) {

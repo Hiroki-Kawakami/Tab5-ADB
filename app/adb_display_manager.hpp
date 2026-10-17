@@ -25,7 +25,7 @@
 //    convert) before presenting. The screen decides which buffer / whether to
 //    swap, so it controls frame cadence (got-frame → swap; timeout → recomposite
 //    the bar on the displayed buffer in place).
-class DisplayManager {
+class ADBDisplayManager {
 public:
     // Create the main LVGL display + the touch indev over the BSP framebuffers
     // and start in normal mode. Call once from adb_app(), after bsp_init().
@@ -136,4 +136,4 @@ private:
                                             // (keeps it off the panel framebuffers)
 };
 
-extern DisplayManager display_manager;
+extern ADBDisplayManager adb_display_manager;
