@@ -34,6 +34,10 @@
         androidSdk = androidComposition.androidsdk;
         androidSdkRoot = "${androidSdk}/libexec/android-sdk";
       in {
+        packages.fw-image = esp-devkit.lib.${system}.mkFwImage {
+          name = "tab5-adb-fw";
+        };
+
         devShells.default = pkgs.mkShell {
           inputsFrom = [ esp-devkit.devShells.${system}.default ];
           ADB_IDF_COMPAT_DIR = "${esp-devkit.outPath}/idf_compat";

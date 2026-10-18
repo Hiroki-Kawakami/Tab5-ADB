@@ -138,3 +138,13 @@ ADB_PAIR_CODE=PAIR_CODE \
 TEST=core/test_pair_tcp \
 nix develop -c components/adb/test/run.sh
 ```
+
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/firmware.yml`: it builds
+`esp32p4` inside the firmware build image (the flake's `fw-image`, built with
+esp-devkit's `mkFwImage` and cached in GHCR under a key hashed from the flake
+inputs) and publishes a release with `tab5-adb-esp32p4-<tag>.bin`, the merged
+binary to flash at `0x0`. `workflow_dispatch` builds without releasing.
+`kAppVersion` in `app/app_version.hpp` is bumped by hand and not checked
+against the tag.
