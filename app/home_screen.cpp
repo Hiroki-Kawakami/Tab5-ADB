@@ -1,5 +1,7 @@
 #include "home_screen.hpp"
 
+#include <esp_app_desc.h>
+
 #include <functional>
 #include <memory>
 
@@ -7,7 +9,6 @@
 #include "adb_app.hpp"
 #include "adb_device_screen.hpp"
 #include "agent_client.hpp"
-#include "app_version.hpp"
 #include "modal.hpp"
 #include "pair_device_screen.hpp"
 #include "resources/resources.h"
@@ -104,7 +105,7 @@ void HomeScreen::build_hero() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_48, 0);
 
     lv_obj_t *version = lv_label_create(hero);
-    lv_label_set_text(version, kAppVersion);
+    lv_label_set_text(version, esp_app_get_description()->version);
     lv_obj_set_style_text_color(version, lv_color_hex(0x90a4ae), 0);
     lv_obj_set_style_text_font(version, &lv_font_montserrat_16, 0);
 

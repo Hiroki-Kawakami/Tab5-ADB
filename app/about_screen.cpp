@@ -1,9 +1,10 @@
 #include "about_screen.hpp"
 
+#include <esp_app_desc.h>
+
 #include <functional>
 
 #include "adb_app.hpp"
-#include "app_version.hpp"
 #include "modal.hpp"
 #include "resources/resources.h"
 #include "screen_manager.hpp"
@@ -159,7 +160,7 @@ void AboutScreen::build() {
         lv_obj_set_style_text_color(tagline, lv_color_hex(0x90a4ae), 0);
 
         lv_obj_t *version = lv_label_create(app_block);
-        lv_label_set_text(version, kAppVersion);
+        lv_label_set_text(version, esp_app_get_description()->version);
         lv_obj_set_style_text_font(version, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(version, lv_color_hex(0x607d8b), 0);
 

@@ -146,5 +146,7 @@ Pushing a `v*` tag runs `.github/workflows/firmware.yml`: it builds
 esp-devkit's `mkFwImage` and cached in GHCR under a key hashed from the flake
 inputs) and publishes a release with `tab5-adb-esp32p4-<tag>.bin`, the merged
 binary to flash at `0x0`. `workflow_dispatch` builds without releasing.
-`kAppVersion` in `app/app_version.hpp` is bumped by hand and not checked
-against the tag.
+The version shown in the UI is `esp_app_get_description()->version`: CI passes
+the tag name (or `checkbuild-<short sha>` for `workflow_dispatch`) as
+`PROJECT_VER`; local device and simulator builds use
+`git describe --always --tags --dirty` at configure time.
