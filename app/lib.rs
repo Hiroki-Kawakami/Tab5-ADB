@@ -15,9 +15,10 @@ mod resources {
     include!(concat!(env!("OUT_DIR"), "/resources.rs"));
 }
 
+use alloc::boxed::Box;
 use core::ffi::CStr;
 
-use devkit_ui::{App, AppConfig};
+use devkit_ui::{App, AppConfig, AutoRotation};
 use idf::log::error;
 
 use screens::Home;
@@ -40,7 +41,9 @@ pub fn run() {
     if let Err(err) = display.set_brightness(100) {
         error!(TAG, "set_brightness: {err}");
     }
-    let mut app = match App::new(display, board.touch, Home, AppConfig::new(&resources::TOUCH)) {
+    let mut config = AppConfig::new(&resources::TOUCH);
+    config.plugins.push(Box::new(AutoRotation::new(board.imu)));
+    let mut app = match App::new(display, board.touch, Home, config) {
         Ok(app) => app,
         Err(err) => {
             error!(TAG, "app: {err}");
