@@ -23,7 +23,7 @@ use core::ffi::CStr;
 use devkit_ui::{App, AppConfig, AutoRotation, SavedColorMode};
 use idf::log::error;
 
-use screens::Home;
+use screens::HomeScreen;
 use status_bar::StatusBar;
 
 const TAG: &CStr = c"tab5-adb";
@@ -46,7 +46,7 @@ pub fn run() {
     config.plugins.push(Box::new(rotation.clone()));
     config.plugins.push(Box::new(SavedColorMode::new()));
     screens::set_rotation(rotation);
-    let mut app = match App::new(display, board.touch, Home::new(), config) {
+    let mut app = match App::new(display, board.touch, HomeScreen::new(), config) {
         Ok(app) => app,
         Err(err) => {
             error!(TAG, "app: {err}");

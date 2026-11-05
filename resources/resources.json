@@ -3,15 +3,42 @@
     "TOUCH": {
       "base": "@touch",
       "colors": {
-        "light": { "card_title": "#37474f", "card_icon": "#455a64", "online": "#2e7d32" },
-        "dark": { "card_title": "#cfd8dc", "card_icon": "#90a4ae", "online": "#66bb6a" }
+        "light": {
+          "card_title": "#37474f",
+          "card_icon": "#455a64",
+          "online": "#2e7d32"
+        },
+        "dark": {
+          "card_title": "#cfd8dc",
+          "card_icon": "#90a4ae",
+          "online": "#66bb6a"
+        }
+      },
+      "fonts": {
+        "caption": "caption_20"
       }
     }
   },
   "font": {
+    "caption_20": {
+      "size": 20,
+      "font": "@montserrat",
+      "variation": {
+        "wght": 400
+      },
+      "glyph": [
+        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~…›•"
+      ]
+    },
     "hero_56": {
-      "size": 56, "font": "@montserrat", "variation": { "wght": 700 },
-      "glyph": ["Tab5 ADB"]
+      "size": 56,
+      "font": "@montserrat",
+      "variation": {
+        "wght": 700
+      },
+      "glyph": [
+        "Tab5 ADB"
+      ]
     },
     "icon_28": {
       "size": 28,
@@ -19,17 +46,31 @@
         "WIFI": "icons/wifi.svg",
         "BATTERY": "icons/battery-3.svg",
         "LINK": "icons/link.svg",
-        "HISTORY": "icons/history.svg"
+        "HISTORY": "icons/history.svg",
+        "BATTERY_CHARGING": "icons/battery-charging.svg"
       }
     },
-    "icon_36": {
-      "size": 36,
+    "icon_40": {
+      "size": 40,
       "icon": {
         "SETTINGS": "icons/settings.svg",
         "FOLDER": "icons/folder.svg",
         "GITHUB": "icons/brand-github.svg",
         "USB": "icons/usb.svg",
-        "WIFI": "icons/wifi.svg"
+        "WIFI": "icons/wifi.svg",
+        "TERMINAL": "icons/terminal-2.svg",
+        "APPS": "icons/apps.svg",
+        "LIST": "icons/list.svg",
+        "CAMERA": "icons/camera.svg",
+        "POWER": "icons/power.svg",
+        "DISCONNECT": "icons/plug-connected-x.svg",
+        "NAV_BACK": "icons/nav-back.svg",
+        "NAV_HOME": "icons/circle.svg",
+        "NAV_RECENTS": "icons/square.svg",
+        "MUSIC": "icons/music.svg",
+        "PREVIOUS": "icons/player-skip-back.svg",
+        "PLAY": "icons/player-play.svg",
+        "NEXT": "icons/player-skip-forward.svg"
       }
     }
   }

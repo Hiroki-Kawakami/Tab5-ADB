@@ -39,13 +39,13 @@ pub enum SettingsMsg {
 const PLAYBACKS: [(SoundPlayback, &str); 2] = [(SoundPlayback::Tab5, "M5Stack Tab5"), (SoundPlayback::Android, "Android Device")];
 const PLAYBACK_LABELS: [&str; 2] = [PLAYBACKS[0].1, PLAYBACKS[1].1];
 
-pub struct Settings {
+pub struct SettingsScreen {
     color_bits: usize,
     volume: u8,
     equalizer: bool,
 }
 
-impl Settings {
+impl SettingsScreen {
     pub(crate) fn new() -> Self {
         Self { color_bits: 1, volume: 255, equalizer: true }
     }
@@ -57,7 +57,7 @@ fn slider_row<'a, M: Copy>(ui: &'a Ui<M>, label: &'a str, text: &'a str, value: 
     table_row(ui, [ui.column([header, slider(ui, value, on_drag)]).padding_each(0, theme.widgets.unit.padding, 0, theme.widgets.unit.gap).grow(1)])
 }
 
-impl Component for Settings {
+impl Component for SettingsScreen {
     type Msg = SettingsMsg;
 
     fn update(&mut self, msg: SettingsMsg, cx: &mut Cx<Self>) {
@@ -137,7 +137,7 @@ impl Component for Settings {
     }
 }
 
-impl Screen for Settings {
+impl Screen for SettingsScreen {
     fn will_disappear(&mut self, _: &mut Cx<Self>) {
         settings::commit();
     }

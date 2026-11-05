@@ -14,7 +14,8 @@ use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Prop, R
 use crate::fonts::{HERO, icon, small_icon};
 use crate::resources::{colors, icons};
 
-use super::settings::Settings;
+use super::adb_dashboard::AdbDashboardScreen;
+use super::settings::SettingsScreen;
 
 const GAP: i16 = 20;
 const CARD_PADDING: i16 = 24;
@@ -45,13 +46,13 @@ pub enum Msg {
     Recent,
 }
 
-pub struct Home {
+pub struct HomeScreen {
     address: TextBuffer,
     ssid: Option<String>,
     recent: Vec<String>,
 }
 
-impl Home {
+impl HomeScreen {
     pub fn new() -> Self {
         Self {
             address: TextBuffer::new(),
@@ -120,12 +121,13 @@ impl Home {
     }
 }
 
-impl Component for Home {
+impl Component for HomeScreen {
     type Msg = Msg;
 
     fn update(&mut self, msg: Msg, cx: &mut Cx<Self>) {
         match msg {
-            Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(Settings::new()),
+            Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
+            Msg::UsbConnect => cx.nav_of::<Root>().push(AdbDashboardScreen::new()),
             Msg::Address(input) => {
                 if self.address.apply(input) {
                     cx.rebuild();
@@ -149,7 +151,7 @@ impl Component for Home {
     }
 }
 
-impl Screen for Home {}
+impl Screen for HomeScreen {}
 
 fn card<'a>(ui: &'a Ui<Msg>, content: Element<'a, Msg>) -> Element<'a, Msg> {
     ui.column([content]).padding(CARD_PADDING).radius(CARD_RADIUS).background(ui.colors().surface)
