@@ -8,22 +8,16 @@ use core::time::Duration;
 
 use bsp_rs::power::Power;
 use bsp_rs::rtc::Rtc;
-use devkit_gfx::FontChain;
-use devkit_ui::{Align, Bars, Component, Cx, Element, Icon, This, Ui, id};
+use devkit_ui::{Align, Bars, Component, Cx, Element, This, Ui, id};
 use idf::executor;
 use idf::log::error;
 
-use crate::resources::{ICON_28, icons};
+use crate::fonts::small_icon;
+use crate::resources::icons;
 
 const TAG: &CStr = c"status_bar";
 
 pub const STATUS_BAR_HEIGHT: i16 = 52;
-
-static SMALL_ICONS: FontChain = FontChain::new(&[&ICON_28]);
-
-const fn small_icon(glyph: char) -> Icon {
-    Icon { font: &SMALL_ICONS, glyph }
-}
 
 pub struct StatusBar {
     rtc: Option<&'static Rtc>,

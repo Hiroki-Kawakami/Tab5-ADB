@@ -3,11 +3,27 @@
     "TOUCH": { "base": "@touch" }
   },
   "font": {
+    "hero_56": {
+      "size": 56, "font": "@montserrat", "variation": { "wght": 700 },
+      "glyph": ["Tab5 ADB"]
+    },
     "icon_28": {
       "size": 28,
       "icon": {
         "WIFI": "icons/wifi.svg",
-        "BATTERY": "icons/battery-3.svg"
+        "BATTERY": "icons/battery-3.svg",
+        "LINK": "icons/link.svg",
+        "HISTORY": "icons/history.svg"
+      }
+    },
+    "icon_36": {
+      "size": 36,
+      "icon": {
+        "SETTINGS": "icons/settings.svg",
+        "FOLDER": "icons/folder.svg",
+        "GITHUB": "icons/brand-github.svg",
+        "USB": "icons/usb.svg",
+        "WIFI": "icons/wifi.svg"
       }
     }
   }

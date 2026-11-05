@@ -3,21 +3,200 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
-use devkit_ui::widgets::top_bar;
-use devkit_ui::{Component, Cx, Element, Screen, Ui};
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
-pub struct Home;
+use devkit_gfx::{Color, FontChain};
+use devkit_ui::widgets::text_field;
+use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Prop, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Ui};
+
+use crate::fonts::{HERO, icon, small_icon};
+use crate::resources::icons;
+
+const GAP: i16 = 20;
+const CARD_PADDING: i16 = 24;
+const CARD_RADIUS: u8 = 24;
+const SIDEBAR_WIDTH: i16 = 400;
+
+const HERO_BG: Color = Color::hex(0x111418);
+const HERO_TEXT: Color = Color::hex(0xffffff);
+const ACCENT: Color = Color::hex(0x3ddc84);
+const VERSION: Color = Color::hex(0x90a4ae);
+const NAV_ICON: Color = Color::hex(0xb0bec5);
+const CARD_TITLE: Color = Color::hex(0x37474f);
+const CARD_ICON: Color = Color::hex(0x455a64);
+const ONLINE: Color = Color::hex(0x2e7d32);
+const FIELD_BG: Color = Color::hex(0xf5f6f7);
+const MUTED: Color = Color::hex(0x78909c);
+
+static NAV: StateStyle = StateStyle {
+    font: None,
+    base: &[Prop::Background(ColorRole::Fixed(Color::hex(0x22272e))), Prop::Foreground(ColorRole::Fixed(HERO_TEXT)), Prop::Radius(14)],
+    states: &[(State::PRESSED, &[Prop::Background(ColorRole::Fixed(Color::hex(0x2e353e)))])],
+};
+
+#[derive(Clone, Copy)]
+pub enum Msg {
+    Settings,
+    Files,
+    GitHub,
+    UsbConnect,
+    Pair,
+    TcpConnect,
+    Address(TextInput),
+    Recent,
+}
+
+pub struct Home {
+    address: TextBuffer,
+    ssid: Option<String>,
+    recent: Vec<String>,
+}
+
+impl Home {
+    pub fn new() -> Self {
+        Self {
+            address: TextBuffer::new(),
+            ssid: Some(String::from("YOUR_SSID")),
+            recent: vec![String::from("192.168.x.x:36645"), String::from("192.168.x.x:5555")],
+        }
+    }
+
+    fn hero<'a>(&'a self, ui: &'a Ui<Msg>, landscape: bool) -> Element<'a, Msg> {
+        let caption = ui.theme().fonts.caption;
+        let title = ui.column([
+            ui.row([ui.text(&HERO, "Tab5").foreground(HERO_TEXT), ui.text(&HERO, "ADB").foreground(ACCENT)]).gap(18),
+            ui.text(caption, idf::system::app_description().version()).foreground(VERSION),
+        ])
+        .gap(4);
+        let navs = [(icons::SETTINGS, "Settings", Msg::Settings), (icons::FOLDER, "Files", Msg::Files), (icons::GITHUB, "GitHub", Msg::GitHub)];
+        let card = if landscape {
+            let buttons: Vec<_> = navs.iter().map(|&(glyph, label, msg)| nav_row(ui, icon(glyph), label, msg)).collect();
+            ui.column([title, ui.column([]).grow(1), ui.column(buttons).gap(12)]).width(SIDEBAR_WIDTH)
+        } else {
+            let buttons: Vec<_> = navs.iter().map(|&(glyph, label, msg)| nav_tile(ui, icon(glyph), label, msg)).collect();
+            ui.column([title, ui.row(buttons).gap(14)]).gap(32)
+        };
+        card.padding(28).radius(CARD_RADIUS).background(HERO_BG)
+    }
+
+    fn usb<'a>(&'a self, ui: &'a Ui<Msg>, landscape: bool) -> Element<'a, Msg> {
+        let header = card_header(ui, icons::USB, "USB");
+        let connect = action(ui, ui.theme().fonts.title, "Connect", ui.theme().widgets.button.primary, Msg::UsbConnect);
+        if landscape {
+            card(ui, ui.row([header.padding_x(8), connect.height(80).grow(1)]).gap(40).align(Align::Center))
+        } else {
+            card(ui, ui.column([header, connect.height(96)]).gap(16))
+        }
+    }
+
+    fn wireless<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
+        let theme = ui.theme();
+        let caption = theme.fonts.caption;
+        let status = match &self.ssid {
+            Some(ssid) => ui
+                .row([ui.column([]).size(8, 8).radius(4).background(ONLINE), ui.text(caption, ui.format(format_args!("Connected to {ssid}"))).foreground(ONLINE)])
+                .gap(10)
+                .align(Align::Center),
+            None => ui.text(caption, "Not connected").foreground(MUTED),
+        };
+        let pair = ui
+            .row([ui.icon(small_icon(icons::LINK)), ui.text(caption, "Pair Device")])
+            .style(theme.widgets.button.plain_outline)
+            .height(56)
+            .padding_x(20)
+            .gap(10)
+            .align(Align::Center)
+            .on_tap(Msg::Pair);
+        let header = ui.row([ui.column([card_header(ui, icons::WIFI, "Wireless (TCP/IP)"), status.padding_x(4)]).gap(8).grow(1), pair]).align(Align::Start);
+        let input = ui
+            .row([
+                text_field(ui, &self.address, Msg::Address).placeholder("192.168.x.x:5555").background(FIELD_BG).padding_y(18).grow(1),
+                action(ui, caption, "Connect", theme.widgets.button.primary, Msg::TcpConnect).size(160, 64),
+            ])
+            .gap(12)
+            .align(Align::Center);
+        let rows: Vec<_> = self.recent.iter().map(|address| recent_row(ui, address, Msg::Recent)).collect();
+        let recent = ui.column([ui.text(caption, "RECENT").foreground(MUTED).padding_each(0, 8, 0, 4), ui.column(rows)]);
+        card(ui, ui.column([header, input, recent]).gap(20)).grow(1)
+    }
+}
 
 impl Component for Home {
-    type Msg = ();
+    type Msg = Msg;
 
-    fn update(&mut self, _: (), _: &mut Cx<Self>) {}
+    fn update(&mut self, msg: Msg, cx: &mut Cx<Self>) {
+        if let Msg::Address(input) = msg
+            && self.address.apply(input)
+        {
+            cx.rebuild();
+        }
+    }
 
-    fn view<'a>(&'a self, ui: &'a Ui<()>) -> Element<'a, ()> {
-        ui.column([top_bar(ui, None, "Tab5-ADB", ui.empty())])
-            .padding_each(0, ui.insets().top, 0, 0)
+    fn view<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
+        let (width, height) = ui.screen_size();
+        let landscape = width > height;
+        let body = if landscape {
+            ui.row([self.hero(ui, true), ui.column([self.usb(ui, true), self.wireless(ui)]).gap(GAP).grow(1)])
+        } else {
+            ui.column([self.hero(ui, false), self.usb(ui, false), self.wireless(ui)])
+        };
+        body.gap(GAP)
+            .padding_each(24, ui.insets().top + 4, 24, 24)
             .background(ui.colors().background)
     }
 }
 
 impl Screen for Home {}
+
+fn card<'a>(ui: &'a Ui<Msg>, content: Element<'a, Msg>) -> Element<'a, Msg> {
+    ui.column([content]).padding(CARD_PADDING).radius(CARD_RADIUS).background(ui.colors().surface)
+}
+
+fn card_header<'a>(ui: &'a Ui<Msg>, glyph: char, title: &'a str) -> Element<'a, Msg> {
+    ui.row([ui.icon(icon(glyph)).foreground(CARD_ICON), ui.text(ui.theme().fonts.title, title).foreground(CARD_TITLE)])
+        .gap(14)
+        .align(Align::Center)
+}
+
+fn action<'a>(ui: &'a Ui<Msg>, font: &'static FontChain, label: &'a str, style: &'static StateStyle, msg: Msg) -> Element<'a, Msg> {
+    ui.row([ui.text(font, label)]).style(style).padding_x(0).align(Align::Center).justify(Justify::Center).on_tap(msg)
+}
+
+fn nav_tile<'a>(ui: &'a Ui<Msg>, icon: Icon, label: &'a str, msg: Msg) -> Element<'a, Msg> {
+    ui.column([ui.icon(icon).foreground(NAV_ICON), ui.text(ui.theme().fonts.body, label)])
+        .style(&NAV)
+        .height(120)
+        .grow(1)
+        .gap(10)
+        .align(Align::Center)
+        .justify(Justify::Center)
+        .on_tap(msg)
+}
+
+fn nav_row<'a>(ui: &'a Ui<Msg>, icon: Icon, label: &'a str, msg: Msg) -> Element<'a, Msg> {
+    ui.row([ui.icon(icon).foreground(NAV_ICON), ui.text(ui.theme().fonts.body, label)])
+        .style(&NAV)
+        .height(80)
+        .padding_x(28)
+        .gap(20)
+        .align(Align::Center)
+        .on_tap(msg)
+}
+
+fn recent_row<'a>(ui: &'a Ui<Msg>, address: &'a str, msg: Msg) -> Element<'a, Msg> {
+    let theme = ui.theme();
+    ui.row([
+        ui.icon(small_icon(icons::HISTORY)).foreground(MUTED),
+        ui.text(theme.fonts.body, address).grow(1),
+        ui.icon(theme.icons.chevron).foreground(ui.colors().divider),
+    ])
+    .height(64)
+    .gap(16)
+    .align(Align::Center)
+    .border(ui.colors().divider, 1)
+    .border_sides(Sides::BOTTOM)
+    .when(State::PRESSED, &[Prop::Background(ColorRole::Fixed(FIELD_BG))])
+    .on_tap(msg)
+}

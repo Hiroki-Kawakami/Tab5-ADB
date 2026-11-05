@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+mod fonts;
 mod screens;
 mod status_bar;
 
@@ -43,7 +44,7 @@ pub fn run() {
     }
     let mut config = AppConfig::new(&resources::TOUCH);
     config.plugins.push(Box::new(AutoRotation::new(board.imu)));
-    let mut app = match App::new(display, board.touch, Home, config) {
+    let mut app = match App::new(display, board.touch, Home::new(), config) {
         Ok(app) => app,
         Err(err) => {
             error!(TAG, "app: {err}");
@@ -53,4 +54,3 @@ pub fn run() {
     app.chrome(StatusBar::new(board.rtc, board.power));
     app.run();
 }
-
