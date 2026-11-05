@@ -8,6 +8,7 @@
 extern crate alloc;
 
 mod screens;
+mod status_bar;
 
 mod resources {
     #![allow(dead_code)]
@@ -20,6 +21,7 @@ use devkit_ui::{App, AppConfig};
 use idf::log::error;
 
 use screens::Home;
+use status_bar::StatusBar;
 
 const TAG: &CStr = c"tab5-adb";
 
@@ -38,12 +40,14 @@ pub fn run() {
     if let Err(err) = display.set_brightness(100) {
         error!(TAG, "set_brightness: {err}");
     }
-    let app = match App::new(display, board.touch, Home, AppConfig::new(&resources::TOUCH)) {
+    let mut app = match App::new(display, board.touch, Home, AppConfig::new(&resources::TOUCH)) {
         Ok(app) => app,
         Err(err) => {
             error!(TAG, "app: {err}");
             return;
         }
     };
+    app.chrome(StatusBar::new(board.rtc, board.power));
     app.run();
 }
+

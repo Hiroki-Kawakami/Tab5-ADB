@@ -1,5 +1,14 @@
 {
   "theme": {
     "TOUCH": { "base": "@touch" }
+  },
+  "font": {
+    "icon_28": {
+      "size": 28,
+      "icon": {
+        "WIFI": "icons/wifi.svg",
+        "BATTERY": "icons/battery-3.svg"
+      }
+    }
   }
 }
