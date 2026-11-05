@@ -9,10 +9,12 @@ use alloc::vec::Vec;
 
 use devkit_gfx::{Color, FontChain};
 use devkit_ui::widgets::text_field;
-use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Prop, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Ui};
+use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Prop, Root, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Transition, Ui};
 
 use crate::fonts::{HERO, icon, small_icon};
-use crate::resources::icons;
+use crate::resources::{colors, icons};
+
+use super::settings::Settings;
 
 const GAP: i16 = 20;
 const CARD_PADDING: i16 = 24;
@@ -24,11 +26,6 @@ const HERO_TEXT: Color = Color::hex(0xffffff);
 const ACCENT: Color = Color::hex(0x3ddc84);
 const VERSION: Color = Color::hex(0x90a4ae);
 const NAV_ICON: Color = Color::hex(0xb0bec5);
-const CARD_TITLE: Color = Color::hex(0x37474f);
-const CARD_ICON: Color = Color::hex(0x455a64);
-const ONLINE: Color = Color::hex(0x2e7d32);
-const FIELD_BG: Color = Color::hex(0xf5f6f7);
-const MUTED: Color = Color::hex(0x78909c);
 
 static NAV: StateStyle = StateStyle {
     font: None,
@@ -96,10 +93,10 @@ impl Home {
         let caption = theme.fonts.caption;
         let status = match &self.ssid {
             Some(ssid) => ui
-                .row([ui.column([]).size(8, 8).radius(4).background(ONLINE), ui.text(caption, ui.format(format_args!("Connected to {ssid}"))).foreground(ONLINE)])
+                .row([ui.column([]).size(8, 8).radius(4).background(colors::ONLINE), ui.text(caption, ui.format(format_args!("Connected to {ssid}"))).foreground(colors::ONLINE)])
                 .gap(10)
                 .align(Align::Center),
-            None => ui.text(caption, "Not connected").foreground(MUTED),
+            None => ui.text(caption, "Not connected").foreground(colors::MUTED),
         };
         let pair = ui
             .row([ui.icon(small_icon(icons::LINK)), ui.text(caption, "Pair Device")])
@@ -112,13 +109,13 @@ impl Home {
         let header = ui.row([ui.column([card_header(ui, icons::WIFI, "Wireless (TCP/IP)"), status.padding_x(4)]).gap(8).grow(1), pair]).align(Align::Start);
         let input = ui
             .row([
-                text_field(ui, &self.address, Msg::Address).placeholder("192.168.x.x:5555").background(FIELD_BG).padding_y(18).grow(1),
+                text_field(ui, &self.address, Msg::Address).placeholder("192.168.x.x:5555").padding_y(18).grow(1),
                 action(ui, caption, "Connect", theme.widgets.button.primary, Msg::TcpConnect).size(160, 64),
             ])
             .gap(12)
             .align(Align::Center);
         let rows: Vec<_> = self.recent.iter().map(|address| recent_row(ui, address, Msg::Recent)).collect();
-        let recent = ui.column([ui.text(caption, "RECENT").foreground(MUTED).padding_each(0, 8, 0, 4), ui.column(rows)]);
+        let recent = ui.column([ui.text(caption, "RECENT").foreground(colors::MUTED).padding_each(0, 8, 0, 4), ui.column(rows)]);
         card(ui, ui.column([header, input, recent]).gap(20)).grow(1)
     }
 }
@@ -127,10 +124,14 @@ impl Component for Home {
     type Msg = Msg;
 
     fn update(&mut self, msg: Msg, cx: &mut Cx<Self>) {
-        if let Msg::Address(input) = msg
-            && self.address.apply(input)
-        {
-            cx.rebuild();
+        match msg {
+            Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(Settings::new()),
+            Msg::Address(input) => {
+                if self.address.apply(input) {
+                    cx.rebuild();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -155,7 +156,7 @@ fn card<'a>(ui: &'a Ui<Msg>, content: Element<'a, Msg>) -> Element<'a, Msg> {
 }
 
 fn card_header<'a>(ui: &'a Ui<Msg>, glyph: char, title: &'a str) -> Element<'a, Msg> {
-    ui.row([ui.icon(icon(glyph)).foreground(CARD_ICON), ui.text(ui.theme().fonts.title, title).foreground(CARD_TITLE)])
+    ui.row([ui.icon(icon(glyph)).foreground(colors::CARD_ICON), ui.text(ui.theme().fonts.title, title).foreground(colors::CARD_TITLE)])
         .gap(14)
         .align(Align::Center)
 }
@@ -188,7 +189,7 @@ fn nav_row<'a>(ui: &'a Ui<Msg>, icon: Icon, label: &'a str, msg: Msg) -> Element
 fn recent_row<'a>(ui: &'a Ui<Msg>, address: &'a str, msg: Msg) -> Element<'a, Msg> {
     let theme = ui.theme();
     ui.row([
-        ui.icon(small_icon(icons::HISTORY)).foreground(MUTED),
+        ui.icon(small_icon(icons::HISTORY)).foreground(colors::MUTED),
         ui.text(theme.fonts.body, address).grow(1),
         ui.icon(theme.icons.chevron).foreground(ui.colors().divider),
     ])
@@ -197,6 +198,6 @@ fn recent_row<'a>(ui: &'a Ui<Msg>, address: &'a str, msg: Msg) -> Element<'a, Ms
     .align(Align::Center)
     .border(ui.colors().divider, 1)
     .border_sides(Sides::BOTTOM)
-    .when(State::PRESSED, &[Prop::Background(ColorRole::Fixed(FIELD_BG))])
+    .when(State::PRESSED, &[Prop::Background(colors::PRESSED)])
     .on_tap(msg)
 }

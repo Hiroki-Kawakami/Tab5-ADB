@@ -1,6 +1,12 @@
 {
   "theme": {
-    "TOUCH": { "base": "@touch" }
+    "TOUCH": {
+      "base": "@touch",
+      "colors": {
+        "light": { "card_title": "#37474f", "card_icon": "#455a64", "online": "#2e7d32" },
+        "dark": { "card_title": "#cfd8dc", "card_icon": "#90a4ae", "online": "#66bb6a" }
+      }
+    }
   },
   "font": {
     "hero_56": {

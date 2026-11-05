@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod fonts;
 mod screens;
+mod settings;
 mod status_bar;
 
 mod resources {
@@ -19,7 +20,7 @@ mod resources {
 use alloc::boxed::Box;
 use core::ffi::CStr;
 
-use devkit_ui::{App, AppConfig, AutoRotation};
+use devkit_ui::{App, AppConfig, AutoRotation, SavedColorMode};
 use idf::log::error;
 
 use screens::Home;
@@ -39,11 +40,12 @@ pub fn run() {
         error!(TAG, "no display");
         return;
     };
-    if let Err(err) = display.set_brightness(100) {
-        error!(TAG, "set_brightness: {err}");
-    }
+    settings::init(Some(display));
     let mut config = AppConfig::new(&resources::TOUCH);
-    config.plugins.push(Box::new(AutoRotation::new(board.imu)));
+    let rotation = AutoRotation::new(board.imu);
+    config.plugins.push(Box::new(rotation.clone()));
+    config.plugins.push(Box::new(SavedColorMode::new()));
+    screens::set_rotation(rotation);
     let mut app = match App::new(display, board.touch, Home::new(), config) {
         Ok(app) => app,
         Err(err) => {
@@ -51,6 +53,7 @@ pub fn run() {
             return;
         }
     };
+    screens::set_input(app.input());
     app.chrome(StatusBar::new(board.rtc, board.power));
     app.run();
 }
