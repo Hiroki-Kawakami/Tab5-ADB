@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.16)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../esp-devkit/devkit.cmake)
+devkit_simulator_init()
+project(simulator C CXX)
+devkit_simulator(COMPONENT_DIRS ../app main)
