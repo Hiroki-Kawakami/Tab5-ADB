@@ -10,11 +10,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1793939242,
-        "narHash": "sha256-L/8lhny99Bj4hyDwxOw0Eh+aPFUbRJs5NxtreWIWZb4=",
+        "lastModified": 1793950828,
+        "narHash": "sha256-cMJ1GadKJX00ohbUv1d8hxQGRroXJgOU+I4fVlTEHtA=",
         "ref": "refs/heads/main",
-        "rev": "cfaccebf14980999839997675afebd9c5b791bfc",
-        "revCount": 380,
+        "rev": "57cc200547bb764805048ae79c4f94c999b8bed0",
+        "revCount": 381,
         "type": "git",
         "url": "file:./esp-devkit"
       },
@@ -28,11 +28,11 @@
         "systems": "systems"
       },
       "locked": {
-        "lastModified": 1731533236,
-        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "lastModified": 1791914995,
+        "narHash": "sha256-Zf/xfQEAasnwnmEfHqW/4hjDE/s44yn2hD4RuVIZRjA=",
         "owner": "numtide",
         "repo": "flake-utils",
-        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "rev": "b7a79d3fea1e214f6d668d521cecec0c01e26544",
         "type": "github"
       },
       "original": {
@@ -43,11 +43,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1784280462,
-        "narHash": "sha256-DtoqIqM7VkR6NxAkcLpMwmi02USwWb3JdmNGLyhthc0=",
+        "lastModified": 1793865203,
+        "narHash": "sha256-/cpdPHaySDIyCgZI6EWngiM6jK3YLUNzv1b7lTzy6Bk=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "293d6abedf0478e681a4dfcfcb35b30fc796a32f",
+        "rev": "c56a87d8e41ce69bd2af57eb35dcc117a9dfca33",
         "type": "github"
       },
       "original": {

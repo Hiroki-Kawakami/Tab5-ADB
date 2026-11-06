@@ -3,14 +3,23 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+use alloc::string::String;
 use alloc::vec::Vec;
+use core::ffi::CStr;
 
+use adb::link::{Connection, State as LinkState};
 use devkit_gfx::Color;
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Prop, Screen, State, StateStyle, Ui};
+use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Ui};
+use idf::log::error;
 
+use crate::device_info::{self, DeviceInfo};
 use crate::fonts::{icon, small_icon};
 use crate::resources::{colors, icons};
+
+use super::message::MessageScreen;
+
+const TAG: &CStr = c"dashboard";
 
 const GAP: i16 = 20;
 const TILE_GAP: i16 = 12;
@@ -60,18 +69,83 @@ const FEATURES: [(char, &str, Msg); 8] = [
     (icons::DISCONNECT, "Disconnect", Msg::Disconnect),
 ];
 
-pub struct AdbDashboardScreen;
+pub struct AdbDashboardScreen {
+    conn: Connection,
+    model: Option<String>,
+    info: Option<DeviceInfo>,
+    watch: Option<Task>,
+}
 
 impl AdbDashboardScreen {
-    pub fn new() -> Self {
-        Self
+    pub fn new(conn: Connection) -> Self {
+        let model = device_info::model(&conn.banner());
+        Self { conn, model, info: None, watch: None }
     }
+
+    fn header<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
+        let theme = ui.theme();
+        let info = self.info.as_ref();
+        let name = info.and_then(|i| i.name.as_deref()).or(self.model.as_deref()).unwrap_or("Android device");
+        let caption = match info {
+            Some(i) => {
+                let version = if i.version.is_empty() { String::new() } else { alloc::format!("Android {} \u{2022} ", i.version) };
+                let storage = i.storage_kb.map(|kb| alloc::format!("{} GB \u{2022} ", (kb * 1024 + 500_000_000) / 1_000_000_000)).unwrap_or_default();
+                ui.format(format_args!("{version}{storage}USB"))
+            }
+            None => "USB",
+        };
+        let battery = match info.and_then(|i| i.battery) {
+            Some(b) => {
+                let (glyph, color) = if b.charging { (icons::BATTERY_CHARGING, ui.colors().primary) } else { (icons::BATTERY, ui.colors().text) };
+                ui.row([ui.icon(small_icon(glyph)).foreground(color), ui.text(theme.fonts.caption, ui.format(format_args!("{}%", b.level))).foreground(color)]).gap(4).align(Align::Center)
+            }
+            None => ui.empty(),
+        };
+        let wifi = if info.is_some_and(|i| i.wifi) { ui.icon(small_icon(icons::WIFI)).foreground(colors::CARD_ICON) } else { ui.empty() };
+        let status = ui.row([battery, wifi, ui.icon(theme.icons.chevron).foreground(colors::MUTED)]).gap(16).align(Align::Center);
+        ui.row([ui.column([ui.text(theme.fonts.title, name), ui.text(theme.fonts.caption, caption).foreground(colors::MUTED)]).gap(4).grow(1), status])
+            .style(&TILE)
+            .height(104)
+            .padding_x(24)
+            .align(Align::Center)
+            .on_tap(Msg::Info)
+    }
+}
+
+async fn load_info(this: This<AdbDashboardScreen>, conn: Connection) {
+    match adb::services::exec(&conn, device_info::COMMAND).await {
+        Ok(out) => {
+            let info = device_info::parse(&String::from_utf8_lossy(&out));
+            this.with(|s, cx| {
+                s.info = Some(info);
+                cx.rebuild();
+            });
+        }
+        Err(err) => error!(TAG, "device info: {err}"),
+    }
+}
+
+async fn watch(this: This<AdbDashboardScreen>, conn: Connection) {
+    while !matches!(conn.state(), LinkState::Closed(_)) {
+        conn.state_changed().await;
+    }
+    this.with(|_, cx| {
+        cx.nav_of::<Root>().root();
+        cx.nav_of::<Overlay>().push(MessageScreen::new("Disconnected", "The device was disconnected."));
+    });
 }
 
 impl Component for AdbDashboardScreen {
     type Msg = Msg;
 
-    fn update(&mut self, _: Msg, _: &mut Cx<Self>) {}
+    fn update(&mut self, msg: Msg, cx: &mut Cx<Self>) {
+        if let Msg::Disconnect = msg {
+            if let Some(task) = self.watch.take() {
+                task.abort();
+            }
+            cx.nav_of::<Root>().root();
+        }
+    }
 
     fn view<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
         let (width, height) = ui.screen_size();
@@ -79,13 +153,13 @@ impl Component for AdbDashboardScreen {
             let nav = ui.column([nav_bar(ui, true)]).justify(Justify::End);
             let preview = preview(ui).width(PREVIEW_WIDTH_LANDSCAPE);
             let rows: Vec<_> = FEATURES.chunks(4).map(|row| ui.row(row.iter().map(|&(glyph, label, msg)| feature_tile(ui, glyph, label, msg)).collect::<Vec<_>>()).gap(TILE_GAP).grow(1)).collect();
-            let main = ui.column([header(ui), ui.column(rows).gap(TILE_GAP).grow(1), media(ui)]).gap(GAP).grow(1);
+            let main = ui.column([self.header(ui), ui.column(rows).gap(TILE_GAP).grow(1), media(ui)]).gap(GAP).grow(1);
             ui.row([ui.row([nav, preview]).gap(TILE_GAP), main])
         } else {
             let tiles: Vec<_> = FEATURES.iter().map(|&(glyph, label, msg)| feature_row(ui, glyph, label, msg)).collect();
             let left = ui.column([preview(ui).grow(1), nav_bar(ui, false)]).gap(TILE_GAP).width(PREVIEW_WIDTH_PORTRAIT);
             let middle = ui.row([left, ui.column(tiles).gap(TILE_GAP).grow(1)]).gap(GAP).grow(1);
-            ui.column([header(ui), middle, media(ui)])
+            ui.column([self.header(ui), middle, media(ui)])
         };
         body.gap(GAP)
             .padding_each(24, ui.insets().top + 4, 24, 24)
@@ -93,28 +167,13 @@ impl Component for AdbDashboardScreen {
     }
 }
 
-impl Screen for AdbDashboardScreen {}
-
-fn header<'a>(ui: &'a Ui<Msg>) -> Element<'a, Msg> {
-    let theme = ui.theme();
-    let primary = ui.colors().primary;
-    let status = ui
-        .row([
-            ui.row([ui.icon(small_icon(icons::BATTERY_CHARGING)).foreground(primary), ui.text(theme.fonts.caption, "22%").foreground(primary)]).gap(4).align(Align::Center),
-            ui.icon(small_icon(icons::WIFI)).foreground(colors::CARD_ICON),
-            ui.icon(theme.icons.chevron).foreground(colors::MUTED),
-        ])
-        .gap(16)
-        .align(Align::Center);
-    ui.row([
-        ui.column([ui.text(theme.fonts.title, "Pixel 10"), ui.text(theme.fonts.caption, "Android 17 \u{2022} 128 GB \u{2022} USB").foreground(colors::MUTED)]).gap(4).grow(1),
-        status,
-    ])
-    .style(&TILE)
-    .height(104)
-    .padding_x(24)
-    .align(Align::Center)
-    .on_tap(Msg::Info)
+impl Screen for AdbDashboardScreen {
+    fn on_load(&mut self, cx: &mut Cx<Self>) {
+        let conn = self.conn.clone();
+        cx.spawn(|this| load_info(this, conn));
+        let conn = self.conn.clone();
+        self.watch = Some(cx.spawn(|this| watch(this, conn)));
+    }
 }
 
 fn preview<'a>(ui: &'a Ui<Msg>) -> Element<'a, Msg> {

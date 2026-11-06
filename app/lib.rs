@@ -8,10 +8,13 @@
 extern crate alloc;
 
 mod adb_link;
+mod device_info;
 mod fonts;
 mod screens;
 mod settings;
 mod status_bar;
+#[cfg(test)]
+mod tests;
 
 mod resources {
     #![allow(dead_code)]

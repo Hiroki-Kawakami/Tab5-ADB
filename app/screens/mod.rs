@@ -4,7 +4,9 @@
  */
 
 mod adb_dashboard;
+mod connecting;
 mod home;
+mod message;
 mod settings;
 
 pub use home::HomeScreen;

@@ -54,7 +54,6 @@ pub fn start(power: &bsp_rs::power::Power) {
     harness_rs::register("adb", command);
 }
 
-/// Connects to each ADB device as it arrives.
 async fn follow() {
     match Identity::load_or_create(KEY_NAMESPACE) {
         Ok(identity) => drop(IDENTITY.set(Arc::new(identity))),
@@ -69,14 +68,15 @@ async fn follow() {
             Event::Arrived(device) if adb::link::usb::has_interface(&device) => {
                 info!(TAG, "device {}", device.product());
                 *DEVICE.lock() = Some(device);
-                if let Err(err) = connect() {
-                    error!(TAG, "connect: {err}");
-                }
             }
             Event::Left(device) => {
                 let mut current = DEVICE.lock();
                 if current.as_ref().is_some_and(|d| d.id() == device.id()) {
                     *current = None;
+                    drop(current);
+                    if let Some(conn) = CONNECTION.lock().take() {
+                        conn.close();
+                    }
                 }
             }
             _ => {}
@@ -84,17 +84,26 @@ async fn follow() {
     }
 }
 
-/// Closes the connection there is and opens a new one to the device.
-fn connect() -> Result<(), String> {
-    let device = DEVICE.lock().clone().ok_or("no device")?;
+/// The device's connection, opened on first use and kept until it closes or
+/// the device leaves.
+pub fn connect() -> Result<Connection, String> {
+    let device = DEVICE.lock().clone().ok_or("No ADB device is plugged in.")?;
     let (Some(spawner), Some(identity)) = (SPAWNER.get(), IDENTITY.get()) else { return Err("not started".into()) };
-    if let Some(old) = CONNECTION.lock().take() {
-        old.close();
+    {
+        let mut current = CONNECTION.lock();
+        if let Some(conn) = current.as_ref()
+            && !matches!(conn.state(), State::Closed(_))
+        {
+            return Ok(conn.clone());
+        }
+        *current = None;
     }
     let transport = adb::link::usb::open(&device).map_err(|e| e.to_string())?;
     let conn = Connection::connect(transport, identity.clone(), spawner);
     *CONNECTION.lock() = Some(conn.clone());
+    let logged = conn.clone();
     drop(spawner.spawn(async move {
+        let conn = logged;
         loop {
             let state = conn.state();
             info!(TAG, "{state:?}");
@@ -104,7 +113,7 @@ fn connect() -> Result<(), String> {
             conn.state_changed().await;
         }
     }));
-    Ok(())
+    Ok(conn)
 }
 
 fn connection() -> Result<Connection, String> {
@@ -144,7 +153,7 @@ fn command(args: &[&str]) -> Result<Option<String>, String> {
             connection()?.close();
             Ok(None)
         }
-        Some("connect") => connect().map(|()| None),
+        Some("connect") => connect().map(|_| None),
         Some("exec") => {
             let conn = connection()?;
             let out = executor::block_on(adb::services::exec(&conn, &rest.join(" "))).map_err(|e| e.to_string())?;

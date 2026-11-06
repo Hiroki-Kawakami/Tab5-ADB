@@ -39,7 +39,8 @@ pub fn has_interface(device: &Device) -> bool {
 }
 
 /// Claims the ADB interface for a connection. `Busy` while another holds it;
-/// the claim ends with the connection, so the device opens again after.
+/// the claim ends with the connection. adbd resets its USB on a new claim
+/// once a connection has run, so keep one per enumeration.
 pub fn open(device: &Device) -> Result<Box<dyn Transport>> {
     let number = find(device).ok_or(Error::Usb(usb_host_rs::Error::NotFound))?;
     let interface = device.claim(number, 0).map_err(Error::Usb)?;
@@ -60,8 +61,8 @@ struct UsbDevice {
 
 impl Transport for UsbDevice {
     fn split(self: Box<Self>) -> (Box<dyn PacketReader>, Box<dyn PacketWriter>) {
-        let reader = UsbReader { _interface: self.interface.clone(), input: self.input, header: None, payload: None };
-        let writer = UsbWriter { _interface: self.interface, output: self.output, header: None, payload: None };
+        let writer = UsbWriter { _interface: self.interface.clone(), output: self.output, unhalt: Some(self.input.clone()), header: None, payload: None };
+        let reader = UsbReader { _interface: self.interface, input: self.input, header: None, payload: None };
         (Box::new(reader), Box::new(writer))
     }
 }
@@ -127,12 +128,19 @@ impl PacketReader for UsbReader {
 struct UsbWriter {
     _interface: Interface,
     output: Endpoint,
+    /// Brings the device's data toggles to DATA0 with the new pipes before the
+    /// first packet; adbd takes this only before it has read anything.
+    unhalt: Option<Endpoint>,
     header: Option<Buffer>,
     payload: Option<Buffer>,
 }
 
 impl UsbWriter {
     async fn write_packet(&mut self, packet: &Packet) -> Result<()> {
+        if let Some(input) = self.unhalt.take() {
+            input.clear_halt().await.map_err(link)?;
+            self.output.clear_halt().await.map_err(link)?;
+        }
         let mut buf = take(&mut self.header, HEADER_BYTES, HEADER_CAPS)?;
         buf[..HEADER_BYTES].copy_from_slice(&packet.header());
         let (buf, r) = self.output.transfer(buf, HEADER_BYTES).await;
