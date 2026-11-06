@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+mod adb_link;
 mod fonts;
 mod screens;
 mod settings;
@@ -40,6 +41,10 @@ pub fn run() {
         error!(TAG, "no display");
         return;
     };
+    adb_link::start(board.power);
+    if let Err(err) = harness_rs::start(&board) {
+        error!(TAG, "harness_rs::start: {err}");
+    }
     settings::init(Some(display));
     let mut config = AppConfig::new(&resources::TOUCH);
     let rotation = AutoRotation::new(board.imu);
