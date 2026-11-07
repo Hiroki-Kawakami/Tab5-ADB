@@ -5,7 +5,7 @@
 
 use core::ffi::CStr;
 
-use bsp_rs::display::Display;
+use bsp_rs::display::{Display, ImageFormat};
 use idf::log::error;
 use idf::nvs::{Key, Nvs, Raw, Value};
 use idf::sync::Mutex;
@@ -29,6 +29,38 @@ impl Value for SoundPlayback {
         match raw {
             0 => Some(Self::Tab5),
             1 => Some(Self::Android),
+            _ => None,
+        }
+    }
+
+    fn to_raw<'a>(value: Self) -> <u8 as Raw>::Arg<'a> {
+        value as u8
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ColorDepth {
+    Bits16,
+    Bits24,
+}
+
+impl ColorDepth {
+    pub fn pixel_format(self) -> ImageFormat {
+        match self {
+            Self::Bits16 => ImageFormat::Rgb565,
+            Self::Bits24 => ImageFormat::Bgr888,
+        }
+    }
+}
+
+impl Value for ColorDepth {
+    type Raw = u8;
+    type Arg<'a> = Self;
+
+    fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Bits16),
+            1 => Some(Self::Bits24),
             _ => None,
         }
     }
@@ -92,6 +124,7 @@ struct Store {
     nvs: Option<Nvs>,
     display: Option<&'static Display>,
     brightness: Setting<u8>,
+    color_depth: Setting<ColorDepth>,
     sound_playback: Setting<SoundPlayback>,
 }
 
@@ -99,20 +132,26 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     nvs: None,
     display: None,
     brightness: Setting::new(c"brightness", 80, |percent| percent.clamp(MIN_BRIGHTNESS, 100)),
+    color_depth: Setting::new(c"color_depth", ColorDepth::Bits24, keep),
     sound_playback: Setting::new(c"playback", SoundPlayback::Tab5, keep),
 });
 
-pub fn init(display: Option<&'static Display>) {
+pub fn init() {
     let mut store = STORE.lock();
     match Nvs::open(NAMESPACE) {
         Ok(nvs) => {
             store.brightness.load(&nvs);
+            store.color_depth.load(&nvs);
             store.sound_playback.load(&nvs);
             store.nvs = Some(nvs);
         }
         Err(err) => error!(TAG, "open: {err}"),
     }
-    store.display = display;
+}
+
+pub fn set_display(display: &'static Display) {
+    let mut store = STORE.lock();
+    store.display = Some(display);
     apply_brightness(&store);
 }
 
@@ -123,6 +162,7 @@ pub fn commit() {
         return;
     };
     let mut written = store.brightness.commit(nvs);
+    written |= store.color_depth.commit(nvs);
     written |= store.sound_playback.commit(nvs);
     if written && let Err(err) = nvs.commit() {
         error!(TAG, "commit: {err}");
@@ -138,6 +178,14 @@ pub fn set_brightness(percent: u8) {
     if store.brightness.set(percent) {
         apply_brightness(&store);
     }
+}
+
+pub fn color_depth() -> ColorDepth {
+    STORE.lock().color_depth.value
+}
+
+pub fn set_color_depth(depth: ColorDepth) {
+    STORE.lock().color_depth.set(depth);
 }
 
 pub fn sound_playback() -> SoundPlayback {

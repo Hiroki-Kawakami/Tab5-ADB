@@ -32,10 +32,11 @@ use screens::HomeScreen;
 use status_bar::StatusBar;
 
 const TAG: &CStr = c"tab5-adb";
-const SHARED_SRAM_BYTES: usize = 245760;
+pub(crate) const SHARED_SRAM_BYTES: usize = 245760;
+pub(crate) const STRIP_LANES: usize = 2;
 
 #[repr(C, align(64))]
-struct SharedSram([u8; SHARED_SRAM_BYTES]);
+pub(crate) struct SharedSram([u8; SHARED_SRAM_BYTES]);
 
 impl AsMut<[u8]> for SharedSram {
     fn as_mut(&mut self) -> &mut [u8] {
@@ -46,7 +47,10 @@ impl AsMut<[u8]> for SharedSram {
 static SRAM: StaticLease<SharedSram> = StaticLease::new(SharedSram([0; SHARED_SRAM_BYTES]));
 
 pub fn run() {
-    let board = match bsp_rs::init(&bsp_rs::Config::default()) {
+    settings::init();
+    let mut bsp_config = bsp_rs::Config::default();
+    bsp_config.display.pixel_format = Some(settings::color_depth().pixel_format());
+    let board = match bsp_rs::init(&bsp_config) {
         Ok(board) => board,
         Err(err) => {
             error!(TAG, "bsp_rs::init: {err}");
@@ -61,7 +65,7 @@ pub fn run() {
     if let Err(err) = harness_rs::start(&board) {
         error!(TAG, "harness_rs::start: {err}");
     }
-    settings::init(Some(display));
+    settings::set_display(display);
     let mut config = AppConfig::new(&resources::TOUCH);
     let rotation = AutoRotation::new(board.imu);
     config.plugins.push(Box::new(rotation.clone()));
@@ -72,6 +76,7 @@ pub fn run() {
         return;
     };
     config.presenter.strips = StripSource::Given(Strips::new(sram));
+    config.presenter.lanes = STRIP_LANES;
     let mut app = match App::new(display, board.touch, HomeScreen::new(), config) {
         Ok(app) => app,
         Err(err) => {

@@ -3,13 +3,22 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+use core::ffi::CStr;
+
+use bsp_rs::display;
+use devkit::Lease;
 use devkit_ui::widgets::{DropdownMenu, dropdown, segmented, slider, slider_value, switch, table, table_chevron, table_header, table_label, table_row, table_section, table_value, top_bar};
-use devkit_ui::{Align, AutoRotation, ColorMode, Component, Cx, Drag, Element, Input, Screen, Ui, id};
+use devkit_ui::{Align, AutoRotation, ColorMode, Component, Cx, Drag, Element, Input, RenderMode, Screen, Strips, Ui, id};
+use idf::heap::Caps;
+use idf::log::error;
 use idf::sync::OnceLock;
 
 use crate::fonts::icon;
 use crate::resources::{colors, icons};
-use crate::settings::{self, SoundPlayback};
+use crate::settings::{self, ColorDepth, SoundPlayback};
+use crate::{SHARED_SRAM_BYTES, STRIP_LANES, SharedSram};
+
+const TAG: &CStr = c"settings";
 
 static ROTATION: OnceLock<AutoRotation> = OnceLock::new();
 static INPUT: OnceLock<Input> = OnceLock::new();
@@ -27,7 +36,9 @@ pub enum SettingsMsg {
     Back,
     Open,
     Brightness(u8),
-    ColorBits(usize),
+    ColorDepth(usize),
+    ColorDepthApplied(ColorDepth),
+    StripsRestored,
     Dark(bool),
     RotationLock,
     Volume(u8),
@@ -38,16 +49,46 @@ pub enum SettingsMsg {
 
 const PLAYBACKS: [(SoundPlayback, &str); 2] = [(SoundPlayback::Tab5, "M5Stack Tab5"), (SoundPlayback::Android, "Android Device")];
 const PLAYBACK_LABELS: [&str; 2] = [PLAYBACKS[0].1, PLAYBACKS[1].1];
+const COLOR_DEPTHS: [ColorDepth; 2] = [ColorDepth::Bits16, ColorDepth::Bits24];
 
 pub struct SettingsScreen {
-    color_bits: usize,
+    switching: bool,
     volume: u8,
     equalizer: bool,
 }
 
 impl SettingsScreen {
     pub(crate) fn new() -> Self {
-        Self { color_bits: 1, volume: 255, equalizer: true }
+        Self { switching: false, volume: 255, equalizer: true }
+    }
+
+    fn switch_color_depth(&mut self, depth: ColorDepth, cx: &mut Cx<Self>) {
+        if self.switching || depth == settings::color_depth() {
+            return;
+        }
+        let strips = match Strips::allocate(SHARED_SRAM_BYTES, Caps::SPIRAM) {
+            Ok(strips) => strips,
+            Err(err) => {
+                error!(TAG, "color depth: strips: {err}");
+                return;
+            }
+        };
+        let mut display = display::Config::default();
+        display.pixel_format = Some(depth.pixel_format());
+        cx.set_render_mode(RenderMode { strips, lanes: STRIP_LANES, display }, SettingsMsg::ColorDepthApplied(depth));
+        self.switching = true;
+    }
+
+    // Reconfiguring the display needs strips other than the ones in use, so it
+    // draws in PSRAM for one frame and then takes the shared SRAM back.
+    fn restore_strips(&mut self, depth: ColorDepth, cx: &mut Cx<Self>) {
+        let Some(sram) = cx.take_strips().and_then(Strips::into_inner::<Lease<'static, SharedSram>>) else {
+            error!(TAG, "color depth: display refused the change");
+            self.switching = false;
+            return;
+        };
+        settings::set_color_depth(depth);
+        cx.set_render_mode(RenderMode { strips: Strips::new(sram), lanes: STRIP_LANES, display: Default::default() }, SettingsMsg::StripsRestored);
     }
 }
 
@@ -65,7 +106,12 @@ impl Component for SettingsScreen {
             SettingsMsg::Back => cx.nav().pop(),
             SettingsMsg::Open => {}
             SettingsMsg::Brightness(value) => settings::set_brightness((u32::from(value) * 100 / 255) as u8),
-            SettingsMsg::ColorBits(index) => self.color_bits = index,
+            SettingsMsg::ColorDepth(index) => self.switch_color_depth(COLOR_DEPTHS[index], cx),
+            SettingsMsg::ColorDepthApplied(depth) => self.restore_strips(depth, cx),
+            SettingsMsg::StripsRestored => {
+                drop(cx.take_strips());
+                self.switching = false;
+            }
             SettingsMsg::Dark(dark) => {
                 if let Some(input) = INPUT.get() {
                     input.set_color_mode(if dark { ColorMode::Dark } else { ColorMode::Light });
@@ -105,7 +151,7 @@ impl Component for SettingsScreen {
                         ui,
                         [
                             slider_row(ui, "Brightness", ui.format(format_args!("{brightness}%")), brightness_value, |d| SettingsMsg::Brightness(slider_value(d))).id(id!("brightness")),
-                            table_row(ui, [table_label(ui, "Color Mode"), segmented(ui, &[("16-bit", SettingsMsg::ColorBits(0)), ("24-bit", SettingsMsg::ColorBits(1))], self.color_bits)]),
+                            table_row(ui, [table_label(ui, "Color Mode"), segmented(ui, &[("16-bit", SettingsMsg::ColorDepth(0)), ("24-bit", SettingsMsg::ColorDepth(1))], color_depth_index())]),
                             table_row(ui, [table_label(ui, "Dark Mode"), switch(ui, dark, SettingsMsg::Dark(!dark)).id(id!("dark"))]),
                             table_row(ui, [table_label(ui, "Rotation Lock"), switch(ui, ROTATION.get().is_some_and(AutoRotation::locked), SettingsMsg::RotationLock).id(id!("rotation-lock"))]),
                         ],
@@ -141,6 +187,11 @@ impl Screen for SettingsScreen {
     fn will_disappear(&mut self, _: &mut Cx<Self>) {
         settings::commit();
     }
+}
+
+fn color_depth_index() -> usize {
+    let current = settings::color_depth();
+    COLOR_DEPTHS.iter().position(|&depth| depth == current).unwrap_or(0)
 }
 
 fn playback_index() -> usize {
