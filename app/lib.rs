@@ -24,13 +24,26 @@ mod resources {
 use alloc::boxed::Box;
 use core::ffi::CStr;
 
-use devkit_ui::{App, AppConfig, AutoRotation, SavedColorMode};
+use devkit::StaticLease;
+use devkit_ui::{App, AppConfig, AutoRotation, SavedColorMode, StripSource, Strips};
 use idf::log::error;
 
 use screens::HomeScreen;
 use status_bar::StatusBar;
 
 const TAG: &CStr = c"tab5-adb";
+const SHARED_SRAM_BYTES: usize = 245760;
+
+#[repr(C, align(64))]
+struct SharedSram([u8; SHARED_SRAM_BYTES]);
+
+impl AsMut<[u8]> for SharedSram {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+static SRAM: StaticLease<SharedSram> = StaticLease::new(SharedSram([0; SHARED_SRAM_BYTES]));
 
 pub fn run() {
     let board = match bsp_rs::init(&bsp_rs::Config::default()) {
@@ -54,6 +67,11 @@ pub fn run() {
     config.plugins.push(Box::new(rotation.clone()));
     config.plugins.push(Box::new(SavedColorMode::new()));
     screens::set_rotation(rotation);
+    let Some(sram) = SRAM.take() else {
+        error!(TAG, "strips: taken");
+        return;
+    };
+    config.presenter.strips = StripSource::Given(Strips::new(sram));
     let mut app = match App::new(display, board.touch, HomeScreen::new(), config) {
         Ok(app) => app,
         Err(err) => {
