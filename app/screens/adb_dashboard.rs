@@ -6,20 +6,23 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::CStr;
+use core::future::{Future, pending, poll_fn};
+use core::pin::pin;
+use core::task::Poll;
 
 use adb::link::{Connection, State as LinkState};
+use agent_link::Link;
 use devkit_gfx::Color;
 use devkit_ui::widgets::{divider, vertical_divider};
 use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Transition, Ui, id};
 use idf::log::error;
 
 use crate::adb_link::Route;
-use crate::agent::{self, Agent};
+use crate::agent::Agent;
 use crate::device_info::{self, DeviceInfo};
 use crate::fonts::{icon, small_icon};
-use crate::preview::Preview;
+use crate::preview::{self, Preview};
 use crate::resources::{colors, icons};
-use crate::settings::{self, AgentMode};
 
 use super::message::MessageScreen;
 use super::mirror::MirrorScreen;
@@ -48,6 +51,7 @@ static TILE: StateStyle = StateStyle {
 pub enum Msg {
     Info,
     Preview,
+    VideoUnavailable,
     Back,
     Home,
     Recents,
@@ -83,12 +87,14 @@ pub struct AdbDashboardScreen {
     info: Option<DeviceInfo>,
     watch: Option<Task>,
     agent: Option<Agent>,
+    video_unavailable: bool,
 }
 
 impl AdbDashboardScreen {
-    pub fn new(conn: Connection, route: Route) -> Self {
+    /// Without `agent`, only what plain adb can do.
+    pub fn new(conn: Connection, route: Route, agent: Option<Agent>) -> Self {
         let model = device_info::model(&conn.banner());
-        Self { conn, route, model, info: None, watch: None, agent: None }
+        Self { conn, route, model, info: None, watch: None, agent, video_unavailable: false }
     }
 
     fn header<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
@@ -123,6 +129,11 @@ impl AdbDashboardScreen {
             .align(Align::Center)
             .on_tap(Msg::Info)
     }
+
+    fn preview<'a>(&self, ui: &'a Ui<Msg>, width: i16, height: i16) -> Element<'a, Msg> {
+        let props = preview::Props { width: width as u16, height: height as u16, screencap: self.agent.is_none() || self.video_unavailable };
+        ui.child_mapped::<Preview>(props, |_| Msg::VideoUnavailable).radius(RADIUS).background(PREVIEW_BG).clip().on_tap(Msg::Preview).id(id!("preview"))
+    }
 }
 
 async fn load_info(this: This<AdbDashboardScreen>, conn: Connection) {
@@ -138,13 +149,31 @@ async fn load_info(this: This<AdbDashboardScreen>, conn: Connection) {
     }
 }
 
-async fn watch(this: This<AdbDashboardScreen>, conn: Connection) {
-    while !matches!(conn.state(), LinkState::Closed(_)) {
-        conn.state_changed().await;
-    }
+async fn watch(this: This<AdbDashboardScreen>, conn: Connection, link: Option<Link>) {
+    let mut adb = pin!(async {
+        while !matches!(conn.state(), LinkState::Closed(_)) {
+            conn.state_changed().await;
+        }
+    });
+    let mut agent = pin!(async {
+        match &link {
+            Some(link) => drop(link.closed().await),
+            None => pending().await,
+        }
+    });
+    let message = poll_fn(|cx| {
+        if adb.as_mut().poll(cx).is_ready() {
+            Poll::Ready("The device was disconnected.")
+        } else if agent.as_mut().poll(cx).is_ready() {
+            Poll::Ready("The connection to the agent was lost.")
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
     this.with(|_, cx| {
         cx.nav_of::<Root>().root();
-        cx.nav_of::<Overlay>().push(MessageScreen::new("Disconnected", "The device was disconnected."));
+        cx.nav_of::<Overlay>().push(MessageScreen::new("Disconnected", message));
     });
 }
 
@@ -160,14 +189,23 @@ impl Component for AdbDashboardScreen {
                 self.agent = None;
                 cx.nav_of::<Root>().root();
             }
-            Msg::Preview => match agent::link() {
-                Some(link) => {
-                    if let Some(screen) = MirrorScreen::new(link) {
+            Msg::Preview => match &self.agent {
+                Some(_) if self.video_unavailable => {
+                    cx.nav_of::<Overlay>().push(MessageScreen::new("Mirroring unavailable", "The agent cannot capture this device's screen, so mirroring is disabled."));
+                }
+                Some(agent) => {
+                    if let Some(screen) = MirrorScreen::new(agent.link().clone()) {
                         cx.nav_of::<Root>().transition(Transition::Zoom).push(screen);
                     }
                 }
-                None => error!(TAG, "mirror: agent not ready"),
+                None => {
+                    cx.nav_of::<Overlay>().push(MessageScreen::new("Mirroring unavailable", "The agent could not be started on this device, so mirroring is disabled."));
+                }
             },
+            Msg::VideoUnavailable => {
+                self.video_unavailable = true;
+                cx.rebuild();
+            }
             _ => {}
         }
     }
@@ -176,13 +214,13 @@ impl Component for AdbDashboardScreen {
         let (width, height) = ui.screen_size();
         let body = if width > height {
             let nav = ui.column([nav_bar(ui, true)]).justify(Justify::End);
-            let preview = preview(ui, PREVIEW_WIDTH_LANDSCAPE, PREVIEW_HEIGHT_LANDSCAPE).width(PREVIEW_WIDTH_LANDSCAPE);
+            let preview = self.preview(ui, PREVIEW_WIDTH_LANDSCAPE, PREVIEW_HEIGHT_LANDSCAPE).width(PREVIEW_WIDTH_LANDSCAPE);
             let rows: Vec<_> = FEATURES.chunks(4).map(|row| ui.row(row.iter().map(|&(glyph, label, msg)| feature_tile(ui, glyph, label, msg)).collect::<Vec<_>>()).gap(TILE_GAP).grow(1)).collect();
             let main = ui.column([self.header(ui), ui.column(rows).gap(TILE_GAP).grow(1), media(ui)]).gap(GAP).grow(1);
             ui.row([ui.row([nav, preview]).gap(TILE_GAP), main])
         } else {
             let tiles: Vec<_> = FEATURES.iter().map(|&(glyph, label, msg)| feature_row(ui, glyph, label, msg)).collect();
-            let left = ui.column([preview(ui, PREVIEW_WIDTH_PORTRAIT, PREVIEW_HEIGHT_PORTRAIT).grow(1), nav_bar(ui, false)]).gap(TILE_GAP).width(PREVIEW_WIDTH_PORTRAIT);
+            let left = ui.column([self.preview(ui, PREVIEW_WIDTH_PORTRAIT, PREVIEW_HEIGHT_PORTRAIT).grow(1), nav_bar(ui, false)]).gap(TILE_GAP).width(PREVIEW_WIDTH_PORTRAIT);
             let middle = ui.row([left, ui.column(tiles).gap(TILE_GAP).grow(1)]).gap(GAP).grow(1);
             ui.column([self.header(ui), middle, media(ui)])
         };
@@ -196,16 +234,9 @@ impl Screen for AdbDashboardScreen {
     fn on_load(&mut self, cx: &mut Cx<Self>) {
         let conn = self.conn.clone();
         cx.spawn(|this| load_info(this, conn));
-        let conn = self.conn.clone();
-        self.watch = Some(cx.spawn(|this| watch(this, conn)));
-        if settings::agent_mode() == AgentMode::Normal {
-            self.agent = Some(Agent::start(self.conn.clone()));
-        }
+        let (conn, link) = (self.conn.clone(), self.agent.as_ref().map(|a| a.link().clone()));
+        self.watch = Some(cx.spawn(|this| watch(this, conn, link)));
     }
-}
-
-fn preview<'a>(ui: &'a Ui<Msg>, width: i16, height: i16) -> Element<'a, Msg> {
-    ui.child::<Preview>((width as u16, height as u16)).radius(RADIUS).background(PREVIEW_BG).clip().on_tap(Msg::Preview).id(id!("preview"))
 }
 
 fn nav_bar<'a>(ui: &'a Ui<Msg>, vertical: bool) -> Element<'a, Msg> {

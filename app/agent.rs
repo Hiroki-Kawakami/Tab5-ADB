@@ -9,7 +9,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ffi::CStr;
-use core::fmt::Write;
+use core::fmt::{Display, Write};
+use core::future::Future;
+use core::pin::pin;
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
 use adb::link::{Connection, Stream};
@@ -17,16 +20,21 @@ use adb::services::{self, sync::Sync};
 use agent_link::protocol::CAP_VIDEO;
 use agent_link::{HelloConfig, Link};
 use devkit_crypto::hash::{Hash, Sha256};
-use idf::executor::{self, JoinHandle, Spawner};
-use idf::log::{error, info};
+use idf::executor::{self, Spawner};
+use idf::log::info;
 use idf::sync::{Mutex, OnceLock};
+use idf::time::Instant;
 
 use crate::adb_link;
 
 const TAG: &CStr = c"agent";
 const JAR: &[u8] = include_bytes!("agent/tab5adb-agent.jar");
 const SERVER: &str = "com.tab5adb.agent.Server";
+const STEP_TIMEOUT: Duration = Duration::from_secs(5);
+const PUSH_STALL: Duration = Duration::from_secs(5);
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Opening the control stream, then HELLO's own 3 s.
+const LINK_TIMEOUT: Duration = Duration::from_secs(8);
 const HELLO: HelloConfig = HelloConfig { capabilities: CAP_VIDEO, max_message: [256 * 1024, 512 * 1024, 64 * 1024] };
 
 static JAR_PATH: OnceLock<String> = OnceLock::new();
@@ -39,54 +47,39 @@ struct Current {
 
 /// The agent on the device, from `start` until dropped. One at a time.
 pub struct Agent {
-    task: Option<JoinHandle<()>>,
+    generation: u32,
+    link: Link,
 }
 
 impl Agent {
-    pub fn start(conn: Connection) -> Self {
-        let Some(spawner) = adb_link::spawner() else {
-            error!(TAG, "adb not started");
-            return Self { task: None };
-        };
-        let generation = {
-            let mut current = CURRENT.lock();
-            current.generation = current.generation.wrapping_add(1);
-            current.generation
-        };
-        let task = spawner.spawn(async move {
-            let link = match bring_up(&conn, spawner).await {
-                Ok(link) => link,
-                Err(err) => {
-                    error!(TAG, "start: {err}");
-                    return;
-                }
-            };
-            let [major, minor, patch] = link.info().version;
-            info!(TAG, "ready: agent {major}.{minor}.{patch}");
-            let mut current = CURRENT.lock();
-            if current.generation == generation {
-                current.link = Some(link);
-            } else {
-                link.close();
-            }
-        });
-        Self { task: Some(task) }
+    /// Dropping the future stops the bring-up.
+    pub async fn start(conn: Connection) -> Result<Self, String> {
+        let spawner = adb_link::spawner().ok_or("adb not started")?;
+        let mut task = devkit::guard(spawner.spawn(async move { bring_up(&conn, spawner).await }), |task| task.abort());
+        let link = (&mut *task).await?;
+        let [major, minor, patch] = link.info().version;
+        info!(TAG, "ready: agent {major}.{minor}.{patch}");
+        let mut current = CURRENT.lock();
+        current.generation = current.generation.wrapping_add(1);
+        if let Some(old) = current.link.replace(link.clone()) {
+            old.close();
+        }
+        Ok(Self { generation: current.generation, link })
+    }
+
+    pub fn link(&self) -> &Link {
+        &self.link
     }
 }
 
 impl Drop for Agent {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+        let mut current = CURRENT.lock();
+        if current.generation == self.generation {
+            current.link = None;
         }
-        let link = {
-            let mut current = CURRENT.lock();
-            current.generation = current.generation.wrapping_add(1);
-            current.link.take()
-        };
-        if let Some(link) = link {
-            link.close();
-        }
+        drop(current);
+        self.link.close();
     }
 }
 
@@ -108,30 +101,57 @@ fn jar_path() -> &'static str {
 
 async fn bring_up(conn: &Connection, spawner: &Spawner) -> Result<Link, String> {
     let id = adb_link::host_id();
-    services::exec(conn, &format!("pkill -f '{SERVER} {id}$'")).await.map_err(|e| format!("pkill: {e}"))?;
+    step("pkill", STEP_TIMEOUT, services::exec(conn, &format!("pkill -f '{SERVER} {id}$'"))).await?;
     let path = jar_path();
     install(conn, path).await?;
-    let mut shell = services::shell(conn, &format!("CLASSPATH={path} app_process / {SERVER} {id}"))
-        .await
-        .map_err(|e| format!("launch: {e}"))?;
+    let mut shell = step("launch", STEP_TIMEOUT, services::shell(conn, &format!("CLASSPATH={path} app_process / {SERVER} {id}"))).await?;
     match executor::timeout(LISTEN_TIMEOUT, wait_listening(&mut shell)).await {
         Ok(Ok(())) => {}
         Ok(Err(output)) => return Err(format!("agent exited: {output}")),
         Err(_) => return Err("agent did not listen".into()),
     }
     drop(spawner.spawn(log_output(shell)));
-    Link::open(conn, spawner, id, HELLO).await.map_err(|e| format!("link: {e}"))
+    step("link", LINK_TIMEOUT, Link::open(conn, spawner, id, HELLO)).await
+}
+
+async fn step<T, E: Display>(name: &str, timeout: Duration, future: impl Future<Output = Result<T, E>>) -> Result<T, String> {
+    match executor::timeout(timeout, future).await {
+        Ok(result) => result.map_err(|e| format!("{name}: {e}")),
+        Err(_) => Err(format!("{name}: timed out")),
+    }
 }
 
 async fn install(conn: &Connection, path: &str) -> Result<(), String> {
-    let mut sync = Sync::open(conn).await.map_err(|e| format!("sync: {e}"))?;
-    let stat = sync.stat(path).await.map_err(|e| format!("stat: {e}"))?;
+    let mut sync = step("sync", STEP_TIMEOUT, Sync::open(conn)).await?;
+    let stat = step("stat", STEP_TIMEOUT, sync.stat(path)).await?;
     if !stat.is_file() || stat.size as usize != JAR.len() {
-        sync.push_bytes(path, 0o644, 0, JAR).await.map_err(|e| format!("push: {e}"))?;
+        push(&mut sync, path).await?;
         info!(TAG, "pushed {path}");
     }
-    let _ = sync.close().await;
+    let _ = executor::timeout(STEP_TIMEOUT, sync.close()).await;
     Ok(())
+}
+
+/// Fails once `PUSH_STALL` passes without a chunk going out.
+async fn push(sync: &mut Sync, path: &str) -> Result<(), String> {
+    let start = Instant::now();
+    let progress = AtomicU32::new(0);
+    let since = || start.elapsed().saturating_sub(Duration::from_millis(u64::from(progress.load(Ordering::Relaxed))));
+    let mut rest = JAR;
+    let mut push = pin!(sync.push(path, 0o644, 0, |buf| {
+        progress.store(start.elapsed().as_millis() as u32, Ordering::Relaxed);
+        let n = buf.len().min(rest.len());
+        buf[..n].copy_from_slice(&rest[..n]);
+        rest = &rest[n..];
+        Ok(n)
+    }));
+    loop {
+        match executor::timeout(PUSH_STALL.saturating_sub(since()), push.as_mut()).await {
+            Ok(result) => return result.map_err(|e| format!("push: {e}")),
+            Err(_) if since() >= PUSH_STALL => return Err("push: stalled".into()),
+            Err(_) => {}
+        }
+    }
 }
 
 /// What the agent printed when it exited before `listening`.

@@ -4,32 +4,39 @@
  */
 
 use alloc::string::{String, ToString};
+use core::ffi::CStr;
 
 use adb::link::{Connection, State};
 use devkit_ui::widgets::{button, modal, modal_actions, modal_message, modal_title, progress_indicator};
 use devkit_ui::{Align, Component, Cx, Element, Overlay, Root, Screen, Task, This, Transition, Ui};
+use idf::log::error;
 
 use crate::adb_link::{self, Route};
+use crate::agent::Agent;
+use crate::settings::{self, AgentMode};
 
 use super::adb_dashboard::AdbDashboardScreen;
 use super::message::MessageScreen;
+
+const TAG: &CStr = c"connecting";
 
 pub struct ConnectingScreen {
     route: Route,
     conn: Option<Connection>,
     state: State,
+    starting_agent: bool,
     task: Option<Task>,
 }
 
 impl ConnectingScreen {
     pub fn usb(conn: Connection) -> Self {
         let state = conn.state();
-        Self { route: Route::Usb, conn: Some(conn), state, task: None }
+        Self { route: Route::Usb, conn: Some(conn), state, starting_agent: false, task: None }
     }
 
     /// Opens the connection to `addr` itself.
     pub fn tcp(addr: String) -> Self {
-        Self { route: Route::Tcp(addr), conn: None, state: State::Connecting, task: None }
+        Self { route: Route::Tcp(addr), conn: None, state: State::Connecting, starting_agent: false, task: None }
     }
 }
 
@@ -56,10 +63,7 @@ async fn follow(this: This<ConnectingScreen>, route: Route, conn: Connection) {
         let state = conn.state();
         match state {
             State::Online => {
-                this.with(|_, cx| {
-                    cx.nav_of::<Overlay>().pop();
-                    cx.nav_of::<Root>().transition(Transition::Zoom).push(AdbDashboardScreen::new(conn.clone(), route.clone()));
-                });
+                open_dashboard(this, route, conn).await;
                 return;
             }
             State::Closed(err) => {
@@ -80,6 +84,29 @@ async fn follow(this: This<ConnectingScreen>, route: Route, conn: Connection) {
     }
 }
 
+async fn open_dashboard(this: This<ConnectingScreen>, route: Route, conn: Connection) {
+    let agent = if settings::agent_mode() == AgentMode::Normal {
+        let alive = this.with(|s, cx| {
+            s.starting_agent = true;
+            cx.rebuild();
+        });
+        if alive.is_none() {
+            return;
+        }
+        Agent::start(conn.clone()).await.inspect_err(|err| error!(TAG, "agent: {err}")).ok()
+    } else {
+        None
+    };
+    if let State::Closed(err) = conn.state() {
+        this.with(|_, cx| cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err.to_string())));
+        return;
+    }
+    this.with(|_, cx| {
+        cx.nav_of::<Overlay>().pop();
+        cx.nav_of::<Root>().transition(Transition::Zoom).push(AdbDashboardScreen::new(conn, route, agent));
+    });
+}
+
 impl Component for ConnectingScreen {
     type Msg = Cancel;
 
@@ -93,6 +120,7 @@ impl Component for ConnectingScreen {
     fn view<'a>(&'a self, ui: &'a Ui<Cancel>) -> Element<'a, Cancel> {
         let theme = ui.theme();
         let message = match self.state {
+            _ if self.starting_agent => "Starting the agent...",
             State::Unauthorized => "Allow USB debugging on the phone.",
             _ => "Waiting for the device...",
         };

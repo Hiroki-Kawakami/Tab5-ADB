@@ -140,6 +140,11 @@ fn begin(route: Route, transport: Box<dyn Transport>) -> Result<Connection, Stri
     Ok(conn)
 }
 
+/// The open connection, whichever route it took.
+pub fn connection() -> Option<Connection> {
+    CONNECTION.lock().as_ref().map(|(_, conn)| conn.clone()).filter(|conn| !matches!(conn.state(), State::Closed(_)))
+}
+
 /// The plugged-in device's connection, opened on first use and kept until it
 /// closes or the device leaves.
 pub fn connect() -> Result<Connection, String> {

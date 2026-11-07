@@ -7,17 +7,15 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use adb::link::State as LinkState;
 use devkit_gfx::{Color, FontChain};
 use devkit_ui::widgets::text_field;
 use devkit_ui::{Align, ColorRole, Component, Cx, Element, Handle, Icon, Justify, Overlay, Prop, Root, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Transition, Ui};
 use idf::sync::Mutex;
 
-use crate::adb_link::{self, Route};
+use crate::adb_link;
 use crate::fonts::{HERO, icon, small_icon};
 use crate::resources::{colors, icons};
 
-use super::adb_dashboard::AdbDashboardScreen;
 use super::connecting::ConnectingScreen;
 use super::message::MessageScreen;
 use super::settings::SettingsScreen;
@@ -149,9 +147,6 @@ impl Component for HomeScreen {
         match msg {
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
             Msg::UsbConnect => match adb_link::connect() {
-                Ok(conn) if conn.state() == LinkState::Online => {
-                    cx.nav_of::<Root>().transition(Transition::Zoom).push(AdbDashboardScreen::new(conn, Route::Usb))
-                }
                 Ok(conn) => cx.nav_of::<Overlay>().push(ConnectingScreen::usb(conn)),
                 Err(err) => cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err)),
             },
