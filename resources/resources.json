@@ -70,7 +70,13 @@
         "MUSIC": "icons/music.svg",
         "PREVIOUS": "icons/player-skip-back.svg",
         "PLAY": "icons/player-play.svg",
-        "NEXT": "icons/player-skip-forward.svg"
+        "NEXT": "icons/player-skip-forward.svg",
+        "CLOSE": "icons/x.svg",
+        "DISPLAY_MODE": "icons/maximize.svg",
+        "TOUCH": "icons/hand-finger.svg",
+        "VOLUME_UP": "icons/volume.svg",
+        "VOLUME_DOWN": "icons/volume-2.svg",
+        "HIDE": "icons/chevron-down.svg"
       }
     }
   }

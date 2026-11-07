@@ -50,6 +50,7 @@ static SRAM: StaticLease<SharedSram> = StaticLease::new(SharedSram([0; SHARED_SR
 pub fn run() {
     settings::init();
     let mut bsp_config = bsp_rs::Config::default();
+    bsp_config.display.fb_num = 3;
     bsp_config.display.pixel_format = Some(settings::color_depth().pixel_format());
     let board = match bsp_rs::init(&bsp_config) {
         Ok(board) => board,

@@ -12,10 +12,10 @@ use core::time::Duration;
 
 use agent_link::protocol::ROTATION_RELEASE;
 use agent_link::{Frame, FrameHead, Jpeg, Link, VideoStart};
-use bsp_rs::display;
 use devkit::Lease;
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
-use devkit_ui::{Bars, Component, Cx, Element, ExternalFrame, ExternalSurface, Policy, RenderMode, Screen, ScreenStyle, Strips, Ui, id};
+use devkit_ui::widgets::{divider, vertical_divider};
+use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Element, ExternalFrame, ExternalSurface, Justify, Policy, Prop, RenderMode, Screen, ScreenStyle, State, Strips, Ui, id};
 use idf::executor::JoinHandle;
 use idf::cache::{self, Flags};
 use idf::heap::Caps;
@@ -26,13 +26,13 @@ use idf::time::Instant;
 use media_engine::{DecodeConfig, Decoder, Transform, Yuv, YuvRange, YuvStandard};
 
 use crate::adb_link;
+use crate::fonts::icon;
+use crate::resources::{colors, icons};
 use crate::settings::{self, MirrorOrientation};
 use crate::{STRIP_LANES, SharedSram};
 
 const TAG: &CStr = c"mirror";
 const UI_STRIP_BYTES: usize = 128 * 1024;
-const MIRROR_FRAME_BUFFERS: u8 = 3;
-const UI_FRAME_BUFFERS: u8 = 2;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const ROTATION_TIMEOUT: Duration = Duration::from_secs(2);
 const IDLE: Duration = Duration::from_millis(20);
@@ -43,6 +43,13 @@ const MAX_QUEUED_STRIPS: usize = 64;
 const STATS_PERIOD: Duration = Duration::from_secs(1);
 const MAX_FRAME_BUFFERS: usize = 4;
 const BLACK: Color = Color::rgb(0, 0, 0);
+const BAR_THICKNESS: i16 = 72;
+const BAR_MARGIN: i16 = 12;
+const BAR_RADIUS: u8 = 20;
+const BAR_SPACE: i16 = BAR_MARGIN + BAR_THICKNESS + BAR_MARGIN;
+const KEY_SIZE: i16 = 64;
+const REVEAL_CORNER: i16 = 96;
+const REVEAL_DISTANCE: i32 = 48;
 
 type Spare = Vec<u8, Caps>;
 type Sram = Lease<'static, SharedSram>;
@@ -50,6 +57,7 @@ type Sram = Lease<'static, SharedSram>;
 struct Shared {
     stop: AtomicBool,
     refresh: AtomicBool,
+    bar: AtomicBool,
     wake: Semaphore,
     strips: Mutex<VecDeque<Frame<Caps>>>,
     spare: Mutex<Vec<Spare>>,
@@ -257,7 +265,15 @@ impl Player {
         let turn = geometry.turn(self.mode, head.rotation);
         let (w, h) = (head.width as i16, head.height as i16);
         let (w, h) = if turn.swaps_axes() { (h, w) } else { (w, h) };
-        let rect = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
+        let (mut x, mut y) = (area.x + (area.w - w) / 2, area.y + (area.h - h) / 2);
+        if self.shared.bar.load(Ordering::Acquire) {
+            if area.w < area.h {
+                x = x.max(area.x + BAR_SPACE).min(area.right() - w);
+            } else {
+                y = y.min(area.bottom() - BAR_SPACE - h).max(area.y);
+            }
+        }
+        let rect = Rect::new(x, y, w, h);
         if !area.contains(&rect) {
             return Ok(None);
         }
@@ -266,9 +282,11 @@ impl Player {
             let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
             for margin in margins(area, rect).into_iter().filter(|r| !r.is_empty()) {
                 clear(&mut target, margin)?;
+                frame.wrote(margin);
             }
             self.blacked[index] = Some(rect);
         }
+        frame.wrote(rect);
         Ok(Some((rect, turn)))
     }
 
@@ -399,6 +417,8 @@ pub enum MirrorMsg {
     Back,
     Started,
     Restored,
+    Hide,
+    Reveal(Drag),
 }
 
 pub struct MirrorScreen {
@@ -409,6 +429,8 @@ pub struct MirrorScreen {
     player: Option<thread::JoinHandle<Sram>>,
     switching: bool,
     leaving: bool,
+    bar: bool,
+    swipe: Option<(i16, i16)>,
 }
 
 impl MirrorScreen {
@@ -424,6 +446,7 @@ impl MirrorScreen {
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             refresh: AtomicBool::new(false),
+            bar: AtomicBool::new(true),
             wake: Semaphore::new(0, 1),
             strips: Mutex::new(VecDeque::new()),
             spare: Mutex::new(Vec::new()),
@@ -433,7 +456,7 @@ impl MirrorScreen {
             refresh.refresh.store(true, Ordering::Release);
             refresh.wake.give();
         });
-        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false })
+        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, swipe: None })
     }
 
     fn start(&mut self, cx: &mut Cx<Self>) {
@@ -444,9 +467,7 @@ impl MirrorScreen {
                 return;
             }
         };
-        let mut display = display::Config::default();
-        display.fb_num = MIRROR_FRAME_BUFFERS;
-        cx.set_render_mode(RenderMode { strips, lanes: 1, display }, MirrorMsg::Started);
+        cx.set_render_mode(RenderMode { strips, lanes: 1, display: Default::default() }, MirrorMsg::Started);
         self.switching = true;
     }
 
@@ -482,9 +503,28 @@ impl MirrorScreen {
     }
 
     fn restore(&mut self, sram: Sram, cx: &mut Cx<Self>) {
-        let mut display = display::Config::default();
-        display.fb_num = UI_FRAME_BUFFERS;
-        cx.set_render_mode(RenderMode { strips: Strips::new(sram), lanes: STRIP_LANES, display }, MirrorMsg::Restored);
+        cx.set_render_mode(RenderMode { strips: Strips::new(sram), lanes: STRIP_LANES, display: Default::default() }, MirrorMsg::Restored);
+    }
+
+    fn show_bar(&mut self, shown: bool) {
+        self.bar = shown;
+        self.shared.bar.store(shown, Ordering::Release);
+        self.shared.refresh.store(true, Ordering::Release);
+        self.shared.wake.give();
+    }
+
+    /// `true` when the view changed.
+    fn reveal(&mut self, drag: Drag) -> bool {
+        if drag.ended {
+            return self.swipe.take().is_some();
+        }
+        let (x, y) = *self.swipe.get_or_insert((drag.x, drag.y));
+        let (dx, dy) = (i32::from(drag.x - x), i32::from(drag.y - y));
+        if !self.bar && dx * dx + dy * dy >= REVEAL_DISTANCE * REVEAL_DISTANCE {
+            self.show_bar(true);
+            return true;
+        }
+        false
     }
 
     fn release_rotation(&self) {
@@ -528,11 +568,71 @@ impl Component for MirrorScreen {
                 }
             }
             MirrorMsg::Restored => drop(cx.take_strips()),
+            MirrorMsg::Hide => {
+                self.show_bar(false);
+                cx.rebuild();
+            }
+            MirrorMsg::Reveal(drag) => {
+                if self.reveal(drag) {
+                    cx.rebuild();
+                }
+            }
         }
     }
 
     fn view<'a>(&'a self, ui: &'a Ui<MirrorMsg>) -> Element<'a, MirrorMsg> {
-        ui.column([ui.external(&self.surface).grow(1).id(id!("mirror"))]).background(BLACK).on_tap(MirrorMsg::Back)
+        let mut children = Vec::new();
+        children.push(ui.external(&self.surface).grow(1).id(id!("mirror")));
+        // The corner stays while its swipe lasts, so the press that shows the bar is not a tap on it.
+        if !self.bar || self.swipe.is_some() {
+            children.push(ui.column([]).size(REVEAL_CORNER, REVEAL_CORNER).absolute(Some(0), None, None, Some(0)).on_drag(MirrorMsg::Reveal).id(id!("reveal")));
+        }
+        if self.bar {
+            let (w, h) = ui.screen_size();
+            children.push(control_bar(ui, w < h).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN)).id(id!("controls")));
+        }
+        ui.column(children).background(BLACK)
+    }
+}
+
+fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool) -> Element<'a, MirrorMsg> {
+    let mut groups: [&[(char, Option<MirrorMsg>)]; 4] = [
+        &[(icons::HIDE, Some(MirrorMsg::Hide))],
+        &[(icons::NAV_BACK, None), (icons::NAV_HOME, None), (icons::NAV_RECENTS, None)],
+        &[(icons::VOLUME_DOWN, None), (icons::VOLUME_UP, None), (icons::POWER, None)],
+        &[(icons::TOUCH, None), (icons::DISPLAY_MODE, None), (icons::CLOSE, Some(MirrorMsg::Back))],
+    ];
+    if vertical {
+        groups.reverse();
+    }
+    let mut items = Vec::new();
+    for (i, group) in groups.iter().enumerate() {
+        if i > 0 {
+            items.push(if vertical { divider(ui).padding_x(ui.theme().widgets.unit.gap) } else { vertical_divider(ui) });
+        }
+        let mut keys: Vec<_> = group.iter().map(|&(glyph, msg)| control_key(ui, glyph, msg)).collect();
+        if vertical {
+            keys.reverse();
+        }
+        items.extend(keys);
+    }
+    let pad = (BAR_THICKNESS - KEY_SIZE) / 2;
+    let bar = if vertical { ui.column(items).width(BAR_THICKNESS).padding_y(pad) } else { ui.row(items).height(BAR_THICKNESS).padding_x(pad) };
+    bar.align(Align::Center).radius(BAR_RADIUS).background(ui.colors().surface)
+}
+
+fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, msg: Option<MirrorMsg>) -> Element<'a, MirrorMsg> {
+    let color = if matches!(msg, Some(MirrorMsg::Back)) { colors::DESTRUCTIVE } else { ColorRole::Text };
+    let key = ui
+        .row([ui.icon(icon(glyph)).foreground(color)])
+        .size(KEY_SIZE, KEY_SIZE)
+        .radius(14)
+        .align(Align::Center)
+        .justify(Justify::Center)
+        .when(State::PRESSED, &[Prop::Background(colors::PRESSED)]);
+    match msg {
+        Some(msg) => key.on_tap(msg),
+        None => key,
     }
 }
 
