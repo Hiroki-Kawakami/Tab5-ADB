@@ -11,6 +11,7 @@ mod adb_link;
 mod agent;
 mod device_info;
 mod fonts;
+mod preview;
 mod screens;
 mod settings;
 mod status_bar;

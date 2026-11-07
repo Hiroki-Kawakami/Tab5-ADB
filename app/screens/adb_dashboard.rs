@@ -17,6 +17,7 @@ use crate::adb_link::Route;
 use crate::agent::{self, Agent};
 use crate::device_info::{self, DeviceInfo};
 use crate::fonts::{icon, small_icon};
+use crate::preview::Preview;
 use crate::resources::{colors, icons};
 use crate::settings::{self, AgentMode};
 
@@ -30,6 +31,8 @@ const TILE_GAP: i16 = 12;
 const RADIUS: u8 = 20;
 const PREVIEW_WIDTH_PORTRAIT: i16 = 360;
 const PREVIEW_WIDTH_LANDSCAPE: i16 = 288;
+const PREVIEW_HEIGHT_PORTRAIT: i16 = 852;
+const PREVIEW_HEIGHT_LANDSCAPE: i16 = 640;
 const NAV_BAR_SIZE: i16 = 80;
 const NAV_BAR_SIZE_LANDSCAPE: i16 = 72;
 
@@ -173,13 +176,13 @@ impl Component for AdbDashboardScreen {
         let (width, height) = ui.screen_size();
         let body = if width > height {
             let nav = ui.column([nav_bar(ui, true)]).justify(Justify::End);
-            let preview = preview(ui).width(PREVIEW_WIDTH_LANDSCAPE);
+            let preview = preview(ui, PREVIEW_WIDTH_LANDSCAPE, PREVIEW_HEIGHT_LANDSCAPE).width(PREVIEW_WIDTH_LANDSCAPE);
             let rows: Vec<_> = FEATURES.chunks(4).map(|row| ui.row(row.iter().map(|&(glyph, label, msg)| feature_tile(ui, glyph, label, msg)).collect::<Vec<_>>()).gap(TILE_GAP).grow(1)).collect();
             let main = ui.column([self.header(ui), ui.column(rows).gap(TILE_GAP).grow(1), media(ui)]).gap(GAP).grow(1);
             ui.row([ui.row([nav, preview]).gap(TILE_GAP), main])
         } else {
             let tiles: Vec<_> = FEATURES.iter().map(|&(glyph, label, msg)| feature_row(ui, glyph, label, msg)).collect();
-            let left = ui.column([preview(ui).grow(1), nav_bar(ui, false)]).gap(TILE_GAP).width(PREVIEW_WIDTH_PORTRAIT);
+            let left = ui.column([preview(ui, PREVIEW_WIDTH_PORTRAIT, PREVIEW_HEIGHT_PORTRAIT).grow(1), nav_bar(ui, false)]).gap(TILE_GAP).width(PREVIEW_WIDTH_PORTRAIT);
             let middle = ui.row([left, ui.column(tiles).gap(TILE_GAP).grow(1)]).gap(GAP).grow(1);
             ui.column([self.header(ui), middle, media(ui)])
         };
@@ -201,8 +204,8 @@ impl Screen for AdbDashboardScreen {
     }
 }
 
-fn preview<'a>(ui: &'a Ui<Msg>) -> Element<'a, Msg> {
-    ui.column([]).radius(RADIUS).background(PREVIEW_BG).on_tap(Msg::Preview).id(id!("preview"))
+fn preview<'a>(ui: &'a Ui<Msg>, width: i16, height: i16) -> Element<'a, Msg> {
+    ui.child::<Preview>((width as u16, height as u16)).radius(RADIUS).background(PREVIEW_BG).clip().on_tap(Msg::Preview).id(id!("preview"))
 }
 
 fn nav_bar<'a>(ui: &'a Ui<Msg>, vertical: bool) -> Element<'a, Msg> {
