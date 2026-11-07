@@ -23,7 +23,9 @@ final class VideoServer {
     private static final int VIDEO_START = 0x01;
     private static final int REPLY = 0x40;
     private static final int FRAME = 0x41;
-    private static final int FRAME_HEAD = 8;
+    private static final int FRAME_HEAD = 12;
+    private static final int FLAG_LAST = 0x01;
+    private static final int STRIP_ALIGN = 16;
     private static final int OK = 0x00;
     private static final int EINVAL = 0x01;
     private static final int CODEC_JPEG = 1;
@@ -131,15 +133,16 @@ final class VideoServer {
             boolean swap = (payload[4] & FLAG_SWAP) != 0;
             int quality = payload[5] & 0xFF;
             int maxFps = payload[6] & 0xFF;
+            int strips = Math.max(1, payload[7] & 0xFF);
             if (boxW < 4 || boxH < 4) {
                 reply(out, EINVAL);
                 return;
             }
             quality = quality == 0 ? DEFAULT_QUALITY : Math.min(quality, 100);
             reply(out, OK);
-            System.out.println("video: box " + boxW + "x" + boxH + (swap ? " swap" : "") + " q" + quality + " fps " + maxFps);
+            System.out.println("video: box " + boxW + "x" + boxH + (swap ? " swap" : "") + " q" + quality + " fps " + maxFps + " strips " + strips);
             watchClose(in);
-            stream(out, boxW, boxH, swap, quality, maxFps);
+            stream(out, boxW, boxH, swap, quality, maxFps, strips);
         }
 
         private void watchClose(InputStream in) {
@@ -155,7 +158,7 @@ final class VideoServer {
             thread.start();
         }
 
-        private void stream(OutputStream out, int boxW, int boxH, boolean swap, int quality, int maxFps) throws Exception {
+        private void stream(OutputStream out, int boxW, int boxH, boolean swap, int quality, int maxFps, int strips) throws Exception {
             long frameNs = maxFps > 0 ? 1_000_000_000L / maxFps : 0;
             int max = Server.videoMaxMessage();
             ScreenCapture capture = null;
@@ -183,17 +186,12 @@ final class VideoServer {
                         Thread.sleep(IDLE_MS);
                         continue;
                     }
-                    byte[] message;
                     try {
-                        message = encode(bitmap, rotation, quality, max);
+                        sendFrame(out, bitmap, rotation, quality, max, strips);
                     } finally {
                         bitmap.recycle();
                     }
-                    if (message != null) {
-                        out.write(message);
-                        out.flush();
-                        frames++;
-                    }
+                    frames++;
                     if (frameNs > 0) {
                         long left = frameNs - (System.nanoTime() - t0);
                         if (left > 0) {
@@ -217,22 +215,49 @@ final class VideoServer {
         return new int[]{w, h};
     }
 
+    private static void sendFrame(OutputStream out, Bitmap frame, int rotation, int quality, int max, int strips) throws IOException {
+        int width = frame.getWidth();
+        int height = frame.getHeight();
+        int rows = Math.max(STRIP_ALIGN, height / strips / STRIP_ALIGN * STRIP_ALIGN);
+        int count = Math.max(1, Math.min(strips, height / rows));
+        for (int i = 0; i < count; i++) {
+            int y = i * rows;
+            boolean last = i == count - 1;
+            int band = last ? height - y : rows;
+            Bitmap strip = band == height ? frame : Bitmap.createBitmap(frame, 0, y, width, band);
+            byte[] message;
+            try {
+                message = encode(strip, width, height, y, rotation, last, quality, max);
+            } finally {
+                if (strip != frame) {
+                    strip.recycle();
+                }
+            }
+            if (message == null) {
+                return;
+            }
+            out.write(message);
+            out.flush();
+        }
+    }
+
     // null when even the lowest quality does not fit in max.
-    private static byte[] encode(Bitmap bitmap, int rotation, int quality, int max) {
+    private static byte[] encode(Bitmap strip, int width, int height, int y, int rotation, boolean last, int quality, int max) {
         for (int q = quality; ; q = Math.max(MIN_QUALITY, q - QUALITY_STEP)) {
-            ByteArrayOutputStream jpeg = new ByteArrayOutputStream(64 * 1024);
-            bitmap.compress(Bitmap.CompressFormat.JPEG, q, jpeg);
+            ByteArrayOutputStream jpeg = new ByteArrayOutputStream(32 * 1024);
+            strip.compress(Bitmap.CompressFormat.JPEG, q, jpeg);
             int length = FRAME_HEAD + jpeg.size();
             if (length <= max) {
                 ByteBuffer m = ByteBuffer.allocate(HEADER_BYTES + length).order(ByteOrder.LITTLE_ENDIAN);
                 m.putInt(length).put((byte) FRAME).put((byte) 0).putShort((short) 0);
-                m.putShort((short) bitmap.getWidth()).putShort((short) bitmap.getHeight());
-                m.put((byte) rotation).put((byte) 0).putShort((short) 0);
+                m.putShort((short) width).putShort((short) height);
+                m.putShort((short) y).putShort((short) strip.getHeight());
+                m.put((byte) rotation).put((byte) (last ? FLAG_LAST : 0)).putShort((short) 0);
                 m.put(jpeg.toByteArray());
                 return m.array();
             }
             if (q == MIN_QUALITY) {
-                System.out.println("video: frame of " + length + " bytes dropped");
+                System.out.println("video: strip of " + length + " bytes dropped");
                 return null;
             }
         }

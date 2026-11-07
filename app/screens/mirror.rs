@@ -3,6 +3,7 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ffi::CStr;
@@ -10,7 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
 use agent_link::protocol::ROTATION_RELEASE;
-use agent_link::{Frame, Jpeg, Link, VideoStart};
+use agent_link::{Frame, FrameHead, Jpeg, Link, VideoStart};
 use bsp_rs::display;
 use devkit::Lease;
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
@@ -35,6 +36,10 @@ const UI_FRAME_BUFFERS: u8 = 2;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const ROTATION_TIMEOUT: Duration = Duration::from_secs(2);
 const IDLE: Duration = Duration::from_millis(20);
+const STRIPS: u8 = 4;
+/// How long a frame being drawn waits for its next strip.
+const STRIP_TIMEOUT: Duration = Duration::from_millis(200);
+const MAX_QUEUED_STRIPS: usize = 64;
 const STATS_PERIOD: Duration = Duration::from_secs(1);
 const MAX_FRAME_BUFFERS: usize = 4;
 const BLACK: Color = Color::rgb(0, 0, 0);
@@ -46,15 +51,41 @@ struct Shared {
     stop: AtomicBool,
     refresh: AtomicBool,
     wake: Semaphore,
-    latest: Mutex<Option<Frame<Caps>>>,
+    strips: Mutex<VecDeque<Frame<Caps>>>,
     spare: Mutex<Vec<Spare>>,
 }
 
 impl Shared {
-    fn recycle(&self, frame: Frame<Caps>) {
-        if let Jpeg::Copied(vec) = frame.jpeg {
+    fn recycle(&self, strip: Frame<Caps>) {
+        if let Jpeg::Copied(vec) = strip.jpeg {
             self.spare.lock().push(vec);
         }
+    }
+
+    /// The first strip of the newest frame that can be drawn whole, dropping
+    /// what comes before it.
+    fn next_frame(&self) -> Option<Frame<Caps>> {
+        let mut strips = self.strips.lock();
+        let mut dropped = Vec::new();
+        loop {
+            if strips.front().is_some_and(|s| s.head.y != 0) {
+                dropped.extend(strips.pop_front());
+            } else if strips.iter().filter(|s| s.head.last).count() >= 2 {
+                while let Some(strip) = strips.pop_front() {
+                    let last = strip.head.last;
+                    dropped.push(strip);
+                    if last {
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        let first = strips.pop_front();
+        drop(strips);
+        dropped.into_iter().for_each(|s| self.recycle(s));
+        first
     }
 }
 
@@ -88,10 +119,10 @@ impl Geometry {
         let area = frame.area;
         let (w, h) = (area.w as u16, area.h as u16);
         let start = match mode {
-            MirrorOrientation::Fit => VideoStart { box_width: w, box_height: h, swap: false, quality: 0, max_fps: 0 },
+            MirrorOrientation::Fit => VideoStart { box_width: w, box_height: h, swap: false, quality: 0, max_fps: 0, strips: STRIPS },
             MirrorOrientation::Device | MirrorOrientation::Rotate => {
                 let (w, h) = if frame.rotation.swaps_axes() { (h, w) } else { (w, h) };
-                VideoStart { box_width: w, box_height: h, swap: true, quality: 0, max_fps: 0 }
+                VideoStart { box_width: w, box_height: h, swap: true, quality: 0, max_fps: 0, strips: STRIPS }
             }
         };
         Self { start, area, ui: frame.rotation }
@@ -125,14 +156,18 @@ async fn receive(link: Link, shared: Arc<Shared>, start: VideoStart, rotation: O
     };
     info!(TAG, "box {}x{}{}", start.box_width, start.box_height, if start.swap { " swap" } else { "" });
     loop {
-        let frame = match video.next_frame(|| shared.spare.lock().pop().unwrap_or_else(|| Vec::new_in(Caps::SPIRAM))).await {
-            Ok(frame) => frame,
+        let strip = match video.next_frame(|| shared.spare.lock().pop().unwrap_or_else(|| Vec::new_in(Caps::SPIRAM))).await {
+            Ok(strip) => strip,
             Err(err) => {
                 error!(TAG, "video: {err}");
                 return;
             }
         };
-        let old = shared.latest.lock().replace(frame);
+        let old = {
+            let mut strips = shared.strips.lock();
+            strips.push_back(strip);
+            (strips.len() > MAX_QUEUED_STRIPS).then(|| strips.pop_front()).flatten()
+        };
         if let Some(old) = old {
             shared.recycle(old);
         }
@@ -146,7 +181,7 @@ struct Player {
     link: Link,
     mode: MirrorOrientation,
     decoder: Option<(ImageFormat, Decoder)>,
-    shown: Option<Frame<Caps>>,
+    shown: Vec<Frame<Caps>>,
     geometry: Option<Geometry>,
     session: Option<JoinHandle<()>>,
     blacked: [Option<Rect>; MAX_FRAME_BUFFERS],
@@ -157,21 +192,20 @@ impl Player {
     fn run(&mut self, sram: &mut SharedSram) {
         while !self.shared.stop.load(Ordering::Acquire) {
             self.shared.wake.take_timeout(IDLE);
-            let fresh = self.shared.latest.lock().take();
-            let fresh = fresh.is_some_and(|received| {
-                if let Some(old) = self.shown.replace(received) {
-                    self.shared.recycle(old);
-                }
-                true
-            });
             let refresh = self.shared.refresh.swap(false, Ordering::AcqRel);
             if refresh {
                 self.blacked = [None; MAX_FRAME_BUFFERS];
             }
-            if !fresh && !refresh && self.geometry.is_some() {
+            let first = self.shared.next_frame();
+            if first.is_none() && !refresh && self.geometry.is_some() {
                 continue;
             }
-            let Some(frame) = self.surface.begin() else { continue };
+            let Some(frame) = self.surface.begin() else {
+                if let Some(first) = first {
+                    self.shared.strips.lock().push_front(first);
+                }
+                continue;
+            };
             let geometry = Geometry::of(&frame, self.mode);
             let reopen = self.geometry.is_none_or(|g| g.start != geometry.start || g.device_rotation(self.mode) != geometry.device_rotation(self.mode));
             if self.geometry != Some(geometry) {
@@ -181,7 +215,12 @@ impl Player {
             if reopen {
                 self.restart(geometry);
             }
-            match self.draw(&frame, sram) {
+            let fresh = first.is_some();
+            let drawn = match first {
+                Some(first) => self.draw_new(&frame, first, sram),
+                None => self.redraw(&frame, sram),
+            };
+            match drawn {
                 Ok(true) => {
                     frame.end();
                     if fresh {
@@ -209,35 +248,109 @@ impl Player {
         self.session = Some(spawner.spawn(receive(self.link.clone(), self.shared.clone(), geometry.start, rotation)));
     }
 
-    /// `false` when there is nothing to show in this geometry yet: a frame
-    /// sent for the box before the screen turned may not fit.
-    fn draw(&mut self, frame: &ExternalFrame, sram: &mut SharedSram) -> idf::Result<bool> {
-        let (Some(shown), Some(geometry)) = (self.shown.as_ref(), self.geometry) else { return Ok(false) };
+    /// Where the whole frame lands; `None` when there is nothing to show in
+    /// this geometry: a frame sent for the box before the screen turned may
+    /// not fit.
+    fn place(&mut self, frame: &ExternalFrame, head: &FrameHead) -> idf::Result<Option<(Rect, Rotation)>> {
+        let Some(geometry) = self.geometry else { return Ok(None) };
         let area = frame.area;
-        let turn = geometry.turn(self.mode, shown.head.rotation);
-        let (w, h) = (shown.head.width as i16, shown.head.height as i16);
+        let turn = geometry.turn(self.mode, head.rotation);
+        let (w, h) = (head.width as i16, head.height as i16);
         let (w, h) = if turn.swaps_axes() { (h, w) } else { (w, h) };
         let rect = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
         if !area.contains(&rect) {
-            return Ok(false);
+            return Ok(None);
         }
-        let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
         let index = frame.index.min(MAX_FRAME_BUFFERS - 1);
         if self.blacked[index] != Some(rect) {
+            let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
             for margin in margins(area, rect).into_iter().filter(|r| !r.is_empty()) {
                 clear(&mut target, margin)?;
             }
             self.blacked[index] = Some(rect);
         }
+        Ok(Some((rect, turn)))
+    }
+
+    fn render(&mut self, frame: &ExternalFrame, strip: &Frame<Caps>, (rect, turn): (Rect, Rotation), sram: &mut SharedSram) -> idf::Result<()> {
+        let head = &strip.head;
+        let trims = [0, head.y as i16, 0, head.height as i16 - head.y as i16 - head.rows as i16];
+        let k = usize::from(quarters(turn));
         let mut transform = Transform::new();
         transform.rotation = turn;
-        transform.at = (rect.x, rect.y);
+        transform.at = (rect.x + trims[k % 4], rect.y + trims[(1 + k) % 4]);
+        let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
         let decoder = decoder_for(&mut self.decoder, frame.fb.format())?;
         let bytes = sram.as_mut();
         let (a, b) = bytes.split_at_mut(bytes.len() / 2);
-        decoder.render(&shown.jpeg, &mut [a, b], &transform, &mut target)?.wait()?;
-        self.stats.2 += shown.jpeg.len();
-        Ok(true)
+        decoder.render(&strip.jpeg, &mut [a, b], &transform, &mut target)?.wait()?;
+        self.stats.2 += strip.jpeg.len();
+        Ok(())
+    }
+
+    /// Draws strips as they arrive; `false` when the frame did not come
+    /// whole.
+    fn draw_new(&mut self, frame: &ExternalFrame, first: Frame<Caps>, sram: &mut SharedSram) -> idf::Result<bool> {
+        let mut drawn = Vec::new();
+        let complete = self.draw_strips(frame, first, &mut drawn, sram);
+        if matches!(complete, Ok(true)) {
+            drawn = core::mem::replace(&mut self.shown, drawn);
+        }
+        drawn.into_iter().for_each(|s| self.shared.recycle(s));
+        complete
+    }
+
+    fn draw_strips(&mut self, frame: &ExternalFrame, first: Frame<Caps>, drawn: &mut Vec<Frame<Caps>>, sram: &mut SharedSram) -> idf::Result<bool> {
+        let Some(placed) = self.place(frame, &first.head)? else {
+            drawn.push(first);
+            return Ok(false);
+        };
+        let mut strip = first;
+        loop {
+            let rendered = self.render(frame, &strip, placed, sram);
+            let last = strip.head.last;
+            drawn.push(strip);
+            rendered?;
+            if last {
+                return Ok(true);
+            }
+            strip = match self.next_strip() {
+                Some(next) if next.head.y != 0 => next,
+                Some(next) => {
+                    self.shared.strips.lock().push_front(next);
+                    return Ok(false);
+                }
+                None => return Ok(false),
+            };
+        }
+    }
+
+    fn next_strip(&self) -> Option<Frame<Caps>> {
+        let start = Instant::now();
+        loop {
+            if let Some(strip) = self.shared.strips.lock().pop_front() {
+                return Some(strip);
+            }
+            let left = STRIP_TIMEOUT.saturating_sub(start.elapsed());
+            if left.is_zero() || self.shared.stop.load(Ordering::Acquire) {
+                return None;
+            }
+            self.shared.wake.take_timeout(left);
+        }
+    }
+
+    fn redraw(&mut self, frame: &ExternalFrame, sram: &mut SharedSram) -> idf::Result<bool> {
+        let shown = core::mem::take(&mut self.shown);
+        let result = (|| {
+            let Some(first) = shown.first() else { return Ok(false) };
+            let Some(placed) = self.place(frame, &first.head)? else { return Ok(false) };
+            for strip in &shown {
+                self.render(frame, strip, placed, sram)?;
+            }
+            Ok(true)
+        })();
+        self.shown = shown;
+        result
     }
 
     fn count(&mut self) {
@@ -312,7 +425,7 @@ impl MirrorScreen {
             stop: AtomicBool::new(false),
             refresh: AtomicBool::new(false),
             wake: Semaphore::new(0, 1),
-            latest: Mutex::new(None),
+            strips: Mutex::new(VecDeque::new()),
             spare: Mutex::new(Vec::new()),
         });
         let refresh = shared.clone();
@@ -345,7 +458,7 @@ impl MirrorScreen {
             link: self.link.clone(),
             mode: self.mode,
             decoder: None,
-            shown: None,
+            shown: Vec::new(),
             geometry: None,
             session: None,
             blacked: [None; MAX_FRAME_BUFFERS],

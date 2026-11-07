@@ -34,7 +34,8 @@ pub const EFAIL: u8 = 0xff;
 pub const REPLY_HEAD: usize = 4;
 const HELLO_BYTES: usize = 20;
 const HELLO_REPLY_BYTES: usize = 16;
-pub const FRAME_HEAD: usize = 8;
+pub const FRAME_HEAD: usize = 12;
+const FLAG_LAST: u8 = 0x01;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Channel {
@@ -143,26 +144,35 @@ pub struct VideoStart {
     pub quality: u8,
     /// 0 for no limit.
     pub max_fps: u8,
+    /// Horizontal bands a frame comes in; 0 and 1 for whole frames.
+    pub strips: u8,
 }
 
 impl VideoStart {
     pub fn encode(&self) -> [u8; 8] {
         let [w0, w1] = self.box_width.to_le_bytes();
         let [h0, h1] = self.box_height.to_le_bytes();
-        [w0, w1, h0, h1, u8::from(self.swap), self.quality, self.max_fps, 0]
+        [w0, w1, h0, h1, u8::from(self.swap), self.quality, self.max_fps, self.strips]
     }
 }
 
+/// One band of a frame.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct FrameHead {
+    /// The whole frame.
     pub width: u16,
     pub height: u16,
+    /// The band's first row and how many it has; its JPEG is `width` × `rows`.
+    pub y: u16,
+    pub rows: u16,
     /// `Surface.ROTATION_*` of the device when it was captured.
     pub rotation: u8,
+    pub last: bool,
 }
 
 impl FrameHead {
     pub fn parse(b: &[u8; FRAME_HEAD]) -> Self {
-        Self { width: u16::from_le_bytes([b[0], b[1]]), height: u16::from_le_bytes([b[2], b[3]]), rotation: b[4] & 3 }
+        let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+        Self { width: u16_at(0), height: u16_at(2), y: u16_at(4), rows: u16_at(6), rotation: b[8] & 3, last: b[9] & FLAG_LAST != 0 }
     }
 }

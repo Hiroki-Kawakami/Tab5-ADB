@@ -189,17 +189,20 @@ VIDEO_START
   u8  flags              bit 0 SWAP: 端末の rotation が 1 か 3 のとき枠の幅と高さを入れ替える
   u8  quality            JPEG 品質 1..100。0 = 80
   u8  max_fps            0 = 上限なし
-  u8  reserved
+  u8  strips             1 フレームを分ける横帯の数。0 と 1 は分けない
 
 REPLY result
   u8  codec              1 = JPEG
   u8  reserved[3]
 
 FRAME
-  u16 width              JPEG の幅と高さ [px]
+  u16 width              フレーム全体の幅と高さ [px]
   u16 height
+  u16 y                  この帯の先頭の行
+  u16 rows               この帯の行数。JPEG の大きさは width × rows
   u8  rotation           このフレームを取り込んだときの端末の向き
-  u8  reserved[3]
+  u8  flags              bit 0 LAST: フレームの最後の帯
+  u16 reserved
   ... jpeg               baseline、YUV 4:2:0
 ```
 
@@ -207,8 +210,12 @@ FRAME
   拡大・縮小して送る。幅と高さはそれぞれ 4 の倍数に切り下げる（Tab5 の HW JPEG デコーダは
   画素数が 8 の倍数の画像しか扱えない）。余白（レターボックス）は付けない。
 - 回転・配置・余白の塗りつぶしは Tab5 が行う。
+- 1 フレームは `strips` 本の帯に上から順に分けて、帯ごとに `FRAME` を送る。帯の行数は 16 の
+  倍数で、最後の帯が残りを持つ。agent は符号化した帯から順に送り、Tab5 は届いた帯から描く。
+  Tab5 は `LAST` の帯を描き終えてから表示を切り替える。
 - 端末の向きが変わると、agent は次のフレームからその向きで取り込み、`width`・`height`・
   `rotation` が変わる。ストリームは開き直さない。
 - 画面が変わらない間はフレームを送らない。開いた直後は変化が無くても 1 枚送る。
-- `FRAME` 全体が HELLO の映像の `max_message` を超えるなら、agent は品質を下げて符号化し直す。
+- `FRAME` 1 つが HELLO の映像の `max_message` を超えるなら、agent はその帯の品質を下げて
+  符号化し直す。
 
