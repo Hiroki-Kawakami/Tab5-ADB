@@ -17,6 +17,7 @@ pub enum Error {
     TooLarge,
     /// `Link::close`, or the agent closed the link.
     Closed,
+    NoMemory,
 }
 
 impl fmt::Display for Error {
@@ -28,6 +29,7 @@ impl fmt::Display for Error {
             Error::Timeout => f.write_str("timed out"),
             Error::TooLarge => f.write_str("message too large"),
             Error::Closed => f.write_str("link closed"),
+            Error::NoMemory => f.write_str("out of memory"),
         }
     }
 }

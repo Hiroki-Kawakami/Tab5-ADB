@@ -105,6 +105,7 @@ REPLY
 | type | 名前 | 内容 |
 |---|---|---|
 | `0x01` | `HELLO` | セッションの確立 |
+| `0x10` | `SET_ROTATION` | 端末の画面の向きを固定する・戻す |
 
 ### HELLO
 
@@ -134,6 +135,29 @@ REPLY result
 
 | bit | 名前 | 機能 |
 |---|---|---|
+| 0 | `VIDEO` | 映像ストリームと `SET_ROTATION` |
+
+### SET_ROTATION
+
+```
+SET_ROTATION
+  u8  rotation           0..3 = 固定する向き（「向き」を参照）。0xFF = 固定をやめて元に戻す
+  u8  reserved[3]
+
+REPLY result
+  なし
+```
+
+- agent は最初に固定したときの端末の状態（自動回転か、固定ならその向き）を覚えておき、
+  `0xFF`、制御ストリームが閉じたとき、プロセスの終了時にその状態へ戻す。
+- 固定中に別の向きを受けたら、その向きに固定し直す。覚えた状態は変えない。
+- 固定していないときの `0xFF` は何もせず `OK`。
+
+### 向き
+
+`rotation` は Android の `Surface.ROTATION_*` と同じ値で、端末の自然な向きに対して描画内容が
+時計回りに `rotation × 90°` 回っていることを表す。端末を反時計回りに 90° 傾けて横長に
+使っている状態が 1。
 
 ## 映像・音声ストリーム
 
@@ -147,4 +171,44 @@ REPLY result
 - 端末の資源（音声キャプチャなど）が他に使われていて取れなければ、agent は設定への応答で
   `EBUSY` を返し、ストリームを閉じる。
 
-メッセージは機能ごとに定義する。
+メッセージは機能ごとに定義する。どちらのストリームでも `id` は 0、設定への応答は `REPLY`
+（`0x40`）を使う。
+
+### 映像ストリーム
+
+| type | 名前 | 向き |
+|---|---|---|
+| `0x01` | `VIDEO_START` | Tab5→agent |
+| `0x40` | `REPLY` | agent→Tab5 |
+| `0x41` | `FRAME` | agent→Tab5 |
+
+```
+VIDEO_START
+  u16 box_width          フレームを収める枠 [px]
+  u16 box_height
+  u8  flags              bit 0 SWAP: 端末の rotation が 1 か 3 のとき枠の幅と高さを入れ替える
+  u8  quality            JPEG 品質 1..100。0 = 80
+  u8  max_fps            0 = 上限なし
+  u8  reserved
+
+REPLY result
+  u8  codec              1 = JPEG
+  u8  reserved[3]
+
+FRAME
+  u16 width              JPEG の幅と高さ [px]
+  u16 height
+  u8  rotation           このフレームを取り込んだときの端末の向き
+  u8  reserved[3]
+  ... jpeg               baseline、YUV 4:2:0
+```
+
+- agent は端末の画面を今の向き（論理的な向き）のまま、縦横比を保って枠に収まる最大の大きさに
+  拡大・縮小して送る。幅と高さはそれぞれ 4 の倍数に切り下げる（Tab5 の HW JPEG デコーダは
+  画素数が 8 の倍数の画像しか扱えない）。余白（レターボックス）は付けない。
+- 回転・配置・余白の塗りつぶしは Tab5 が行う。
+- 端末の向きが変わると、agent は次のフレームからその向きで取り込み、`width`・`height`・
+  `rotation` が変わる。ストリームは開き直さない。
+- 画面が変わらない間はフレームを送らない。開いた直後は変化が無くても 1 枚送る。
+- `FRAME` 全体が HELLO の映像の `max_message` を超えるなら、agent は品質を下げて符号化し直す。
+

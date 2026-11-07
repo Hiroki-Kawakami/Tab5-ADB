@@ -14,7 +14,8 @@ use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
-use crate::protocol::{self, Channel, HEADER_BYTES, HELLO, Header, Hello, HelloReply, OK, PROTO_VERSION, REPLY};
+use crate::protocol::{self, Channel, HEADER_BYTES, HELLO, Header, Hello, HelloReply, OK, PROTO_VERSION, REPLY, SET_ROTATION, VideoStart};
+use crate::video::Video;
 use crate::{Error, Result};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(3);
@@ -216,6 +217,9 @@ pub struct Link {
     shared: Arc<Shared>,
     tasks: Arc<Tasks>,
     info: AgentInfo,
+    conn: Connection,
+    id: Arc<str>,
+    config: HelloConfig,
 }
 
 impl Link {
@@ -235,7 +239,7 @@ impl Link {
             reader: Mutex::new(Some(spawner.spawn(read_loop(shared.clone(), reader, config.max_message[0])))),
             writer: Mutex::new(Some(spawner.spawn(write_loop(shared.clone(), writer)))),
         });
-        let mut link = Self { shared, tasks, info: AgentInfo::default() };
+        let mut link = Self { shared, tasks, info: AgentInfo::default(), conn: conn.clone(), id: Arc::from(id), config };
         let hello = Hello { proto_version: PROTO_VERSION, capabilities: config.capabilities, max_message: config.max_message };
         let reply = link.request(HELLO, &hello.encode(), HELLO_TIMEOUT).await?;
         let reply = HelloReply::parse(&reply).ok_or(Error::Protocol)?;
@@ -274,6 +278,21 @@ impl Link {
     /// Queues an input message; it goes out with whatever else is queued.
     pub fn input(&self, kind: u8, payload: &[u8]) -> Result<()> {
         self.shared.queue(kind, 0, payload)
+    }
+
+    /// A video stream sending as `start` asks; one at a time, so opening
+    /// another ends the last.
+    pub async fn open_video(&self, start: &VideoStart, timeout: Duration) -> Result<Video> {
+        if self.is_closed() {
+            return Err(self.shared.error());
+        }
+        Video::open(&self.conn, &Channel::Video.service(&self.id), start, self.config.max_message[1], timeout).await
+    }
+
+    /// Holds the device's screen at `rotation`, or gives it back with
+    /// `protocol::ROTATION_RELEASE`.
+    pub async fn set_rotation(&self, rotation: u8, timeout: Duration) -> Result<()> {
+        self.request(SET_ROTATION, &[rotation, 0, 0, 0], timeout).await.map(drop)
     }
 
     pub fn is_closed(&self) -> bool {

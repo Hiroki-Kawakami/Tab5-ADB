@@ -15,7 +15,7 @@ use idf::sync::OnceLock;
 
 use crate::fonts::icon;
 use crate::resources::{colors, icons};
-use crate::settings::{self, AgentMode, ColorDepth, SoundPlayback};
+use crate::settings::{self, AgentMode, ColorDepth, MirrorOrientation, SoundPlayback};
 use crate::{SHARED_SRAM_BYTES, STRIP_LANES, SharedSram};
 
 const TAG: &CStr = c"settings";
@@ -46,12 +46,16 @@ pub enum SettingsMsg {
     OpenPlayback,
     Playback(usize),
     AgentMode(usize),
+    OpenOrientation,
+    Orientation(usize),
 }
 
 const PLAYBACKS: [(SoundPlayback, &str); 2] = [(SoundPlayback::Tab5, "M5Stack Tab5"), (SoundPlayback::Android, "Android Device")];
 const PLAYBACK_LABELS: [&str; 2] = [PLAYBACKS[0].1, PLAYBACKS[1].1];
 const COLOR_DEPTHS: [ColorDepth; 2] = [ColorDepth::Bits16, ColorDepth::Bits24];
 const AGENT_MODES: [AgentMode; 2] = [AgentMode::Normal, AgentMode::Limited];
+const ORIENTATIONS: [(MirrorOrientation, &str); 3] = [(MirrorOrientation::Device, "Same as Device"), (MirrorOrientation::Fit, "Fit to Tab5"), (MirrorOrientation::Rotate, "Rotate Device")];
+const ORIENTATION_LABELS: [&str; 3] = [ORIENTATIONS[0].1, ORIENTATIONS[1].1, ORIENTATIONS[2].1];
 const AGENT_MODE_NOTE: &str = "Normal runs tab5adb-agent on the phone for screen mirroring, the live preview, and app icons. Limited uses ADB only. Applies on the next connection.";
 
 pub struct SettingsScreen {
@@ -142,6 +146,12 @@ impl Component for SettingsScreen {
             }
             SettingsMsg::Playback(index) => settings::set_sound_playback(PLAYBACKS[index].0),
             SettingsMsg::AgentMode(index) => settings::set_agent_mode(AGENT_MODES[index]),
+            SettingsMsg::OpenOrientation => {
+                if let Some(anchor) = cx.tap_rect() {
+                    cx.popup(DropdownMenu::new(anchor, &ORIENTATION_LABELS, orientation_index(), cx.handle(), SettingsMsg::Orientation));
+                }
+            }
+            SettingsMsg::Orientation(index) => settings::set_mirror_orientation(ORIENTATIONS[index].0),
         }
         cx.rebuild();
     }
@@ -182,6 +192,8 @@ impl Component for SettingsScreen {
                         ui,
                         [agent_mode_row(ui)],
                     ),
+                    table_header(ui, "MIRRORING"),
+                    table_section(ui, [table_row(ui, [table_label(ui, "Orientation"), dropdown(ui, ORIENTATION_LABELS[orientation_index()], SettingsMsg::OpenOrientation).id(id!("orientation"))])]),
                     table_header(ui, "ABOUT"),
                     table_section(
                         ui,
@@ -214,6 +226,11 @@ fn color_depth_index() -> usize {
 fn agent_mode_index() -> usize {
     let current = settings::agent_mode();
     AGENT_MODES.iter().position(|&mode| mode == current).unwrap_or(0)
+}
+
+fn orientation_index() -> usize {
+    let current = settings::mirror_orientation();
+    ORIENTATIONS.iter().position(|&(orientation, _)| orientation == current).unwrap_or(0)
 }
 
 fn playback_index() -> usize {

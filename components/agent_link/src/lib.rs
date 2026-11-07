@@ -14,6 +14,9 @@ mod link;
 pub mod protocol;
 #[cfg(test)]
 mod tests;
+mod video;
 
 pub use error::{Error, Result};
 pub use link::{AgentInfo, HelloConfig, Link};
+pub use protocol::{FrameHead, VideoStart};
+pub use video::Video;

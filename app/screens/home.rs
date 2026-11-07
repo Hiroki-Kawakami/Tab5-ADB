@@ -58,6 +58,10 @@ pub enum Msg {
 /// `adb tcp <host:port>`: connects from the home screen as its Connect
 /// button does.
 pub fn adb_command(args: &[&str]) -> Result<Option<String>, String> {
+    if let ["exec", rest @ ..] = args {
+        crate::adb_link::dbg_exec(rest.join(" "));
+        return Ok(None);
+    }
     let ["tcp", addr] = args else { return Err("usage: adb tcp <host:port>".into()) };
     let home = HOME.lock().clone().ok_or("no home screen")?;
     *REQUESTED.lock() = Some(addr.to_string());

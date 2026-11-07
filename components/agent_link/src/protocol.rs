@@ -11,7 +11,17 @@ pub const PROTO_VERSION: u16 = 1;
 pub const HEADER_BYTES: usize = 8;
 
 pub const HELLO: u8 = 0x01;
+pub const SET_ROTATION: u8 = 0x10;
 pub const REPLY: u8 = 0x40;
+
+pub const VIDEO_START: u8 = 0x01;
+pub const FRAME: u8 = 0x41;
+
+pub const CAP_VIDEO: u32 = 1 << 0;
+
+pub const CODEC_JPEG: u8 = 1;
+/// `SET_ROTATION` to give the device's own rotation back.
+pub const ROTATION_RELEASE: u8 = 0xFF;
 
 pub const OK: u8 = 0x00;
 pub const EINVAL: u8 = 0x01;
@@ -24,6 +34,7 @@ pub const EFAIL: u8 = 0xff;
 pub const REPLY_HEAD: usize = 4;
 const HELLO_BYTES: usize = 20;
 const HELLO_REPLY_BYTES: usize = 16;
+pub const FRAME_HEAD: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Channel {
@@ -119,5 +130,39 @@ impl HelloReply {
             capabilities: u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
             max_message: u32::from_le_bytes([b[12], b[13], b[14], b[15]]),
         })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct VideoStart {
+    pub box_width: u16,
+    pub box_height: u16,
+    /// The box turns with the device when it is on its side.
+    pub swap: bool,
+    /// 0 for the agent's default.
+    pub quality: u8,
+    /// 0 for no limit.
+    pub max_fps: u8,
+}
+
+impl VideoStart {
+    pub fn encode(&self) -> [u8; 8] {
+        let [w0, w1] = self.box_width.to_le_bytes();
+        let [h0, h1] = self.box_height.to_le_bytes();
+        [w0, w1, h0, h1, u8::from(self.swap), self.quality, self.max_fps, 0]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct FrameHead {
+    pub width: u16,
+    pub height: u16,
+    /// `Surface.ROTATION_*` of the device when it was captured.
+    pub rotation: u8,
+}
+
+impl FrameHead {
+    pub fn parse(b: &[u8; FRAME_HEAD]) -> Self {
+        Self { width: u16::from_le_bytes([b[0], b[1]]), height: u16::from_le_bytes([b[2], b[3]]), rotation: b[4] & 3 }
     }
 }

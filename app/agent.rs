@@ -14,6 +14,7 @@ use core::time::Duration;
 
 use adb::link::{Connection, Stream};
 use adb::services::{self, sync::Sync};
+use agent_link::protocol::CAP_VIDEO;
 use agent_link::{HelloConfig, Link};
 use devkit_crypto::hash::{Hash, Sha256};
 use idf::executor::{self, JoinHandle, Spawner};
@@ -26,7 +27,7 @@ const TAG: &CStr = c"agent";
 const JAR: &[u8] = include_bytes!("agent/tab5adb-agent.jar");
 const SERVER: &str = "com.tab5adb.agent.Server";
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
-const HELLO: HelloConfig = HelloConfig { capabilities: 0, max_message: [256 * 1024, 256 * 1024, 64 * 1024] };
+const HELLO: HelloConfig = HelloConfig { capabilities: CAP_VIDEO, max_message: [256 * 1024, 512 * 1024, 64 * 1024] };
 
 static JAR_PATH: OnceLock<String> = OnceLock::new();
 static CURRENT: Mutex<Current> = Mutex::new(Current { generation: 0, link: None });
@@ -87,6 +88,11 @@ impl Drop for Agent {
             link.close();
         }
     }
+}
+
+/// The agent's link once it is up and still open.
+pub fn link() -> Option<Link> {
+    CURRENT.lock().link.clone().filter(|link| !link.is_closed())
 }
 
 fn jar_path() -> &'static str {

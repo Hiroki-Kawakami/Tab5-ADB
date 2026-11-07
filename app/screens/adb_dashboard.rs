@@ -10,17 +10,18 @@ use core::ffi::CStr;
 use adb::link::{Connection, State as LinkState};
 use devkit_gfx::Color;
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Ui};
+use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Ui, id};
 use idf::log::error;
 
 use crate::adb_link::Route;
-use crate::agent::Agent;
+use crate::agent::{self, Agent};
 use crate::device_info::{self, DeviceInfo};
 use crate::fonts::{icon, small_icon};
 use crate::resources::{colors, icons};
 use crate::settings::{self, AgentMode};
 
 use super::message::MessageScreen;
+use super::mirror::MirrorScreen;
 
 const TAG: &CStr = c"dashboard";
 
@@ -148,12 +149,23 @@ impl Component for AdbDashboardScreen {
     type Msg = Msg;
 
     fn update(&mut self, msg: Msg, cx: &mut Cx<Self>) {
-        if let Msg::Disconnect = msg {
-            if let Some(task) = self.watch.take() {
-                task.abort();
+        match msg {
+            Msg::Disconnect => {
+                if let Some(task) = self.watch.take() {
+                    task.abort();
+                }
+                self.agent = None;
+                cx.nav_of::<Root>().root();
             }
-            self.agent = None;
-            cx.nav_of::<Root>().root();
+            Msg::Preview => match agent::link() {
+                Some(link) => {
+                    if let Some(screen) = MirrorScreen::new(link) {
+                        cx.nav_of::<Root>().push(screen);
+                    }
+                }
+                None => error!(TAG, "mirror: agent not ready"),
+            },
+            _ => {}
         }
     }
 
@@ -190,7 +202,7 @@ impl Screen for AdbDashboardScreen {
 }
 
 fn preview<'a>(ui: &'a Ui<Msg>) -> Element<'a, Msg> {
-    ui.column([]).radius(RADIUS).background(PREVIEW_BG).on_tap(Msg::Preview)
+    ui.column([]).radius(RADIUS).background(PREVIEW_BG).on_tap(Msg::Preview).id(id!("preview"))
 }
 
 fn nav_bar<'a>(ui: &'a Ui<Msg>, vertical: bool) -> Element<'a, Msg> {

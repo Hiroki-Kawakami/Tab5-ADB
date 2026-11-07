@@ -17,7 +17,7 @@ import java.nio.ByteOrder;
 
 public final class Server {
     private static final int VERSION_MAJOR = 0;
-    private static final int VERSION_MINOR = 1;
+    private static final int VERSION_MINOR = 2;
     private static final int VERSION_PATCH = 0;
 
     private static final int PROTO_VERSION = 1;
@@ -26,13 +26,21 @@ public final class Server {
     private static final long CONNECT_TIMEOUT_MS = 10_000;
 
     private static final int HELLO = 0x01;
+    private static final int SET_ROTATION = 0x10;
     private static final int REQUEST_LAST = 0x3F;
     private static final int REPLY = 0x40;
 
     private static final int OK = 0x00;
+    private static final int EINVAL = 0x01;
     private static final int ENOTSUP = 0x02;
+    private static final int EFAIL = 0xFF;
 
-    private static final int CAPABILITIES = 0;
+    private static final int CAP_VIDEO = 1 << 0;
+    private static final int CAPABILITIES = CAP_VIDEO;
+    private static final int ROTATION_RELEASE = 0xFF;
+
+    private static volatile boolean helloDone;
+    private static volatile int videoMaxMessage;
 
     private final OutputStream out;
     private boolean hello;
@@ -50,7 +58,7 @@ public final class Server {
         LocalServerSocket control;
         try {
             control = new LocalServerSocket(name);
-            refuse(new LocalServerSocket(name + "-video"));
+            VideoServer.listen(new LocalServerSocket(name + "-video"));
             refuse(new LocalServerSocket(name + "-audio"));
         } catch (IOException e) {
             System.out.println("listen: " + e);
@@ -68,6 +76,7 @@ public final class Server {
         });
         watchdog.setDaemon(true);
         watchdog.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(RotationLock::release));
         System.out.println("listening");
         System.out.flush();
         try (LocalSocket socket = control.accept()) {
@@ -82,7 +91,15 @@ public final class Server {
         System.exit(0);
     }
 
-    // No video or audio is served: every connection is closed.
+    static boolean helloDone() {
+        return helloDone;
+    }
+
+    static int videoMaxMessage() {
+        return videoMaxMessage;
+    }
+
+    // No audio is served: every connection is closed.
     private static void refuse(LocalServerSocket server) {
         Thread thread = new Thread(() -> {
             while (true) {
@@ -115,6 +132,8 @@ public final class Server {
             }
             if (kind == HELLO) {
                 onHello(id, payload);
+            } else if (kind == SET_ROTATION) {
+                onSetRotation(id, payload);
             } else if (kind <= REQUEST_LAST) {
                 reply(id, ENOTSUP, new byte[0]);
             }
@@ -133,10 +152,32 @@ public final class Server {
         result.put((byte) 0).putShort((short) 0);
         result.putInt(CAPABILITIES);
         result.putInt(MAX_MESSAGE);
+        videoMaxMessage = payload.length >= 16 ? ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(12) : 0;
         reply(id, OK, result.array());
         hello = true;
+        helloDone = true;
         System.out.println("HELLO ok");
         System.out.flush();
+    }
+
+    private void onSetRotation(int id, byte[] payload) throws IOException {
+        int rotation = payload.length >= 1 ? payload[0] & 0xFF : -1;
+        if (rotation == ROTATION_RELEASE) {
+            RotationLock.release();
+            reply(id, OK, new byte[0]);
+            return;
+        }
+        if (rotation < 0 || rotation > 3) {
+            reply(id, EINVAL, new byte[0]);
+            return;
+        }
+        try {
+            RotationLock.hold(rotation);
+            reply(id, OK, new byte[0]);
+        } catch (Throwable t) {
+            System.out.println("rotation: " + t);
+            reply(id, EFAIL, new byte[0]);
+        }
     }
 
     private void reply(int id, int status, byte[] result) throws IOException {

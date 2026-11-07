@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{Channel, ENOTSUP, HELLO, Header, Hello, HelloReply, REPLY, message, reply};
+use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, REPLY, VideoStart, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -55,4 +55,16 @@ fn services() {
     assert_eq!(Channel::Control.service("0A1B2C3D"), "localabstract:tab5adb-agent-0A1B2C3D");
     assert_eq!(Channel::Video.service("0A1B2C3D"), "localabstract:tab5adb-agent-0A1B2C3D-video");
     assert_eq!(Channel::Audio.service("0A1B2C3D"), "localabstract:tab5adb-agent-0A1B2C3D-audio");
+}
+
+#[test]
+fn video_start_bytes() {
+    let start = VideoStart { box_width: 720, box_height: 1280, swap: true, quality: 60, max_fps: 30 };
+    assert_eq!(start.encode(), [0xd0, 0x02, 0x00, 0x05, 1, 60, 30, 0]);
+}
+
+#[test]
+fn frame_head() {
+    let head = FrameHead::parse(&[0x00, 0x05, 0xd0, 0x02, 0x03, 0, 0, 0]);
+    assert_eq!(head, FrameHead { width: 1280, height: 720, rotation: 3 });
 }

@@ -93,6 +93,31 @@ impl Value for ColorDepth {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MirrorOrientation {
+    Device,
+    Fit,
+    Rotate,
+}
+
+impl Value for MirrorOrientation {
+    type Raw = u8;
+    type Arg<'a> = Self;
+
+    fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Device),
+            1 => Some(Self::Fit),
+            2 => Some(Self::Rotate),
+            _ => None,
+        }
+    }
+
+    fn to_raw<'a>(value: Self) -> <u8 as Raw>::Arg<'a> {
+        value as u8
+    }
+}
+
 struct Setting<T> {
     key: Key<T>,
     value: T,
@@ -150,6 +175,7 @@ struct Store {
     color_depth: Setting<ColorDepth>,
     sound_playback: Setting<SoundPlayback>,
     agent_mode: Setting<AgentMode>,
+    mirror_orientation: Setting<MirrorOrientation>,
 }
 
 static STORE: Mutex<Store> = Mutex::new(Store {
@@ -159,6 +185,7 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     color_depth: Setting::new(c"color_depth", ColorDepth::Bits24, keep),
     sound_playback: Setting::new(c"playback", SoundPlayback::Tab5, keep),
     agent_mode: Setting::new(c"agent_mode", AgentMode::Normal, keep),
+    mirror_orientation: Setting::new(c"mirror_orient", MirrorOrientation::Device, keep),
 });
 
 pub fn init() {
@@ -169,6 +196,7 @@ pub fn init() {
             store.color_depth.load(&nvs);
             store.sound_playback.load(&nvs);
             store.agent_mode.load(&nvs);
+            store.mirror_orientation.load(&nvs);
             store.nvs = Some(nvs);
         }
         Err(err) => error!(TAG, "open: {err}"),
@@ -191,6 +219,7 @@ pub fn commit() {
     written |= store.color_depth.commit(nvs);
     written |= store.sound_playback.commit(nvs);
     written |= store.agent_mode.commit(nvs);
+    written |= store.mirror_orientation.commit(nvs);
     if written && let Err(err) = nvs.commit() {
         error!(TAG, "commit: {err}");
     }
@@ -237,4 +266,12 @@ fn apply_brightness(store: &Store) {
     {
         error!(TAG, "set_brightness: {err}");
     }
+}
+
+pub fn mirror_orientation() -> MirrorOrientation {
+    STORE.lock().mirror_orientation.value
+}
+
+pub fn set_mirror_orientation(orientation: MirrorOrientation) {
+    STORE.lock().mirror_orientation.set(orientation);
 }

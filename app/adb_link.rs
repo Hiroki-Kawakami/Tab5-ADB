@@ -180,3 +180,14 @@ async fn join_network() -> Result<(), String> {
     wifi.sta().wait_ipv4_async().await;
     Ok(())
 }
+
+pub fn dbg_exec(cmd: String) {
+    let Some(conn) = CONNECTION.lock().as_ref().map(|(_, c)| c.clone()) else { return };
+    let Some(spawner) = SPAWNER.get() else { return };
+    drop(spawner.spawn(async move {
+        match adb::services::exec(&conn, &cmd).await {
+            Ok(out) => info!(TAG, "DBG exec: {}", String::from_utf8_lossy(&out).trim_end()),
+            Err(err) => error!(TAG, "DBG exec: {err}"),
+        }
+    }));
+}
