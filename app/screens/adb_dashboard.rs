@@ -10,7 +10,7 @@ use core::ffi::CStr;
 use adb::link::{Connection, State as LinkState};
 use devkit_gfx::Color;
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Ui, id};
+use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Transition, Ui, id};
 use idf::log::error;
 
 use crate::adb_link::Route;
@@ -160,7 +160,7 @@ impl Component for AdbDashboardScreen {
             Msg::Preview => match agent::link() {
                 Some(link) => {
                     if let Some(screen) = MirrorScreen::new(link) {
-                        cx.nav_of::<Root>().push(screen);
+                        cx.nav_of::<Root>().transition(Transition::Zoom).push(screen);
                     }
                 }
                 None => error!(TAG, "mirror: agent not ready"),

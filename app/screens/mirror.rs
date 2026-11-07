@@ -458,6 +458,8 @@ pub struct MirrorScreen {
     leaving: bool,
     bar: bool,
     swipe: Option<(i16, i16)>,
+    /// The surface is in the view; screen moves cannot draw over it.
+    live: bool,
 }
 
 impl MirrorScreen {
@@ -485,7 +487,7 @@ impl MirrorScreen {
             drop(pending);
             refresh.wake.give();
         });
-        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, swipe: None })
+        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, swipe: None, live: false })
     }
 
     fn start(&mut self, cx: &mut Cx<Self>) {
@@ -586,7 +588,11 @@ impl Component for MirrorScreen {
 
     fn update(&mut self, msg: MirrorMsg, cx: &mut Cx<Self>) {
         match msg {
-            MirrorMsg::Back => cx.nav().pop(),
+            MirrorMsg::Back => {
+                self.live = false;
+                cx.rebuild();
+                cx.nav().pop();
+            }
             MirrorMsg::Started => {
                 self.switching = false;
                 let Some(sram) = cx.take_strips().and_then(Strips::into_inner::<Sram>) else {
@@ -614,7 +620,7 @@ impl Component for MirrorScreen {
 
     fn view<'a>(&'a self, ui: &'a Ui<MirrorMsg>) -> Element<'a, MirrorMsg> {
         let mut children = Vec::new();
-        children.push(ui.external(&self.surface).grow(1).id(id!("mirror")));
+        children.push(if self.live { ui.external(&self.surface).grow(1).id(id!("mirror")) } else { ui.column([]).grow(1) });
         // The corner stays while its swipe lasts, so the press that shows the bar is not a tap on it.
         if !self.bar || self.swipe.is_some() {
             children.push(ui.column([]).size(REVEAL_CORNER, REVEAL_CORNER).absolute(Some(0), None, None, Some(0)).on_drag(MirrorMsg::Reveal).id(id!("reveal")));
@@ -623,7 +629,8 @@ impl Component for MirrorScreen {
             let (w, h) = ui.screen_size();
             let reach = BAR_MARGIN + BAR_THICKNESS;
             let presence = if w < h { Presence::from_edge(Edge::Left).offset(0, reach) } else { Presence::from_edge(Edge::Bottom).offset(-reach, 0) };
-            children.push(control_bar(ui, w < h).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN)).appear(presence).id(id!("controls")));
+            let bar = control_bar(ui, w < h).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN));
+            children.push(if self.live { bar.appear(presence) } else { bar }.id(id!("controls")));
         }
         ui.column(children).background(BLACK)
     }
@@ -677,12 +684,16 @@ impl Screen for MirrorScreen {
 
     fn did_appear(&mut self, cx: &mut Cx<Self>) {
         self.leaving = false;
+        self.live = true;
+        cx.rebuild();
         if !self.switching && self.player.is_none() {
             self.start(cx);
         }
     }
 
     fn will_disappear(&mut self, cx: &mut Cx<Self>) {
+        self.live = false;
+        cx.rebuild();
         if self.switching {
             self.leaving = true;
             return;
