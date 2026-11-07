@@ -74,7 +74,10 @@ struct TcpPacketWriter(TcpWriter);
 impl TcpPacketWriter {
     async fn write_packet(&mut self, packet: &Packet) -> Result<()> {
         self.0.write_all_async(&packet.header()).await.map_err(link)?;
-        self.0.write_all_async(&packet.payload).await.map_err(link)
+        for segment in packet.payload.segments() {
+            self.0.write_all_async(segment).await.map_err(link)?;
+        }
+        Ok(())
     }
 }
 

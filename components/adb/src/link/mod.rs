@@ -14,4 +14,5 @@ pub mod transport;
 pub mod usb;
 
 pub use connection::{Connection, State, Stream, StreamReader, StreamWriter};
+pub use packet::Slice;
 pub use identity::Identity;

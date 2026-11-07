@@ -4,14 +4,16 @@
  */
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ffi::CStr;
 
 use idf::heap::Caps;
 use idf::log::error;
+use idf::sync::Mutex;
 use usb_host_rs::{Buffer, Device, Endpoint, Interface};
 
-use crate::link::packet::{HEADER_BYTES, Header, Packet};
+use crate::link::packet::{Chunk, HEADER_BYTES, Header, Packet, Payload};
 use crate::link::transport::{BoxFuture, PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
 
@@ -24,6 +26,9 @@ const PROTOCOL: u8 = 0x01;
 const CHUNK: usize = 64 * 1024;
 const HEADER_CAPS: Caps = Caps::DMA.union(Caps::INTERNAL);
 const PAYLOAD_CAPS: Caps = Caps::SPIRAM;
+/// Packet buffers kept for reuse once read, so a packet is neither copied
+/// nor zeroed again.
+const SPARE_BUFFERS: usize = 8;
 
 fn find(device: &Device) -> Option<u8> {
     device
@@ -62,7 +67,7 @@ struct UsbDevice {
 impl Transport for UsbDevice {
     fn split(self: Box<Self>) -> (Box<dyn PacketReader>, Box<dyn PacketWriter>) {
         let writer = UsbWriter { _interface: self.interface.clone(), output: self.output, unhalt: Some(self.input.clone()), header: None, payload: None };
-        let reader = UsbReader { _interface: self.interface, input: self.input, header: None, payload: None };
+        let reader = UsbReader { _interface: self.interface, input: self.input, header: None, spare: Arc::new(Mutex::new(Vec::new())) };
         (Box::new(reader), Box::new(writer))
     }
 }
@@ -79,11 +84,34 @@ fn take(slot: &mut Option<Buffer>, len: usize, caps: Caps) -> Result<Buffer> {
     }
 }
 
+struct Received {
+    buf: Option<Buffer>,
+    len: usize,
+    spare: Arc<Mutex<Vec<Buffer>>>,
+}
+
+impl AsRef<[u8]> for Received {
+    fn as_ref(&self) -> &[u8] {
+        self.buf.as_deref().map_or(&[], |b| &b[..self.len])
+    }
+}
+
+impl Drop for Received {
+    fn drop(&mut self) {
+        let mut spare = self.spare.lock();
+        if spare.len() < SPARE_BUFFERS
+            && let Some(buf) = self.buf.take()
+        {
+            spare.push(buf);
+        }
+    }
+}
+
 struct UsbReader {
     _interface: Interface,
     input: Endpoint,
     header: Option<Buffer>,
-    payload: Option<Buffer>,
+    spare: Arc<Mutex<Vec<Buffer>>>,
 }
 
 impl UsbReader {
@@ -102,20 +130,32 @@ impl UsbReader {
             }
         };
         let len = header.length as usize;
-        let mut payload = Vec::new();
-        payload.try_reserve_exact(len).map_err(|_| Error::NoMemory)?;
-        while payload.len() < len {
-            let want = (len - payload.len()).next_multiple_of(mps).min(CHUNK);
-            let buf = take(&mut self.payload, CHUNK, PAYLOAD_CAPS)?;
-            let (buf, r) = self.input.transfer(buf, want).await;
+        if len == 0 {
+            return Ok(Packet::new(header.command, header.arg0, header.arg1, Vec::new()));
+        }
+        let capacity = len.next_multiple_of(CHUNK);
+        let spare = {
+            let mut spare = self.spare.lock();
+            let at = spare.iter().position(|b| b.len() >= capacity);
+            at.map(|at| spare.swap_remove(at))
+        };
+        let mut buf = match spare {
+            Some(buf) => buf,
+            None => Buffer::new(capacity, PAYLOAD_CAPS).map_err(|_| Error::NoMemory)?,
+        };
+        let mut got = 0;
+        while got < len {
+            let want = (len - got).next_multiple_of(mps).min(CHUNK);
+            let (back, r) = self.input.transfer_at(buf, got, want).await;
+            buf = back;
             let n = r.map_err(link)?;
-            payload.extend_from_slice(&buf[..n.min(len - payload.len())]);
-            self.payload = Some(buf);
-            if n < want && payload.len() < len {
+            got += n.min(len - got);
+            if n < want && got < len {
                 return Err(Error::Protocol);
             }
         }
-        Ok(Packet::new(header.command, header.arg0, header.arg1, payload))
+        let chunk: Chunk = Arc::new(Received { buf: Some(buf), len, spare: self.spare.clone() });
+        Ok(Packet { command: header.command, arg0: header.arg0, arg1: header.arg1, payload: Payload::Chunks(alloc::vec![chunk]) })
     }
 }
 
@@ -146,9 +186,9 @@ impl UsbWriter {
         let (buf, r) = self.output.transfer(buf, HEADER_BYTES).await;
         self.header = Some(buf);
         r.map_err(link)?;
-        let chunks = packet.payload.chunks(CHUNK);
+        let chunks: Vec<&[u8]> = packet.payload.segments().flat_map(|s| s.chunks(CHUNK)).collect();
         let last = chunks.len().saturating_sub(1);
-        for (i, chunk) in chunks.enumerate() {
+        for (i, chunk) in chunks.into_iter().enumerate() {
             let mut buf = take(&mut self.payload, CHUNK, PAYLOAD_CAPS)?;
             buf[..chunk.len()].copy_from_slice(chunk);
             let (buf, r) = if i == last {

@@ -162,15 +162,9 @@ final class VideoServer {
             int rotation = -1;
             Point logical = null;
             int frames = 0;
-            long dbgStart = System.nanoTime(), dbgProbe = 0, dbgAcq = 0, dbgEnc = 0, dbgWrite = 0, dbgBytes = 0, dbgIdle = 0;
-            int dbgFrames = 0;
             try {
                 while (!stopped) {
                     long t0 = System.nanoTime();
-                    if (t0 - dbgStart >= 1_000_000_000L && dbgFrames > 0) {
-                        System.out.println("DBG agent " + dbgFrames + " fps probe " + dbgProbe / dbgFrames / 1000 + "us acq " + dbgAcq / dbgFrames / 1000 + "us enc " + dbgEnc / dbgFrames / 1000 + "us write " + dbgWrite / dbgFrames / 1000 + "us idle " + dbgIdle / 1_000_000 + "ms " + dbgBytes / dbgFrames / 1024 + "KB");
-                        dbgStart = t0; dbgProbe = dbgAcq = dbgEnc = dbgWrite = dbgBytes = dbgIdle = 0; dbgFrames = 0;
-                    }
                     int now = ScreenCapture.rotation();
                     Point size = ScreenCapture.logicalSize();
                     if (capture == null || now != rotation || !size.equals(logical)) {
@@ -184,12 +178,9 @@ final class VideoServer {
                         capture = new ScreenCapture(fit[0], fit[1], size.x, size.y);
                         System.out.println("video: " + fit[0] + "x" + fit[1] + " rotation " + rotation);
                     }
-                    long t1 = System.nanoTime();
                     Bitmap bitmap = capture.acquire();
-                    long t2 = System.nanoTime();
                     if (bitmap == null) {
                         Thread.sleep(IDLE_MS);
-                        dbgIdle += System.nanoTime() - t1;
                         continue;
                     }
                     byte[] message;
@@ -198,15 +189,11 @@ final class VideoServer {
                     } finally {
                         bitmap.recycle();
                     }
-                    long t3 = System.nanoTime();
                     if (message != null) {
                         out.write(message);
                         out.flush();
                         frames++;
                     }
-                    long t4 = System.nanoTime();
-                    dbgProbe += t1 - t0; dbgAcq += t2 - t1; dbgEnc += t3 - t2; dbgWrite += t4 - t3; dbgFrames++;
-                    dbgBytes += message != null ? message.length : 0;
                     if (frameNs > 0) {
                         long left = frameNs - (System.nanoTime() - t0);
                         if (left > 0) {

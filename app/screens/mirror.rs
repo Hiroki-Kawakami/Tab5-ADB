@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
 use agent_link::protocol::ROTATION_RELEASE;
-use agent_link::{FrameHead, Link, VideoStart};
+use agent_link::{Frame, Jpeg, Link, VideoStart};
 use bsp_rs::display;
 use devkit::Lease;
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
@@ -39,33 +39,22 @@ const STATS_PERIOD: Duration = Duration::from_secs(1);
 const MAX_FRAME_BUFFERS: usize = 4;
 const BLACK: Color = Color::rgb(0, 0, 0);
 
-type Jpeg = Vec<u8, Caps>;
-static DBG_PAUSE: AtomicBool = AtomicBool::new(false);
-static DBG_DISCARD: AtomicBool = AtomicBool::new(false);
-static DBG_TICK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static DBG_RENDER_US: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static DBG_END_US: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static DBG_READ_US: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static DBG_RECV_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static DBG_RECV: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+type Spare = Vec<u8, Caps>;
 type Sram = Lease<'static, SharedSram>;
-
-struct Received {
-    head: FrameHead,
-    jpeg: Jpeg,
-}
 
 struct Shared {
     stop: AtomicBool,
     refresh: AtomicBool,
     wake: Semaphore,
-    latest: Mutex<Option<Received>>,
-    spare: Mutex<Vec<Jpeg>>,
+    latest: Mutex<Option<Frame<Caps>>>,
+    spare: Mutex<Vec<Spare>>,
 }
 
 impl Shared {
-    fn recycle(&self, jpeg: Jpeg) {
-        self.spare.lock().push(jpeg);
+    fn recycle(&self, frame: Frame<Caps>) {
+        if let Jpeg::Copied(vec) = frame.jpeg {
+            self.spare.lock().push(vec);
+        }
     }
 }
 
@@ -136,31 +125,16 @@ async fn receive(link: Link, shared: Arc<Shared>, start: VideoStart, rotation: O
     };
     info!(TAG, "box {}x{}{}", start.box_width, start.box_height, if start.swap { " swap" } else { "" });
     loop {
-        while DBG_PAUSE.load(Ordering::Acquire) {
-            idf::executor::sleep(Duration::from_millis(5)).await;
-        }
-        if DBG_DISCARD.load(Ordering::Acquire) {
-            if video.dbg_discard_frame().await.is_err() {
-                return;
-            }
-            continue;
-        }
-        let mut jpeg = shared.spare.lock().pop().unwrap_or_else(|| Vec::new_in(Caps::SPIRAM));
-        let t0 = Instant::now();
-        let got = video.next_frame(&mut jpeg).await;
-        DBG_READ_US.fetch_add(t0.elapsed().as_micros() as u32, Ordering::Relaxed);
-        DBG_RECV_N.fetch_add(1, Ordering::Relaxed);
-        DBG_RECV.fetch_add(1, Ordering::Relaxed);
-        let head = match got {
-            Ok(head) => head,
+        let frame = match video.next_frame(|| shared.spare.lock().pop().unwrap_or_else(|| Vec::new_in(Caps::SPIRAM))).await {
+            Ok(frame) => frame,
             Err(err) => {
                 error!(TAG, "video: {err}");
                 return;
             }
         };
-        let old = shared.latest.lock().replace(Received { head, jpeg });
+        let old = shared.latest.lock().replace(frame);
         if let Some(old) = old {
-            shared.recycle(old.jpeg);
+            shared.recycle(old);
         }
         shared.wake.give();
     }
@@ -172,7 +146,7 @@ struct Player {
     link: Link,
     mode: MirrorOrientation,
     decoder: Option<(ImageFormat, Decoder)>,
-    shown: Option<Received>,
+    shown: Option<Frame<Caps>>,
     geometry: Option<Geometry>,
     session: Option<JoinHandle<()>>,
     blacked: [Option<Rect>; MAX_FRAME_BUFFERS],
@@ -186,7 +160,7 @@ impl Player {
             let fresh = self.shared.latest.lock().take();
             let fresh = fresh.is_some_and(|received| {
                 if let Some(old) = self.shown.replace(received) {
-                    self.shared.recycle(old.jpeg);
+                    self.shared.recycle(old);
                 }
                 true
             });
@@ -261,57 +235,7 @@ impl Player {
         let decoder = decoder_for(&mut self.decoder, frame.fb.format())?;
         let bytes = sram.as_mut();
         let (a, b) = bytes.split_at_mut(bytes.len() / 2);
-        if DBG_TICK.fetch_add(1, Ordering::Relaxed) % 30 == 0 && !turn.swaps_axes() {
-            let ppa = media_engine::ppa()?;
-            let fmt = frame.fb.format();
-            let pw = (shown.head.width as usize).next_multiple_of(16);
-            let rows = (a.len() / fmt.row_bytes(pw)) / 16 * 16;
-            let stride = fmt.row_bytes(pw);
-            let n = (shown.head.height as usize).div_ceil(rows);
-            let (src_w, src_h) = (shown.head.width, shown.head.height as usize);
-            let fb_size = frame.fb.size();
-            let mut scratch: Vec<u8, Caps> = Vec::new_in(Caps::SPIRAM);
-            scratch.resize(frame.fb.len() + 64, 0);
-            let off = scratch.as_ptr().align_offset(64);
-            let run = |tg: &mut Target<'_>, x: i16, y0: i16| -> idf::Result<u128> {
-                let mut slots: Vec<media_engine::Slot> = (0..n).map(|_| media_engine::Slot::new()).collect();
-                let t = Instant::now();
-                let mut jobs = Vec::new();
-                let mut rest: &mut [media_engine::Slot] = &mut slots;
-                for i in 0..n {
-                    let (slot, tail) = rest.split_first_mut().unwrap();
-                    rest = tail;
-                    let y = i * rows;
-                    let h = rows.min(src_h - y);
-                    let src: &[u8] = if i % 2 == 0 { &a[..] } else { &b[..] };
-                    let img = devkit_gfx::Image::from_pixels(fmt, src_w, h as u16, pw, &src[..stride * h]);
-                    let mut op = media_engine::Srm::new(img);
-                    op.at = (x, y0 + y as i16);
-                    let t2 = unsafe { &mut *(tg as *mut Target<'_>) };
-                    jobs.push(ppa.srm(&op, t2, slot)?);
-                }
-                for j in jobs { j.wait()?; }
-                Ok(t.elapsed().as_micros())
-            };
-            let live = run(&mut target, rect.x, rect.y)?;
-            DBG_DISCARD.store(true, Ordering::Release);
-            thread::sleep(Duration::from_millis(60));
-            let discard = [run(&mut target, rect.x, rect.y)?, run(&mut target, rect.x, rect.y)?, run(&mut target, rect.x, rect.y)?];
-            DBG_DISCARD.store(false, Ordering::Release);
-            DBG_PAUSE.store(true, Ordering::Release);
-            thread::sleep(Duration::from_millis(60));
-            let fb_paused = [run(&mut target, rect.x, rect.y)?, run(&mut target, rect.x, rect.y)?];
-            let mut st = Target::new(&mut scratch[off..off + frame.fb.len()], fmt, fb_size, fb_size.width as usize).ok_or(idf::Error::INVALID_ARG)?;
-            let sc_paused = [run(&mut st, rect.x, rect.y)?, run(&mut st, rect.x, rect.y)?];
-            DBG_PAUSE.store(false, Ordering::Release);
-            info!(TAG, "DBG ppa {}x{}rows: live {}us | discard {:?} | paused {:?} | scratch paused {:?}", n, rows, live, discard, fb_paused, sc_paused);
-        }
-        let t0 = Instant::now();
-        let mut strips = [a, b];
-        let job = decoder.render(&shown.jpeg, &mut strips, &transform, &mut target)?;
-        DBG_END_US.fetch_add(t0.elapsed().as_micros() as u32, Ordering::Relaxed);
-        job.wait()?;
-        DBG_RENDER_US.fetch_add(t0.elapsed().as_micros() as u32, Ordering::Relaxed);
+        decoder.render(&shown.jpeg, &mut [a, b], &transform, &mut target)?.wait()?;
         self.stats.2 += shown.jpeg.len();
         Ok(true)
     }
@@ -321,8 +245,6 @@ impl Player {
         let elapsed = self.stats.0.elapsed();
         if elapsed >= STATS_PERIOD {
             let ms = elapsed.as_millis() as u32;
-            let n = self.stats.1.max(1);
-            info!(TAG, "DBG recv {} render {}us setup {}us read {}us", DBG_RECV.swap(0, Ordering::Relaxed), DBG_RENDER_US.swap(0, Ordering::Relaxed) / n, DBG_END_US.swap(0, Ordering::Relaxed) / n, DBG_READ_US.swap(0, Ordering::Relaxed) / DBG_RECV_N.swap(0, Ordering::Relaxed).max(1));
             info!(TAG, "{} fps, {} KB/s", self.stats.1 * 1000 / ms, self.stats.2 as u32 / ms);
             self.stats = (Instant::now(), 0, 0);
         }
@@ -429,7 +351,7 @@ impl MirrorScreen {
             blacked: [None; MAX_FRAME_BUFFERS],
             stats: (Instant::now(), 0, 0),
         };
-        let spawned = thread::Builder::new().name("mirror").stack_size(8192).priority(20).spawn(move || {
+        let spawned = thread::Builder::new().name("mirror").stack_size(8192).priority(5).spawn(move || {
             player.run(&mut sram);
             sram
         });

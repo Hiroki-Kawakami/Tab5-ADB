@@ -4,7 +4,7 @@
  */
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -17,7 +17,7 @@ use idf::sync::Mutex;
 
 use crate::link::identity::Identity;
 use crate::link::packet::{
-    A_AUTH, A_CLSE, A_CNXN, A_OKAY, A_OPEN, A_VERSION, A_WRTE, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, Packet,
+    A_AUTH, A_CLSE, A_CNXN, A_OKAY, A_OPEN, A_VERSION, A_WRTE, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, Chunk, Packet, Payload, Slice,
 };
 use crate::link::transport::{PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
@@ -121,14 +121,15 @@ impl Shared {
         match p.command {
             A_CNXN => {
                 self.max_payload.store(p.arg1.min(MAX_PAYLOAD), Ordering::Release);
-                let end = p.payload.iter().position(|&b| b == 0).unwrap_or(p.payload.len());
-                *self.banner.lock() = String::from_utf8_lossy(&p.payload[..end]).into_owned();
+                let payload = p.payload.into_vec();
+                let end = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
+                *self.banner.lock() = String::from_utf8_lossy(&payload[..end]).into_owned();
                 self.set_state(State::Online);
             }
             A_AUTH if p.arg0 == AUTH_TOKEN => {
                 if !*signed {
                     *signed = true;
-                    let signature = identity.sign_token(&p.payload)?;
+                    let signature = identity.sign_token(&p.payload.into_vec())?;
                     self.set_state(State::Authorizing);
                     self.send(Packet::new(A_AUTH, AUTH_SIGNATURE, 0, signature)).await?;
                 } else if !*offered {
@@ -330,7 +331,8 @@ struct StreamState {
     accepted: bool,
     remote: u32,
     writable: bool,
-    inbox: Vec<u8>,
+    inbox: VecDeque<Chunk>,
+    /// Into the front of `inbox`.
     read_at: usize,
     /// The device's last WRTE, not acknowledged until it is read.
     unacked: bool,
@@ -353,7 +355,7 @@ impl StreamShared {
                 accepted: false,
                 remote: 0,
                 writable: false,
-                inbox: Vec::new(),
+                inbox: VecDeque::new(),
                 read_at: 0,
                 unacked: false,
                 opener: None,
@@ -384,16 +386,9 @@ impl StreamShared {
         Self::wake(&mut s);
     }
 
-    fn deliver(&self, data: Vec<u8>) {
+    fn deliver(&self, data: Payload) {
         let mut s = self.state.lock();
-        if s.read_at < s.inbox.len() {
-            let at = s.read_at;
-            s.inbox.drain(..at);
-            s.inbox.extend_from_slice(&data);
-        } else {
-            s.inbox = data;
-        }
-        s.read_at = 0;
+        s.inbox.extend(data.into_chunks());
         s.unacked = true;
         Self::wake(&mut s);
     }
@@ -456,6 +451,10 @@ impl Stream {
         self.reader.read_to_end().await
     }
 
+    pub async fn read_slice(&mut self, max: usize) -> Result<Slice> {
+        self.reader.read_slice(max).await
+    }
+
     /// Returns once the device took all of `data`.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         self.writer.write(data).await
@@ -477,23 +476,34 @@ pub struct StreamReader {
 
 impl StreamReader {
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let (n, ack) = poll_fn(|cx| {
+        let slice = self.read_slice(buf.len()).await?;
+        buf[..slice.len()].copy_from_slice(&slice);
+        Ok(slice.len())
+    }
+
+    /// Up to `max` bytes of what arrived, without a copy; empty once the
+    /// device closed the stream and everything was read.
+    pub async fn read_slice(&mut self, max: usize) -> Result<Slice> {
+        let (slice, ack) = poll_fn(|cx| {
             let mut s = self.stream.state.lock();
-            if s.read_at < s.inbox.len() {
-                let n = buf.len().min(s.inbox.len() - s.read_at);
+            if let Some(front) = s.inbox.front().cloned() {
+                let len = (*front).as_ref().len();
                 let at = s.read_at;
-                buf[..n].copy_from_slice(&s.inbox[at..at + n]);
-                s.read_at += n;
-                let ack = (s.read_at == s.inbox.len() && s.unacked && s.phase == Phase::Open).then(|| {
-                    s.unacked = false;
-                    s.inbox.clear();
+                let n = max.min(len - at);
+                if at + n == len {
+                    s.inbox.pop_front();
                     s.read_at = 0;
+                } else {
+                    s.read_at += n;
+                }
+                let ack = (s.inbox.is_empty() && s.unacked && s.phase == Phase::Open).then(|| {
+                    s.unacked = false;
                     s.remote
                 });
-                return Poll::Ready((n, ack));
+                return Poll::Ready((Slice::new(front, at, at + n), ack));
             }
             if s.phase == Phase::Closed {
-                return Poll::Ready((0, None));
+                return Poll::Ready((Slice::new(Arc::new(Vec::new()), 0, 0), None));
             }
             s.reader = Some(cx.waker().clone());
             Poll::Pending
@@ -503,7 +513,7 @@ impl StreamReader {
             let packet = Packet::new(A_OKAY, self.stream.local, remote, Vec::new());
             self.guard.handle.0.send(packet).await?;
         }
-        Ok(n)
+        Ok(slice)
     }
 
     pub async fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {

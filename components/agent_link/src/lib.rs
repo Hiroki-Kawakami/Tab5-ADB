@@ -19,4 +19,4 @@ mod video;
 pub use error::{Error, Result};
 pub use link::{AgentInfo, HelloConfig, Link};
 pub use protocol::{FrameHead, VideoStart};
-pub use video::Video;
+pub use video::{Frame, Jpeg, Video};
