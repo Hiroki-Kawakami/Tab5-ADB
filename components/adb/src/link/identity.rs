@@ -3,6 +3,7 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::CStr;
 
@@ -21,21 +22,22 @@ const TOKEN_BYTES: usize = 20;
 const PRIVATE_KEY: Key<Vec<u8>> = Key::new(c"privkey");
 
 /// The RSA key this host authenticates with. A device that was told to
-/// always allow it skips the dialog.
+/// always allow it skips the dialog, which shows the key's `name`.
 pub struct Identity {
     key: PrivateKey,
     public: Vec<u8>,
+    name: String,
 }
 
 impl Identity {
     /// Takes seconds on the device.
-    pub fn generate() -> Result<Self> {
-        Self::new(PrivateKey::generate(KEY_BITS)?)
+    pub fn generate(name: &str) -> Result<Self> {
+        Self::new(PrivateKey::generate(KEY_BITS)?, name)
     }
 
     /// A PKCS #1 RSAPrivateKey.
-    pub fn from_der(der: &[u8]) -> Result<Self> {
-        Self::new(PrivateKey::from_pkcs1_der(der)?)
+    pub fn from_der(der: &[u8], name: &str) -> Result<Self> {
+        Self::new(PrivateKey::from_pkcs1_der(der)?, name)
     }
 
     pub fn to_der(&self) -> Result<Vec<u8>> {
@@ -43,24 +45,24 @@ impl Identity {
     }
 
     /// The key kept in NVS under `namespace`, generated and stored the first
-    /// time or when what is stored does not parse.
-    pub fn load_or_create(namespace: &CStr) -> Result<Self> {
+    /// time or when what is stored does not parse. `name` is not stored.
+    pub fn load_or_create(namespace: &CStr, name: &str) -> Result<Self> {
         let mut nvs = Nvs::open(namespace).map_err(Error::Storage)?;
         if let Some(der) = nvs.get(PRIVATE_KEY).map_err(Error::Storage)?
-            && let Ok(identity) = Self::from_der(&der)
+            && let Ok(identity) = Self::from_der(&der, name)
         {
             return Ok(identity);
         }
-        let identity = Self::generate()?;
+        let identity = Self::generate(name)?;
         nvs.set(PRIVATE_KEY, &identity.to_der()?).map_err(Error::Storage)?;
         nvs.commit().map_err(Error::Storage)?;
         Ok(identity)
     }
 
-    fn new(key: PrivateKey) -> Result<Self> {
+    fn new(key: PrivateKey, name: &str) -> Result<Self> {
         let public = key.public_key()?;
         let blob = android_public_key(public.modulus(), public.exponent()).ok_or(Error::Crypto(devkit_crypto::Error::InvalidKey))?;
-        Ok(Self { key, public: base64::encode(&blob) })
+        Ok(Self { key, public: base64::encode(&blob), name: name.into() })
     }
 
     /// The token signed as if it were a SHA-1 digest, as adbd checks it.
@@ -71,11 +73,11 @@ impl Identity {
         Ok(self.key.sign_pkcs1v15_prehashed(HashAlg::Sha1, token)?)
     }
 
-    /// The AUTH RSAPUBLICKEY payload; `comment` is what the device's dialog shows.
-    pub(crate) fn public_key_payload(&self, comment: &str) -> Vec<u8> {
+    /// The AUTH RSAPUBLICKEY payload.
+    pub(crate) fn public_key_payload(&self) -> Vec<u8> {
         let mut out = self.public.clone();
         out.push(b' ');
-        out.extend_from_slice(comment.as_bytes());
+        out.extend_from_slice(self.name.as_bytes());
         out.push(0);
         out
     }

@@ -13,6 +13,7 @@ use devkit_ui::widgets::{divider, vertical_divider};
 use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Ui};
 use idf::log::error;
 
+use crate::agent::Agent;
 use crate::device_info::{self, DeviceInfo};
 use crate::fonts::{icon, small_icon};
 use crate::resources::{colors, icons};
@@ -74,12 +75,13 @@ pub struct AdbDashboardScreen {
     model: Option<String>,
     info: Option<DeviceInfo>,
     watch: Option<Task>,
+    agent: Option<Agent>,
 }
 
 impl AdbDashboardScreen {
     pub fn new(conn: Connection) -> Self {
         let model = device_info::model(&conn.banner());
-        Self { conn, model, info: None, watch: None }
+        Self { conn, model, info: None, watch: None, agent: None }
     }
 
     fn header<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
@@ -143,6 +145,7 @@ impl Component for AdbDashboardScreen {
             if let Some(task) = self.watch.take() {
                 task.abort();
             }
+            self.agent = None;
             cx.nav_of::<Root>().root();
         }
     }
@@ -173,6 +176,7 @@ impl Screen for AdbDashboardScreen {
         cx.spawn(|this| load_info(this, conn));
         let conn = self.conn.clone();
         self.watch = Some(cx.spawn(|this| watch(this, conn)));
+        self.agent = Some(Agent::start(self.conn.clone()));
     }
 }
 

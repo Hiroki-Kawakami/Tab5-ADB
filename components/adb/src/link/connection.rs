@@ -24,7 +24,6 @@ use crate::{Error, Result};
 
 const MAX_PAYLOAD: u32 = 256 * 1024;
 const BANNER: &[u8] = b"host::features=shell_v2,cmd\0";
-const KEY_COMMENT: &str = "tab5-adb";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum State {
@@ -134,7 +133,7 @@ impl Shared {
                     self.send(Packet::new(A_AUTH, AUTH_SIGNATURE, 0, signature)).await?;
                 } else if !*offered {
                     *offered = true;
-                    let key = identity.public_key_payload(KEY_COMMENT);
+                    let key = identity.public_key_payload();
                     self.send(Packet::new(A_AUTH, AUTH_RSAPUBLICKEY, 0, key)).await?;
                     self.set_state(State::Unauthorized);
                 }

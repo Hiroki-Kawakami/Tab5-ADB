@@ -8,6 +8,7 @@
 extern crate alloc;
 
 mod adb_link;
+mod agent;
 mod device_info;
 mod fonts;
 mod screens;
@@ -62,6 +63,7 @@ pub fn run() {
         return;
     };
     adb_link::start(board.power);
+    agent::init();
     if let Err(err) = harness_rs::start(&board) {
         error!(TAG, "harness_rs::start: {err}");
     }

@@ -14,7 +14,21 @@
   outputs = { self, nixpkgs, flake-utils, esp-devkit }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import nixpkgs {
+          inherit system;
+          config = {
+            android_sdk.accept_license = true;
+            allowUnfree = true;
+          };
+        };
+        androidSdk = (pkgs.androidenv.composeAndroidPackages {
+          platformVersions = [ "34" ];
+          buildToolsVersions = [ "34.0.0" ];
+          includeEmulator = false;
+          includeSystemImages = false;
+          includeSources = false;
+        }).androidsdk;
+        androidSdkRoot = "${androidSdk}/libexec/android-sdk";
       in {
         packages.fw-image = esp-devkit.lib.${system}.mkFwImage {
           name = "tab5-adb-fw";
@@ -22,6 +36,11 @@
 
         devShells.default = pkgs.mkShell {
           inputsFrom = [ esp-devkit.devShells.${system}.default ];
+          packages = [ pkgs.jdk androidSdk ];
+          shellHook = ''
+            export ANDROID_JAR="${androidSdkRoot}/platforms/android-34/android.jar"
+            export PATH="$PATH:${androidSdkRoot}/build-tools/34.0.0"
+          '';
         };
       }
     );

@@ -27,8 +27,10 @@ use idf::time::Instant;
 
 const TAG: &CStr = c"adb_link";
 const KEY_NAMESPACE: &CStr = c"adb";
+const DEFAULT_HOST_ID: &str = "00000000";
 const PUSH_PATH: &str = "/data/local/tmp/tab5adb.bin";
 static SPAWNER: OnceLock<Spawner> = OnceLock::new();
+static HOST_ID: OnceLock<String> = OnceLock::new();
 static IDENTITY: OnceLock<Arc<Identity>> = OnceLock::new();
 static DEVICE: Mutex<Option<Device>> = Mutex::new(None);
 static CONNECTION: Mutex<Option<Connection>> = Mutex::new(None);
@@ -54,8 +56,24 @@ pub fn start(power: &bsp_rs::power::Power) {
     harness_rs::register("adb", command);
 }
 
+/// This Tab5's name towards devices: the low four bytes of the factory MAC.
+pub fn host_id() -> &'static str {
+    HOST_ID.get_or_init(|| match idf::system::factory_mac() {
+        Ok(mac) => format!("{:02X}{:02X}{:02X}{:02X}", mac[2], mac[3], mac[4], mac[5]),
+        Err(err) => {
+            error!(TAG, "factory MAC: {err}");
+            DEFAULT_HOST_ID.into()
+        }
+    })
+}
+
+/// The executor the connection's tasks run on.
+pub fn spawner() -> Option<&'static Spawner> {
+    SPAWNER.get()
+}
+
 async fn follow() {
-    match Identity::load_or_create(KEY_NAMESPACE) {
+    match Identity::load_or_create(KEY_NAMESPACE, &format!("Tab5-ADB@{}", host_id())) {
         Ok(identity) => drop(IDENTITY.set(Arc::new(identity))),
         Err(err) => {
             error!(TAG, "identity: {err}");
