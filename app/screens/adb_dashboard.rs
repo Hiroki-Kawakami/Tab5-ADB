@@ -18,6 +18,7 @@ use crate::agent::Agent;
 use crate::device_info::{self, DeviceInfo};
 use crate::fonts::{icon, small_icon};
 use crate::resources::{colors, icons};
+use crate::settings::{self, AgentMode};
 
 use super::message::MessageScreen;
 
@@ -182,7 +183,9 @@ impl Screen for AdbDashboardScreen {
         cx.spawn(|this| load_info(this, conn));
         let conn = self.conn.clone();
         self.watch = Some(cx.spawn(|this| watch(this, conn)));
-        self.agent = Some(Agent::start(self.conn.clone()));
+        if settings::agent_mode() == AgentMode::Normal {
+            self.agent = Some(Agent::start(self.conn.clone()));
+        }
     }
 }
 

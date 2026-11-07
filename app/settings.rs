@@ -39,6 +39,29 @@ impl Value for SoundPlayback {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AgentMode {
+    Normal,
+    Limited,
+}
+
+impl Value for AgentMode {
+    type Raw = u8;
+    type Arg<'a> = Self;
+
+    fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Normal),
+            1 => Some(Self::Limited),
+            _ => None,
+        }
+    }
+
+    fn to_raw<'a>(value: Self) -> <u8 as Raw>::Arg<'a> {
+        value as u8
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ColorDepth {
     Bits16,
     Bits24,
@@ -126,6 +149,7 @@ struct Store {
     brightness: Setting<u8>,
     color_depth: Setting<ColorDepth>,
     sound_playback: Setting<SoundPlayback>,
+    agent_mode: Setting<AgentMode>,
 }
 
 static STORE: Mutex<Store> = Mutex::new(Store {
@@ -134,6 +158,7 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     brightness: Setting::new(c"brightness", 80, |percent| percent.clamp(MIN_BRIGHTNESS, 100)),
     color_depth: Setting::new(c"color_depth", ColorDepth::Bits24, keep),
     sound_playback: Setting::new(c"playback", SoundPlayback::Tab5, keep),
+    agent_mode: Setting::new(c"agent_mode", AgentMode::Normal, keep),
 });
 
 pub fn init() {
@@ -143,6 +168,7 @@ pub fn init() {
             store.brightness.load(&nvs);
             store.color_depth.load(&nvs);
             store.sound_playback.load(&nvs);
+            store.agent_mode.load(&nvs);
             store.nvs = Some(nvs);
         }
         Err(err) => error!(TAG, "open: {err}"),
@@ -164,6 +190,7 @@ pub fn commit() {
     let mut written = store.brightness.commit(nvs);
     written |= store.color_depth.commit(nvs);
     written |= store.sound_playback.commit(nvs);
+    written |= store.agent_mode.commit(nvs);
     if written && let Err(err) = nvs.commit() {
         error!(TAG, "commit: {err}");
     }
@@ -194,6 +221,14 @@ pub fn sound_playback() -> SoundPlayback {
 
 pub fn set_sound_playback(playback: SoundPlayback) {
     STORE.lock().sound_playback.set(playback);
+}
+
+pub fn agent_mode() -> AgentMode {
+    STORE.lock().agent_mode.value
+}
+
+pub fn set_agent_mode(mode: AgentMode) {
+    STORE.lock().agent_mode.set(mode);
 }
 
 fn apply_brightness(store: &Store) {

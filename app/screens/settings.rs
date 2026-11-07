@@ -15,7 +15,7 @@ use idf::sync::OnceLock;
 
 use crate::fonts::icon;
 use crate::resources::{colors, icons};
-use crate::settings::{self, ColorDepth, SoundPlayback};
+use crate::settings::{self, AgentMode, ColorDepth, SoundPlayback};
 use crate::{SHARED_SRAM_BYTES, STRIP_LANES, SharedSram};
 
 const TAG: &CStr = c"settings";
@@ -45,11 +45,14 @@ pub enum SettingsMsg {
     Equalizer(bool),
     OpenPlayback,
     Playback(usize),
+    AgentMode(usize),
 }
 
 const PLAYBACKS: [(SoundPlayback, &str); 2] = [(SoundPlayback::Tab5, "M5Stack Tab5"), (SoundPlayback::Android, "Android Device")];
 const PLAYBACK_LABELS: [&str; 2] = [PLAYBACKS[0].1, PLAYBACKS[1].1];
 const COLOR_DEPTHS: [ColorDepth; 2] = [ColorDepth::Bits16, ColorDepth::Bits24];
+const AGENT_MODES: [AgentMode; 2] = [AgentMode::Normal, AgentMode::Limited];
+const AGENT_MODE_NOTE: &str = "Normal runs tab5adb-agent on the phone for screen mirroring, the live preview, and app icons. Limited uses ADB only. Applies on the next connection.";
 
 pub struct SettingsScreen {
     switching: bool,
@@ -98,6 +101,14 @@ fn slider_row<'a, M: Copy>(ui: &'a Ui<M>, label: &'a str, text: &'a str, value: 
     table_row(ui, [ui.column([header, slider(ui, value, on_drag)]).padding_each(0, theme.widgets.unit.padding, 0, theme.widgets.unit.gap).grow(1)])
 }
 
+fn agent_mode_row<'a>(ui: &'a Ui<SettingsMsg>) -> Element<'a, SettingsMsg> {
+    let theme = ui.theme();
+    let modes = segmented(ui, &[("Normal", SettingsMsg::AgentMode(0)), ("Limited", SettingsMsg::AgentMode(1))], agent_mode_index());
+    let header = ui.row([table_label(ui, "Agent Mode"), modes]).align(Align::Center);
+    let note = ui.text(theme.fonts.caption, AGENT_MODE_NOTE).foreground(colors::MUTED).wrap();
+    table_row(ui, [ui.column([header, note]).gap(theme.widgets.unit.gap).padding_each(0, theme.widgets.unit.padding, 0, theme.widgets.unit.padding).grow(1)])
+}
+
 impl Component for SettingsScreen {
     type Msg = SettingsMsg;
 
@@ -130,6 +141,7 @@ impl Component for SettingsScreen {
                 }
             }
             SettingsMsg::Playback(index) => settings::set_sound_playback(PLAYBACKS[index].0),
+            SettingsMsg::AgentMode(index) => settings::set_agent_mode(AGENT_MODES[index]),
         }
         cx.rebuild();
     }
@@ -165,6 +177,11 @@ impl Component for SettingsScreen {
                             table_row(ui, [table_label(ui, "Sound Playback"), dropdown(ui, PLAYBACK_LABELS[playback_index()], SettingsMsg::OpenPlayback).id(id!("playback"))]),
                         ],
                     ),
+                    table_header(ui, "ANDROID DEVICE"),
+                    table_section(
+                        ui,
+                        [agent_mode_row(ui)],
+                    ),
                     table_header(ui, "ABOUT"),
                     table_section(
                         ui,
@@ -192,6 +209,11 @@ impl Screen for SettingsScreen {
 fn color_depth_index() -> usize {
     let current = settings::color_depth();
     COLOR_DEPTHS.iter().position(|&depth| depth == current).unwrap_or(0)
+}
+
+fn agent_mode_index() -> usize {
+    let current = settings::agent_mode();
+    AGENT_MODES.iter().position(|&mode| mode == current).unwrap_or(0)
 }
 
 fn playback_index() -> usize {
