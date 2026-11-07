@@ -3,16 +3,17 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
 use adb::link::State as LinkState;
 use devkit_gfx::{Color, FontChain};
 use devkit_ui::widgets::text_field;
-use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Transition, Ui};
+use devkit_ui::{Align, ColorRole, Component, Cx, Element, Handle, Icon, Justify, Overlay, Prop, Root, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Transition, Ui};
+use idf::sync::Mutex;
 
-use crate::adb_link;
+use crate::adb_link::{self, Route};
 use crate::fonts::{HERO, icon, small_icon};
 use crate::resources::{colors, icons};
 
@@ -38,6 +39,9 @@ static NAV: StateStyle = StateStyle {
     states: &[(State::PRESSED, &[Prop::Background(ColorRole::Fixed(Color::hex(0x2e353e)))])],
 };
 
+static HOME: Mutex<Option<Handle<Msg>>> = Mutex::new(None);
+static REQUESTED: Mutex<Option<String>> = Mutex::new(None);
+
 #[derive(Clone, Copy)]
 pub enum Msg {
     Settings,
@@ -48,6 +52,19 @@ pub enum Msg {
     TcpConnect,
     Address(TextInput),
     Recent,
+    Requested,
+}
+
+/// `adb tcp <host:port>`: connects from the home screen as its Connect
+/// button does.
+pub fn adb_command(args: &[&str]) -> Result<Option<String>, String> {
+    let ["tcp", addr] = args else { return Err("usage: adb tcp <host:port>".into()) };
+    let home = HOME.lock().clone().ok_or("no home screen")?;
+    *REQUESTED.lock() = Some(addr.to_string());
+    if !home.post(Msg::Requested) {
+        return Err("UI queue full".into());
+    }
+    Ok(None)
 }
 
 pub struct HomeScreen {
@@ -132,10 +149,25 @@ impl Component for HomeScreen {
         match msg {
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
             Msg::UsbConnect => match adb_link::connect() {
-                Ok(conn) if conn.state() == LinkState::Online => cx.nav_of::<Root>().transition(Transition::Zoom).push(AdbDashboardScreen::new(conn)),
-                Ok(conn) => cx.nav_of::<Overlay>().push(ConnectingScreen::new(conn)),
+                Ok(conn) if conn.state() == LinkState::Online => {
+                    cx.nav_of::<Root>().transition(Transition::Zoom).push(AdbDashboardScreen::new(conn, Route::Usb))
+                }
+                Ok(conn) => cx.nav_of::<Overlay>().push(ConnectingScreen::usb(conn)),
                 Err(err) => cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err)),
             },
+            Msg::TcpConnect => {
+                let addr = self.address.as_str().trim();
+                if !addr.is_empty() {
+                    cx.nav_of::<Overlay>().push(ConnectingScreen::tcp(addr.into()));
+                }
+            }
+            Msg::Requested => {
+                if let Some(addr) = REQUESTED.lock().take() {
+                    self.address.set_text(&addr);
+                    cx.rebuild();
+                    cx.nav_of::<Overlay>().push(ConnectingScreen::tcp(addr));
+                }
+            }
             Msg::Address(input) => {
                 if self.address.apply(input) {
                     cx.rebuild();
@@ -159,7 +191,11 @@ impl Component for HomeScreen {
     }
 }
 
-impl Screen for HomeScreen {}
+impl Screen for HomeScreen {
+    fn on_load(&mut self, cx: &mut Cx<Self>) {
+        *HOME.lock() = Some(cx.handle());
+    }
+}
 
 fn card<'a>(ui: &'a Ui<Msg>, content: Element<'a, Msg>) -> Element<'a, Msg> {
     ui.column([content]).padding(CARD_PADDING).radius(CARD_RADIUS).background(ui.colors().surface)

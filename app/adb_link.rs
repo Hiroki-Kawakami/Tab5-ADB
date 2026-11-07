@@ -2,38 +2,39 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Hiroki Kawakami
  *
- * The USB ADB connection to whichever device is plugged in, and the harness
- * commands that drive it.
+ * The ADB connection, to whichever device is plugged in over USB or to an
+ * address over TCP; one at a time.
  */
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::ffi::CStr;
-use core::future::{Future, poll_fn};
-use core::pin::pin;
-use core::task::Poll;
-use core::time::Duration;
 
+use adb::link::transport::Transport;
 use adb::link::{Connection, Identity, State};
-use adb::services::sync::Sync;
-use idf::executor::{self, Spawner};
+use devkit_net::{StaConfig, WifiState};
+use idf::executor::Spawner;
 use idf::log::{error, info};
 use idf::sync::{Mutex, OnceLock};
 use usb_host_rs::{Device, Event};
 use idf::thread::Builder;
-use idf::time::Instant;
 
 const TAG: &CStr = c"adb_link";
 const KEY_NAMESPACE: &CStr = c"adb";
 const DEFAULT_HOST_ID: &str = "00000000";
-const PUSH_PATH: &str = "/data/local/tmp/tab5adb.bin";
 static SPAWNER: OnceLock<Spawner> = OnceLock::new();
 static HOST_ID: OnceLock<String> = OnceLock::new();
 static IDENTITY: OnceLock<Arc<Identity>> = OnceLock::new();
 static DEVICE: Mutex<Option<Device>> = Mutex::new(None);
-static CONNECTION: Mutex<Option<Connection>> = Mutex::new(None);
+static CONNECTION: Mutex<Option<(Route, Connection)>> = Mutex::new(None);
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Route {
+    Usb,
+    Tcp(String),
+}
 
 pub fn start(power: &bsp_rs::power::Power) {
     match power.set_switch(bsp_rs::power::Switch::Usb5V, true) {
@@ -53,7 +54,6 @@ pub fn start(power: &bsp_rs::power::Power) {
         return;
     }
     drop(spawner.spawn(follow()));
-    harness_rs::register("adb", command);
 }
 
 /// This Tab5's name towards devices: the low four bytes of the factory MAC.
@@ -92,7 +92,10 @@ async fn follow() {
                 if current.as_ref().is_some_and(|d| d.id() == device.id()) {
                     *current = None;
                     drop(current);
-                    if let Some(conn) = CONNECTION.lock().take() {
+                    let mut connection = CONNECTION.lock();
+                    if connection.as_ref().is_some_and(|(route, _)| *route == Route::Usb)
+                        && let Some((_, conn)) = connection.take()
+                    {
                         conn.close();
                     }
                 }
@@ -102,23 +105,26 @@ async fn follow() {
     }
 }
 
-/// The device's connection, opened on first use and kept until it closes or
-/// the device leaves.
-pub fn connect() -> Result<Connection, String> {
-    let device = DEVICE.lock().clone().ok_or("No ADB device is plugged in.")?;
-    let (Some(spawner), Some(identity)) = (SPAWNER.get(), IDENTITY.get()) else { return Err("not started".into()) };
+/// The current connection when it goes `route` and is not closed; any other
+/// is closed.
+fn reuse(route: &Route) -> Option<Connection> {
+    let mut current = CONNECTION.lock();
+    if let Some((r, conn)) = current.as_ref()
+        && r == route
+        && !matches!(conn.state(), State::Closed(_))
     {
-        let mut current = CONNECTION.lock();
-        if let Some(conn) = current.as_ref()
-            && !matches!(conn.state(), State::Closed(_))
-        {
-            return Ok(conn.clone());
-        }
-        *current = None;
+        return Some(conn.clone());
     }
-    let transport = adb::link::usb::open(&device).map_err(|e| e.to_string())?;
+    if let Some((_, conn)) = current.take() {
+        conn.close();
+    }
+    None
+}
+
+fn begin(route: Route, transport: Box<dyn Transport>) -> Result<Connection, String> {
+    let (Some(spawner), Some(identity)) = (SPAWNER.get(), IDENTITY.get()) else { return Err("not started".into()) };
     let conn = Connection::connect(transport, identity.clone(), spawner);
-    *CONNECTION.lock() = Some(conn.clone());
+    *CONNECTION.lock() = Some((route, conn.clone()));
     let logged = conn.clone();
     drop(spawner.spawn(async move {
         let conn = logged;
@@ -134,140 +140,43 @@ pub fn connect() -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn connection() -> Result<Connection, String> {
-    CONNECTION.lock().clone().ok_or_else(|| "no device".to_string())
-}
-
-fn number(args: &[&str], at: usize, default: usize) -> Result<usize, String> {
-    args.get(at).map_or(Ok(default), |a| a.parse().map_err(|_| format!("bad number {a}")))
-}
-
-fn pattern(len: usize) -> Vec<u8> {
-    (0..len).map(|i| (i * 7 + i / 251) as u8).collect()
-}
-
-fn rate(bytes: usize, start: Instant) -> String {
-    let us = start.elapsed().as_micros().max(1) as u64;
-    format!("{bytes} bytes in {} ms, {} kB/s", us / 1000, bytes as u64 * 1000 / us)
-}
-
-fn command(args: &[&str]) -> Result<Option<String>, String> {
-    let rest = args.get(1..).unwrap_or(&[]);
-    match args.first().copied() {
-        Some("state") => {
-            let conn = connection()?;
-            Ok(Some(format!("{:?} \"{}\"", conn.state(), conn.banner())))
-        }
-        Some("wait") => {
-            let conn = connection()?;
-            let ms = number(rest, 0, 30000)? as u64;
-            match executor::block_on(executor::timeout(Duration::from_millis(ms), conn.online())) {
-                Ok(Ok(())) => Ok(Some("online".into())),
-                Ok(Err(err)) => Err(err.to_string()),
-                Err(_) => Err(format!("still {:?}", conn.state())),
-            }
-        }
-        Some("close") => {
-            connection()?.close();
-            Ok(None)
-        }
-        Some("connect") => connect().map(|_| None),
-        Some("exec") => {
-            let conn = connection()?;
-            let out = executor::block_on(adb::services::exec(&conn, &rest.join(" "))).map_err(|e| e.to_string())?;
-            let text = String::from_utf8_lossy(&out);
-            Ok(Some(format!("{} bytes: {}", out.len(), text.trim_end().replace('\n', "\\n"))))
-        }
-        Some("echo") => executor::block_on(echo(number(rest, 0, 4096)?)).map(Some),
-        Some("push") => executor::block_on(push(number(rest, 0, 1 << 20)?)).map(Some),
-        Some("pull") => executor::block_on(pull()).map(Some),
-        Some("ls") => executor::block_on(list(rest.first().copied().unwrap_or("/data/local/tmp"))).map(Some),
-        _ => Err("usage: adb state|wait [ms]|close|connect|exec <cmd>|echo [bytes]|push [bytes]|pull|ls [path]".into()),
+/// The plugged-in device's connection, opened on first use and kept until it
+/// closes or the device leaves.
+pub fn connect() -> Result<Connection, String> {
+    let device = DEVICE.lock().clone().ok_or("No ADB device is plugged in.")?;
+    if let Some(conn) = reuse(&Route::Usb) {
+        return Ok(conn);
     }
+    let transport = adb::link::usb::open(&device).map_err(|e| e.to_string())?;
+    begin(Route::Usb, transport)
 }
 
-async fn join<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
-    let (mut a, mut b) = (pin!(a), pin!(b));
-    let (mut ra, mut rb) = (None, None);
-    poll_fn(|cx| {
-        if ra.is_none()
-            && let Poll::Ready(v) = a.as_mut().poll(cx)
-        {
-            ra = Some(v);
-        }
-        if rb.is_none()
-            && let Poll::Ready(v) = b.as_mut().poll(cx)
-        {
-            rb = Some(v);
-        }
-        if ra.is_some() && rb.is_some() { Poll::Ready(()) } else { Poll::Pending }
-    })
-    .await;
-    (ra.unwrap(), rb.unwrap())
-}
-
-/// Through `cat`, reading while writing so neither side's buffer fills.
-async fn echo(len: usize) -> Result<String, String> {
-    let conn = connection()?;
-    let stream = conn.open("exec:cat").await.map_err(|e| e.to_string())?;
-    let (mut reader, mut writer) = stream.into_split();
-    let data = pattern(len);
-    let start = Instant::now();
-    let sent = writer.write(&data);
-    let received = async {
-        let mut got = alloc::vec![0u8; len];
-        reader.read_exact(&mut got).await.map(|()| got)
-    };
-    let (sent, received) = join(sent, received).await;
-    sent.map_err(|e| format!("write: {e}"))?;
-    let got = received.map_err(|e| format!("read: {e}"))?;
-    let elapsed = rate(len * 2, start);
-    let _ = writer.close().await;
-    if got != data {
-        return Err("echo differs".into());
+/// The connection to adbd at `addr` (`host:port`), kept until it closes.
+pub async fn connect_tcp(addr: &str) -> Result<Connection, String> {
+    let route = Route::Tcp(addr.into());
+    if let Some(conn) = reuse(&route) {
+        return Ok(conn);
     }
-    Ok(elapsed)
+    join_network().await?;
+    let transport = adb::link::tcp::connect(addr).await.map_err(|e| e.to_string())?;
+    begin(route, transport)
 }
 
-async fn push(len: usize) -> Result<String, String> {
-    let conn = connection()?;
-    let data = pattern(len);
-    let mut sync = Sync::open(&conn).await.map_err(|e| e.to_string())?;
-    let start = Instant::now();
-    sync.push_bytes(PUSH_PATH, 0o644, 0, &data).await.map_err(|e| format!("push: {e}"))?;
-    let elapsed = rate(len, start);
-    let stat = sync.stat(PUSH_PATH).await.map_err(|e| format!("stat: {e}"))?;
-    let _ = sync.close().await;
-    if stat.size as usize != len || !stat.is_file() {
-        return Err(format!("stat says {stat:?}"));
+async fn join_network() -> Result<(), String> {
+    match devkit_net::start(devkit_net::Config::default()) {
+        Ok(()) | Err(devkit_net::Error::AlreadyStarted) => {}
+        Err(err) => return Err(format!("network: {err}")),
     }
-    Ok(elapsed)
-}
-
-async fn pull() -> Result<String, String> {
-    let conn = connection()?;
-    let mut sync = Sync::open(&conn).await.map_err(|e| e.to_string())?;
-    let mut got = Vec::new();
-    let start = Instant::now();
-    sync.pull(PUSH_PATH, |chunk| {
-        got.extend_from_slice(chunk);
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("pull: {e}"))?;
-    let elapsed = rate(got.len(), start);
-    let _ = sync.close().await;
-    if got != pattern(got.len()) {
-        return Err("pulled data differs from what push sends".into());
+    let wifi = devkit_net::wifi().ok_or("No Wi-Fi radio.")?;
+    if matches!(wifi.state(), WifiState::Connected { .. }) {
+        return Ok(());
     }
-    Ok(elapsed)
-}
-
-async fn list(path: &str) -> Result<String, String> {
-    let conn = connection()?;
-    let mut sync = Sync::open(&conn).await.map_err(|e| e.to_string())?;
-    let entries = sync.list(path).await.map_err(|e| e.to_string())?;
-    let _ = sync.close().await;
-    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).filter(|n| *n != "." && *n != "..").collect();
-    Ok(format!("{} entries: {}", names.len(), names.join(" ")))
+    wifi.start().await.map_err(|e| format!("Wi-Fi: {e:?}"))?;
+    let networks = wifi.scan().await.map_err(|e| format!("Wi-Fi scan: {e:?}"))?;
+    let network = networks.first().ok_or("No Wi-Fi network.")?;
+    let ssid = String::from_utf8_lossy(&network.ssid).into_owned();
+    wifi.connect(&StaConfig::new(&ssid, "")).await.map_err(|e| format!("Wi-Fi {ssid}: {e:?}"))?;
+    info!(TAG, "joined {ssid}");
+    wifi.sta().wait_ipv4_async().await;
+    Ok(())
 }

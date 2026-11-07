@@ -2,8 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Hiroki Kawakami
  *
- * tab5adb-agent on the connected device (android-agent/docs/protocol.md), and
- * the harness commands that drive it.
+ * tab5adb-agent on the connected device (android-agent/docs/protocol.md).
  */
 
 use alloc::format;
@@ -27,23 +26,14 @@ const TAG: &CStr = c"agent";
 const JAR: &[u8] = include_bytes!("agent/tab5adb-agent.jar");
 const SERVER: &str = "com.tab5adb.agent.Server";
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 const HELLO: HelloConfig = HelloConfig { capabilities: 0, max_message: [256 * 1024, 256 * 1024, 64 * 1024] };
 
 static JAR_PATH: OnceLock<String> = OnceLock::new();
-static CURRENT: Mutex<Current> = Mutex::new(Current { generation: 0, state: State::Idle });
-
-#[derive(Clone)]
-enum State {
-    Idle,
-    Starting,
-    Ready(Link),
-    Failed(String),
-}
+static CURRENT: Mutex<Current> = Mutex::new(Current { generation: 0, link: None });
 
 struct Current {
     generation: u32,
-    state: State,
+    link: Option<Link>,
 }
 
 /// The agent on the device, from `start` until dropped. One at a time.
@@ -60,25 +50,22 @@ impl Agent {
         let generation = {
             let mut current = CURRENT.lock();
             current.generation = current.generation.wrapping_add(1);
-            current.state = State::Starting;
             current.generation
         };
         let task = spawner.spawn(async move {
-            let state = match bring_up(&conn, spawner).await {
-                Ok(link) => {
-                    let [major, minor, patch] = link.info().version;
-                    info!(TAG, "ready: agent {major}.{minor}.{patch}");
-                    State::Ready(link)
-                }
+            let link = match bring_up(&conn, spawner).await {
+                Ok(link) => link,
                 Err(err) => {
                     error!(TAG, "start: {err}");
-                    State::Failed(err)
+                    return;
                 }
             };
+            let [major, minor, patch] = link.info().version;
+            info!(TAG, "ready: agent {major}.{minor}.{patch}");
             let mut current = CURRENT.lock();
             if current.generation == generation {
-                current.state = state;
-            } else if let State::Ready(link) = state {
+                current.link = Some(link);
+            } else {
                 link.close();
             }
         });
@@ -91,12 +78,12 @@ impl Drop for Agent {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-        let state = {
+        let link = {
             let mut current = CURRENT.lock();
             current.generation = current.generation.wrapping_add(1);
-            core::mem::replace(&mut current.state, State::Idle)
+            current.link.take()
         };
-        if let State::Ready(link) = state {
+        if let Some(link) = link {
             link.close();
         }
     }
@@ -168,45 +155,13 @@ async fn log_output(mut shell: Stream) {
         }
         for &b in &chunk[..n] {
             if b == b'\n' {
-                info!(TAG, "agent: {}", String::from_utf8_lossy(line.trim_ascii()));
+                if !line.trim_ascii().is_empty() {
+                    info!(TAG, "agent: {}", String::from_utf8_lossy(line.trim_ascii()));
+                }
                 line.clear();
             } else {
                 line.push(b);
             }
         }
-    }
-}
-
-pub fn init() {
-    harness_rs::register("agent", command);
-}
-
-fn link() -> Result<Link, String> {
-    match &CURRENT.lock().state {
-        State::Ready(link) => Ok(link.clone()),
-        _ => Err("agent not ready".into()),
-    }
-}
-
-fn command(args: &[&str]) -> Result<Option<String>, String> {
-    match args.first().copied() {
-        Some("state") => Ok(Some(match &CURRENT.lock().state {
-            State::Idle => "idle".into(),
-            State::Starting => "starting".into(),
-            State::Failed(err) => format!("failed: {err}"),
-            State::Ready(link) if link.is_closed() => "closed".into(),
-            State::Ready(link) => {
-                let info = link.info();
-                let [major, minor, patch] = info.version;
-                format!("ready {major}.{minor}.{patch} caps={:#x} max={}", info.capabilities, info.max_message)
-            }
-        })),
-        Some("req") => {
-            let kind = args.get(1).and_then(|a| u8::from_str_radix(a.trim_start_matches("0x"), 16).ok()).ok_or("usage: agent req <hex type>")?;
-            let link = link()?;
-            let result = executor::block_on(link.request(kind, &[], REQUEST_TIMEOUT)).map_err(|e| e.to_string())?;
-            Ok(Some(format!("{} bytes", result.len())))
-        }
-        _ => Err("usage: agent state|req <hex type>".into()),
     }
 }

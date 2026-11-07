@@ -9,3 +9,4 @@ nvs_data.toml
 .direnv
 .DS_Store
 screenshots/
+.emulator

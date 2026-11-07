@@ -9,5 +9,5 @@ mod home;
 mod message;
 mod settings;
 
-pub use home::HomeScreen;
+pub use home::{HomeScreen, adb_command};
 pub use settings::{set_input, set_rotation};

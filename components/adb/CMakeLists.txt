@@ -1,5 +1,5 @@
-# ADB host: connection, streams and the shell/sync services, over USB.
+# ADB host: connection, streams and the shell/sync services, over USB or TCP.
 idf_component_register(
     SRCS "/dev/null"
-    PRIV_REQUIRES devkit devkit_crypto idf rust_rt usb_host_rs)
+    PRIV_REQUIRES devkit devkit_crypto devkit_net idf rust_rt usb_host_rs)
 devkit_rust_crate(ROOT "src/lib.rs" TESTS)

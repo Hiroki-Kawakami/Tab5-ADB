@@ -22,6 +22,7 @@ pub enum Error {
     /// The sync service answered FAIL with this message.
     Sync(String),
     Usb(usb_host_rs::Error),
+    Net(devkit_net::Error),
     Crypto(devkit_crypto::Error),
     Storage(idf::Error),
     NoMemory,
@@ -38,6 +39,7 @@ impl fmt::Display for Error {
             Error::Protocol => f.write_str("protocol error"),
             Error::Sync(message) => write!(f, "sync: {message}"),
             Error::Usb(e) => write!(f, "usb: {e}"),
+            Error::Net(e) => write!(f, "net: {e}"),
             Error::Crypto(e) => write!(f, "crypto: {e}"),
             Error::Storage(e) => write!(f, "storage: {e}"),
             Error::NoMemory => f.write_str("out of memory"),

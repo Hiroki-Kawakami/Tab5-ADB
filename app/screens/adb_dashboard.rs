@@ -13,6 +13,7 @@ use devkit_ui::widgets::{divider, vertical_divider};
 use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Ui};
 use idf::log::error;
 
+use crate::adb_link::Route;
 use crate::agent::Agent;
 use crate::device_info::{self, DeviceInfo};
 use crate::fonts::{icon, small_icon};
@@ -72,6 +73,7 @@ const FEATURES: [(char, &str, Msg); 8] = [
 
 pub struct AdbDashboardScreen {
     conn: Connection,
+    route: Route,
     model: Option<String>,
     info: Option<DeviceInfo>,
     watch: Option<Task>,
@@ -79,22 +81,26 @@ pub struct AdbDashboardScreen {
 }
 
 impl AdbDashboardScreen {
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(conn: Connection, route: Route) -> Self {
         let model = device_info::model(&conn.banner());
-        Self { conn, model, info: None, watch: None, agent: None }
+        Self { conn, route, model, info: None, watch: None, agent: None }
     }
 
     fn header<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
         let theme = ui.theme();
         let info = self.info.as_ref();
         let name = info.and_then(|i| i.name.as_deref()).or(self.model.as_deref()).unwrap_or("Android device");
+        let route = match self.route {
+            Route::Usb => "USB",
+            Route::Tcp(_) => "Wireless",
+        };
         let caption = match info {
             Some(i) => {
                 let version = if i.version.is_empty() { String::new() } else { alloc::format!("Android {} \u{2022} ", i.version) };
                 let storage = i.storage_kb.map(|kb| alloc::format!("{} GB \u{2022} ", (kb * 1024 + 500_000_000) / 1_000_000_000)).unwrap_or_default();
-                ui.format(format_args!("{version}{storage}USB"))
+                ui.format(format_args!("{version}{storage}{route}"))
             }
-            None => "USB",
+            None => route,
         };
         let battery = match info.and_then(|i| i.battery) {
             Some(b) => {

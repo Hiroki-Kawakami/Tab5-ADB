@@ -3,39 +3,62 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 
 use adb::link::{Connection, State};
 use devkit_ui::widgets::{button, modal, modal_actions, modal_message, modal_title, progress_indicator};
 use devkit_ui::{Align, Component, Cx, Element, Overlay, Root, Screen, Task, This, Transition, Ui};
 
+use crate::adb_link::{self, Route};
+
 use super::adb_dashboard::AdbDashboardScreen;
 use super::message::MessageScreen;
 
 pub struct ConnectingScreen {
-    conn: Connection,
+    route: Route,
+    conn: Option<Connection>,
     state: State,
     task: Option<Task>,
 }
 
 impl ConnectingScreen {
-    pub fn new(conn: Connection) -> Self {
+    pub fn usb(conn: Connection) -> Self {
         let state = conn.state();
-        Self { conn, state, task: None }
+        Self { route: Route::Usb, conn: Some(conn), state, task: None }
+    }
+
+    /// Opens the connection to `addr` itself.
+    pub fn tcp(addr: String) -> Self {
+        Self { route: Route::Tcp(addr), conn: None, state: State::Connecting, task: None }
     }
 }
 
 #[derive(Clone, Copy)]
 pub struct Cancel;
 
-async fn follow(this: This<ConnectingScreen>, conn: Connection) {
+async fn open(this: This<ConnectingScreen>, route: Route, conn: Option<Connection>) {
+    let conn = match (conn, &route) {
+        (Some(conn), _) => conn,
+        (None, Route::Tcp(addr)) => match adb_link::connect_tcp(addr).await {
+            Ok(conn) => conn,
+            Err(err) => {
+                this.with(|_, cx| cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err)));
+                return;
+            }
+        },
+        (None, Route::Usb) => return,
+    };
+    follow(this, route, conn).await;
+}
+
+async fn follow(this: This<ConnectingScreen>, route: Route, conn: Connection) {
     loop {
         let state = conn.state();
         match state {
             State::Online => {
                 this.with(|_, cx| {
                     cx.nav_of::<Overlay>().pop();
-                    cx.nav_of::<Root>().transition(Transition::Zoom).push(AdbDashboardScreen::new(conn.clone()));
+                    cx.nav_of::<Root>().transition(Transition::Zoom).push(AdbDashboardScreen::new(conn.clone(), route.clone()));
                 });
                 return;
             }
@@ -83,7 +106,7 @@ impl Component for ConnectingScreen {
 
 impl Screen for ConnectingScreen {
     fn on_load(&mut self, cx: &mut Cx<Self>) {
-        let conn = self.conn.clone();
-        self.task = Some(cx.spawn(|this| follow(this, conn)));
+        let (route, conn) = (self.route.clone(), self.conn.clone());
+        self.task = Some(cx.spawn(|this| open(this, route, conn)));
     }
 }

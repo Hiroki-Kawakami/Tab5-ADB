@@ -304,7 +304,7 @@ impl Connection {
             }
         })
         .await;
-        if stream.state.lock().phase != Phase::Open {
+        if !stream.state.lock().accepted {
             return Err(match shared.state().0 {
                 State::Closed(err) => err,
                 _ => Error::Rejected,
@@ -326,6 +326,8 @@ enum Phase {
 
 struct StreamState {
     phase: Phase,
+    /// The device answered the OPEN with OKAY; the stream may be closed since.
+    accepted: bool,
     remote: u32,
     writable: bool,
     inbox: Vec<u8>,
@@ -348,6 +350,7 @@ impl StreamShared {
             local,
             state: Mutex::new(StreamState {
                 phase: Phase::Opening,
+                accepted: false,
                 remote: 0,
                 writable: false,
                 inbox: Vec::new(),
@@ -371,6 +374,7 @@ impl StreamShared {
         match s.phase {
             Phase::Opening => {
                 s.phase = Phase::Open;
+                s.accepted = true;
                 s.remote = remote;
                 s.writable = true;
             }

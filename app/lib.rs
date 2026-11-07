@@ -63,7 +63,7 @@ pub fn run() {
         return;
     };
     adb_link::start(board.power);
-    agent::init();
+    harness_rs::register("adb", screens::adb_command);
     if let Err(err) = harness_rs::start(&board) {
         error!(TAG, "harness_rs::start: {err}");
     }
