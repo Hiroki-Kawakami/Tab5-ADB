@@ -15,7 +15,7 @@ use agent_link::{Frame, FrameHead, Jpeg, Link, VideoStart};
 use devkit::Lease;
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Element, ExternalFrame, ExternalSurface, Justify, Policy, Prop, RenderMode, Screen, ScreenStyle, State, Strips, Ui, id};
+use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, State, Strips, Ui, id};
 use idf::executor::JoinHandle;
 use idf::cache::{self, Flags};
 use idf::heap::Caps;
@@ -56,7 +56,7 @@ type Sram = Lease<'static, SharedSram>;
 
 struct Shared {
     stop: AtomicBool,
-    refresh: AtomicBool,
+    refresh: Mutex<Option<Rect>>,
     bar: AtomicBool,
     wake: Semaphore,
     strips: Mutex<VecDeque<Frame<Caps>>>,
@@ -193,6 +193,11 @@ struct Player {
     geometry: Option<Geometry>,
     session: Option<JoinHandle<()>>,
     blacked: [Option<Rect>; MAX_FRAME_BUFFERS],
+    /// Per framebuffer, the `seq` of the frame it holds whole.
+    held: [u32; MAX_FRAME_BUFFERS],
+    /// Per framebuffer, what to write again.
+    stale: [Rect; MAX_FRAME_BUFFERS],
+    seq: u32,
     stats: (Instant, u32, usize),
 }
 
@@ -200,12 +205,12 @@ impl Player {
     fn run(&mut self, sram: &mut SharedSram) {
         while !self.shared.stop.load(Ordering::Acquire) {
             self.shared.wake.take_timeout(IDLE);
-            let refresh = self.shared.refresh.swap(false, Ordering::AcqRel);
-            if refresh {
-                self.blacked = [None; MAX_FRAME_BUFFERS];
+            let refresh = self.shared.refresh.lock().take();
+            if let Some(area) = refresh {
+                self.stale.iter_mut().for_each(|s| *s = s.union(&area));
             }
             let first = self.shared.next_frame();
-            if first.is_none() && !refresh && self.geometry.is_some() {
+            if first.is_none() && refresh.is_none() && self.geometry.is_some() {
                 continue;
             }
             let Some(frame) = self.surface.begin() else {
@@ -224,12 +229,14 @@ impl Player {
                 self.restart(geometry);
             }
             let fresh = first.is_some();
+            let index = buffer(&frame);
             let drawn = match first {
                 Some(first) => self.draw_new(&frame, first, sram),
                 None => self.redraw(&frame, sram),
             };
             match drawn {
                 Ok(true) => {
+                    self.stale[index] = Rect::default();
                     frame.end();
                     if fresh {
                         self.count();
@@ -259,7 +266,7 @@ impl Player {
     /// Where the whole frame lands; `None` when there is nothing to show in
     /// this geometry: a frame sent for the box before the screen turned may
     /// not fit.
-    fn place(&mut self, frame: &ExternalFrame, head: &FrameHead) -> idf::Result<Option<(Rect, Rotation)>> {
+    fn place(&mut self, frame: &ExternalFrame, head: &FrameHead) -> idf::Result<Option<(Rect, Rotation, bool)>> {
         let Some(geometry) = self.geometry else { return Ok(None) };
         let area = frame.area;
         let turn = geometry.turn(self.mode, head.rotation);
@@ -277,26 +284,24 @@ impl Player {
         if !area.contains(&rect) {
             return Ok(None);
         }
-        let index = frame.index.min(MAX_FRAME_BUFFERS - 1);
-        if self.blacked[index] != Some(rect) {
-            let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
-            for margin in margins(area, rect).into_iter().filter(|r| !r.is_empty()) {
-                clear(&mut target, margin)?;
-                frame.wrote(margin);
-            }
-            self.blacked[index] = Some(rect);
+        let index = buffer(frame);
+        let moved = self.blacked[index] != Some(rect);
+        let stale = if moved { area } else { self.stale[index] };
+        let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
+        for margin in margins(area, rect).into_iter().map(|m| m.intersect(&stale)).filter(|r| !r.is_empty()) {
+            clear(&mut target, margin)?;
+            frame.wrote(margin);
         }
-        frame.wrote(rect);
-        Ok(Some((rect, turn)))
+        self.blacked[index] = Some(rect);
+        Ok(Some((rect, turn, moved)))
     }
 
     fn render(&mut self, frame: &ExternalFrame, strip: &Frame<Caps>, (rect, turn): (Rect, Rotation), sram: &mut SharedSram) -> idf::Result<()> {
-        let head = &strip.head;
-        let trims = [0, head.y as i16, 0, head.height as i16 - head.y as i16 - head.rows as i16];
-        let k = usize::from(quarters(turn));
         let mut transform = Transform::new();
         transform.rotation = turn;
-        transform.at = (rect.x + trims[k % 4], rect.y + trims[(1 + k) % 4]);
+        let at = strip_rect(&strip.head, rect, turn);
+        transform.at = (at.x, at.y);
+        frame.wrote(at);
         let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
         let decoder = decoder_for(&mut self.decoder, frame.fb.format())?;
         let bytes = sram.as_mut();
@@ -313,16 +318,19 @@ impl Player {
         let complete = self.draw_strips(frame, first, &mut drawn, sram);
         if matches!(complete, Ok(true)) {
             drawn = core::mem::replace(&mut self.shown, drawn);
+            self.seq = self.seq.wrapping_add(1);
+            self.held[buffer(frame)] = self.seq;
         }
         drawn.into_iter().for_each(|s| self.shared.recycle(s));
         complete
     }
 
     fn draw_strips(&mut self, frame: &ExternalFrame, first: Frame<Caps>, drawn: &mut Vec<Frame<Caps>>, sram: &mut SharedSram) -> idf::Result<bool> {
-        let Some(placed) = self.place(frame, &first.head)? else {
+        let Some((rect, turn, _)) = self.place(frame, &first.head)? else {
             drawn.push(first);
             return Ok(false);
         };
+        let placed = (rect, turn);
         let mut strip = first;
         loop {
             let rendered = self.render(frame, &strip, placed, sram);
@@ -361,10 +369,16 @@ impl Player {
         let shown = core::mem::take(&mut self.shown);
         let result = (|| {
             let Some(first) = shown.first() else { return Ok(false) };
-            let Some(placed) = self.place(frame, &first.head)? else { return Ok(false) };
+            let index = buffer(frame);
+            let whole = self.held[index] != self.seq;
+            let stale = self.stale[index];
+            let Some((rect, turn, moved)) = self.place(frame, &first.head)? else { return Ok(false) };
             for strip in &shown {
-                self.render(frame, strip, placed, sram)?;
+                if whole || moved || strip_rect(&strip.head, rect, turn).intersects(&stale) {
+                    self.render(frame, strip, (rect, turn), sram)?;
+                }
             }
+            self.held[index] = self.seq;
             Ok(true)
         })();
         self.shown = shown;
@@ -380,6 +394,19 @@ impl Player {
             self.stats = (Instant::now(), 0, 0);
         }
     }
+}
+
+fn buffer(frame: &ExternalFrame) -> usize {
+    frame.index.min(MAX_FRAME_BUFFERS - 1)
+}
+
+/// Where `head`'s rows land in a frame placed at `rect`, turned by `turn`.
+fn strip_rect(head: &FrameHead, rect: Rect, turn: Rotation) -> Rect {
+    let trims = [0, head.y as i16, 0, head.height as i16 - head.y as i16 - head.rows as i16];
+    let k = usize::from(quarters(turn));
+    let (w, h) = (head.width as i16, head.rows as i16);
+    let (w, h) = if turn.swaps_axes() { (h, w) } else { (w, h) };
+    Rect::new(rect.x + trims[k % 4], rect.y + trims[(1 + k) % 4], w, h)
 }
 
 fn decoder_for(decoder: &mut Option<(ImageFormat, Decoder)>, format: ImageFormat) -> idf::Result<&mut Decoder> {
@@ -445,15 +472,17 @@ impl MirrorScreen {
         surface.set_policy(Policy::Stamp);
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
-            refresh: AtomicBool::new(false),
+            refresh: Mutex::new(None),
             bar: AtomicBool::new(true),
             wake: Semaphore::new(0, 1),
             strips: Mutex::new(VecDeque::new()),
             spare: Mutex::new(Vec::new()),
         });
         let refresh = shared.clone();
-        surface.set_on_refresh(move |_| {
-            refresh.refresh.store(true, Ordering::Release);
+        surface.set_on_refresh(move |area| {
+            let mut pending = refresh.refresh.lock();
+            *pending = Some(pending.map_or(area, |p| p.union(&area)));
+            drop(pending);
             refresh.wake.give();
         });
         Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, swipe: None })
@@ -483,6 +512,9 @@ impl MirrorScreen {
             geometry: None,
             session: None,
             blacked: [None; MAX_FRAME_BUFFERS],
+            held: [0; MAX_FRAME_BUFFERS],
+            stale: [Rect::default(); MAX_FRAME_BUFFERS],
+            seq: 0,
             stats: (Instant::now(), 0, 0),
         };
         let spawned = thread::Builder::new().name("mirror").stack_size(8192).priority(5).spawn(move || {
@@ -509,7 +541,7 @@ impl MirrorScreen {
     fn show_bar(&mut self, shown: bool) {
         self.bar = shown;
         self.shared.bar.store(shown, Ordering::Release);
-        self.shared.refresh.store(true, Ordering::Release);
+        *self.shared.refresh.lock() = Some(Rect::new(0, 0, i16::MAX, i16::MAX));
         self.shared.wake.give();
     }
 
@@ -589,7 +621,9 @@ impl Component for MirrorScreen {
         }
         if self.bar {
             let (w, h) = ui.screen_size();
-            children.push(control_bar(ui, w < h).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN)).id(id!("controls")));
+            let reach = BAR_MARGIN + BAR_THICKNESS;
+            let presence = if w < h { Presence::from_edge(Edge::Left).offset(0, reach) } else { Presence::from_edge(Edge::Bottom).offset(-reach, 0) };
+            children.push(control_bar(ui, w < h).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN)).appear(presence).id(id!("controls")));
         }
         ui.column(children).background(BLACK)
     }
