@@ -17,6 +17,7 @@ use crate::fonts::{HERO, icon, small_icon};
 use crate::resources::{colors, icons};
 
 use super::connecting::ConnectingScreen;
+use super::file_manager::FileManagerScreen;
 use super::message::MessageScreen;
 use super::settings::SettingsScreen;
 
@@ -146,6 +147,7 @@ impl Component for HomeScreen {
     fn update(&mut self, msg: Msg, cx: &mut Cx<Self>) {
         match msg {
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
+            Msg::Files => cx.nav_of::<Root>().push(FileManagerScreen::new(false)),
             Msg::UsbConnect => match adb_link::connect() {
                 Ok(conn) => cx.nav_of::<Overlay>().push(ConnectingScreen::usb(conn)),
                 Err(err) => cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err)),

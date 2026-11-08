@@ -25,6 +25,7 @@ use crate::preview::{self, Preview};
 use crate::resources::{colors, icons};
 
 use super::device_info::DeviceInfoScreen;
+use super::file_manager::FileManagerScreen;
 use super::message::MessageScreen;
 use super::mirror::{MirrorScreen, keycode};
 use super::settings::SettingsScreen;
@@ -219,6 +220,7 @@ impl Component for AdbDashboardScreen {
             }
             Msg::Info => cx.nav_of::<Root>().push(DeviceInfoScreen::new(self.conn.clone())),
             Msg::Shell => cx.nav_of::<Root>().push(TerminalScreen::new(self.conn.clone())),
+            Msg::FileManager => cx.nav_of::<Root>().push(FileManagerScreen::new(true)),
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
             Msg::Preview => match &self.agent {
                 Some(_) if self.video_unavailable => {

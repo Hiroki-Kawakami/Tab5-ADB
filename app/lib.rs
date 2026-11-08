@@ -10,6 +10,7 @@ extern crate alloc;
 mod adb_link;
 mod agent;
 mod device_info;
+mod files;
 mod fonts;
 mod preview;
 mod screens;
@@ -64,6 +65,9 @@ pub fn run() {
         error!(TAG, "no display");
         return;
     };
+    if let Some(sd) = board.sd {
+        files::set_sd(sd);
+    }
     adb_link::start(board.power);
     harness_rs::register("adb", screens::adb_command);
     if let Err(err) = harness_rs::start(&board) {

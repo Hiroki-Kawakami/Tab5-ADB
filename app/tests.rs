@@ -7,6 +7,7 @@ use agent_link::FrameHead;
 use devkit_gfx::{Rect, Rotation};
 
 use crate::device_info::{self, Battery, Cellular, CpuTimes, Memory, Storage, Wifi};
+use crate::files::{self, Entry, FileType, Kind};
 use crate::screens::mirror::{Placed, strip_rect};
 
 const SUMMARY: &str = "Example Phone\n---SEP---\n15\n---SEP---\nCurrent Battery Service state:\n  AC powered: false\n  USB powered: true\n  status: 2\n  health: 2\n  level: 64\n  scale: 100\n---SEP---\nFilesystem     1K-blocks     Used Available Use% Mounted on\n/dev/block/dm-48 115343360 41234567 74108793  36% /data\n---SEP---\nWifi is enabled\nWifi scanning is always available\nWifi is connected to \"example-ap\"\n";
@@ -122,4 +123,49 @@ fn a_touch_finds_the_frame_pixel_under_it_however_the_frame_is_turned() {
         seen.dedup();
         assert_eq!(seen.len(), usize::from(width) * 16, "{turn:?}");
     }
+}
+
+fn entry(name: &str, kind: Kind) -> Entry {
+    Entry { name: name.into(), kind }
+}
+
+#[test]
+fn folders_and_links_sort_first() {
+    let mut entries = [entry("b.txt", Kind::File), entry("Zeta", Kind::Dir), entry("A.txt", Kind::File), entry("etc", Kind::Link), entry("alpha", Kind::Dir)];
+    files::sort(&mut entries);
+    let names: alloc::vec::Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["alpha", "etc", "Zeta", "A.txt", "b.txt"]);
+}
+
+#[test]
+fn file_types_by_extension() {
+    assert_eq!(files::file_type("app-release.APK"), FileType::Apk);
+    assert_eq!(files::file_type("IMG_0001.jpg"), FileType::Image);
+    assert_eq!(files::file_type("clip.mp4"), FileType::Video);
+    assert_eq!(files::file_type("episode.mp3"), FileType::Audio);
+    assert_eq!(files::file_type("notes.txt"), FileType::Text);
+    assert_eq!(files::file_type("firmware.bin"), FileType::Other);
+    assert_eq!(files::file_type("Makefile"), FileType::Other);
+}
+
+#[test]
+fn paths_join() {
+    assert_eq!(files::join("/", "sdcard"), "/sdcard");
+    assert_eq!(files::join("/sdcard", "Download"), "/sdcard/Download");
+}
+
+#[test]
+fn df_space() {
+    let out = "Filesystem     1K-blocks     Used Available Use% Mounted on\n/dev/fuse       115343360 41234567  74108793  36% /storage/emulated\n";
+    let space = files::parse_df(out).unwrap();
+    assert_eq!((space.total, space.free), (115343360 * 1024, 74108793 * 1024));
+    assert!(files::parse_df("df: /sdcard: Permission denied\n").is_none());
+}
+
+#[test]
+fn byte_sizes() {
+    assert_eq!(files::format_bytes(512), "512 B");
+    assert_eq!(files::format_bytes(1_500), "1.5 KB");
+    assert_eq!(files::format_bytes(26_600_000_000), "26.6 GB");
+    assert_eq!(files::format_bytes(29_700_000_000), "29.7 GB");
 }

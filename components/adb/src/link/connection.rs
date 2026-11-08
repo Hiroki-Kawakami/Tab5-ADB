@@ -270,6 +270,11 @@ impl Connection {
         self.shared().banner.lock().clone()
     }
 
+    /// Whether the device listed `feature` in its banner.
+    pub fn has_feature(&self, feature: &str) -> bool {
+        banner_has_feature(&self.banner(), feature)
+    }
+
     /// The largest payload one packet carries either way.
     pub fn max_payload(&self) -> usize {
         self.shared().max_payload.load(Ordering::Acquire) as usize
@@ -588,4 +593,9 @@ impl StreamWriter {
             None => Ok(()),
         }
     }
+}
+
+pub(crate) fn banner_has_feature(banner: &str, feature: &str) -> bool {
+    let props = banner.split_once("::").map_or(banner, |(_, props)| props);
+    props.split(';').filter_map(|prop| prop.strip_prefix("features=")).flat_map(|list| list.split(',')).any(|f| f == feature)
 }

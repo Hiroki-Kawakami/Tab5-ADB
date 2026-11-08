@@ -6,6 +6,7 @@
 mod adb_dashboard;
 mod connecting;
 mod device_info;
+mod file_manager;
 mod home;
 mod message;
 pub(crate) mod mirror;

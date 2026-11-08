@@ -244,7 +244,8 @@
         "CPU": "icons/cpu.svg",
         "MEMORY": "icons/stack-2.svg",
         "STORAGE": "icons/database.svg",
-        "INFO": "icons/info-circle.svg"
+        "INFO": "icons/info-circle.svg",
+        "REFRESH": "icons/refresh.svg"
       }
     },
     "icon_40": {
@@ -276,7 +277,15 @@
         "HIDE": "icons/chevron-down.svg",
         "ANDROID": "icons/brand-android.svg",
         "KEYBOARD": "icons/keyboard.svg",
-        "KEYBOARD_HIDE": "icons/keyboard-hide.svg"
+        "KEYBOARD_HIDE": "icons/keyboard-hide.svg",
+        "FOLDER_FILLED": "icons/folder-filled.svg",
+        "FILE": "icons/file.svg",
+        "FILE_TEXT": "icons/file-text.svg",
+        "PHOTO": "icons/photo.svg",
+        "MOVIE": "icons/movie.svg",
+        "PHONE": "icons/device-mobile.svg",
+        "SD_CARD": "icons/device-sd-card.svg",
+        "STORAGE": "icons/database.svg"
       }
     },
     "mono_18": {

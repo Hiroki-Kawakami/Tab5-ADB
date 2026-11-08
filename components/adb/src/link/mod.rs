@@ -6,7 +6,7 @@
  */
 
 pub(crate) mod base64;
-mod connection;
+pub(crate) mod connection;
 pub mod identity;
 pub(crate) mod packet;
 pub mod tcp;
