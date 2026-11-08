@@ -6,9 +6,10 @@
 use devkit_gfx::FontChain;
 use devkit_ui::Icon;
 
-use crate::resources::{HERO_56, ICON_28, ICON_40};
+use crate::resources::{HERO_56, ICON_28, ICON_40, MONO_18};
 
 pub static HERO: FontChain = FontChain::new(&[&HERO_56]);
+pub static MONO: FontChain = FontChain::new(&[&MONO_18]);
 static SMALL_ICONS: FontChain = FontChain::new(&[&ICON_28]);
 static ICONS: FontChain = FontChain::new(&[&ICON_40]);
 

@@ -10,6 +10,7 @@ mod home;
 mod message;
 pub(crate) mod mirror;
 mod settings;
+mod terminal;
 
 pub use home::{HomeScreen, adb_command};
 pub use settings::{set_input, set_rotation};

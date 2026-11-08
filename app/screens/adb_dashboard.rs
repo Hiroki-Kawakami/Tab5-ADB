@@ -28,6 +28,7 @@ use super::device_info::DeviceInfoScreen;
 use super::message::MessageScreen;
 use super::mirror::{MirrorScreen, keycode};
 use super::settings::SettingsScreen;
+use super::terminal::TerminalScreen;
 
 const TAG: &CStr = c"dashboard";
 
@@ -217,6 +218,7 @@ impl Component for AdbDashboardScreen {
                 cx.nav_of::<Root>().root();
             }
             Msg::Info => cx.nav_of::<Root>().push(DeviceInfoScreen::new(self.conn.clone())),
+            Msg::Shell => cx.nav_of::<Root>().push(TerminalScreen::new(self.conn.clone())),
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
             Msg::Preview => match &self.agent {
                 Some(_) if self.video_unavailable => {

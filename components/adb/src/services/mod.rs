@@ -5,7 +5,7 @@
  * Device services, built only on `link::Connection::open` and `link::Stream`.
  */
 
-mod shell;
+pub(crate) mod shell;
 pub mod sync;
 
-pub use shell::{exec, shell};
+pub use shell::{PtyOutput, PtyReader, PtyWriter, exec, pty, shell};

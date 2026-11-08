@@ -24,7 +24,181 @@
       },
       "fonts": {
         "caption": "caption_20",
-        "body": "body_24"
+        "body": "body_24",
+        "key_symbols": "key_symbols_24"
+      },
+      "keyboards": {
+        "keys": {
+          "Esc": { "label": "Esc", "insert": "\u001b", "role": "KeyRole.Special" },
+          "Tab": { "label": "Tab", "insert": "\t", "width": 2, "role": "KeyRole.Special" },
+          "Ctrl": { "label": "Ctrl", "action": "layer.ctrl", "once": true, "width": 1.5, "role": "KeyRole.Special" },
+          "Ctrl*": { "extends": "Ctrl", "action": "layer.base", "once": false, "role": "KeyRole.Primary" },
+          "Shift": { "icon": "shift", "action": "layer.shift", "once": true, "double": "caps", "width": 2, "role": "KeyRole.Special" },
+          "Shift*": { "extends": "Shift", "action": "layer.base", "once": false, "role": "KeyRole.Primary" },
+          "ShiftLock": { "icon": "shift", "action": "layer.base", "width": 2, "role": "KeyRole.Primary" },
+          "?#&": { "label": "?#&", "action": "layer.sym", "width": 1.5, "role": "KeyRole.Special" },
+          "?#&*": { "extends": "?#&", "action": "layer.base", "role": "KeyRole.Primary" },
+          "BS": { "icon": "backspace", "action": "TextInput.Backspace", "role": "KeyRole.Special", "repeat": true },
+          "Enter": { "icon": "enter", "action": "TextInput.Enter", "width": 1.5, "role": "KeyRole.Special" },
+          "Enter3.5": { "extends": "Enter", "width": 3.5 },
+          "Space": { "insert": " ", "width": 4.5, "repeat": true },
+          "Left": { "label": "←", "font": "font.key_symbols", "action": "TextInput.Left", "repeat": true },
+          "Up": { "label": "↑", "font": "font.key_symbols", "action": "TextInput.Up", "repeat": true },
+          "Down": { "label": "↓", "font": "font.key_symbols", "action": "TextInput.Down", "repeat": true },
+          "Right": { "label": "→", "font": "font.key_symbols", "action": "TextInput.Right", "repeat": true },
+          "Home": { "label": "Home", "action": "TextInput.Home", "width": 1.5, "role": "KeyRole.Special" },
+          "End": { "label": "End", "action": "TextInput.End", "width": 1.5, "role": "KeyRole.Special" },
+          "PgUp": { "label": "PgUp", "custom": 1, "width": 1.5, "role": "KeyRole.Special", "repeat": true },
+          "PgDn": { "label": "PgDn", "custom": 2, "width": 1.5, "role": "KeyRole.Special", "repeat": true },
+          "Ins": { "label": "Ins", "custom": 3, "width": 1.5, "role": "KeyRole.Special" },
+          "Del": { "label": "Del", "action": "TextInput.Delete", "width": 1.5, "role": "KeyRole.Special", "repeat": true },
+          "^a": { "label": "a", "insert": "\u0001" },
+          "^b": { "label": "b", "insert": "\u0002" },
+          "^c": { "label": "c", "insert": "\u0003" },
+          "^d": { "label": "d", "insert": "\u0004" },
+          "^e": { "label": "e", "insert": "\u0005" },
+          "^f": { "label": "f", "insert": "\u0006" },
+          "^g": { "label": "g", "insert": "\u0007" },
+          "^h": { "label": "h", "insert": "\b" },
+          "^i": { "label": "i", "insert": "\t" },
+          "^j": { "label": "j", "insert": "\n" },
+          "^k": { "label": "k", "insert": "\u000b" },
+          "^l": { "label": "l", "insert": "\f" },
+          "^m": { "label": "m", "insert": "\r" },
+          "^n": { "label": "n", "insert": "\u000e" },
+          "^o": { "label": "o", "insert": "\u000f" },
+          "^p": { "label": "p", "insert": "\u0010" },
+          "^q": { "label": "q", "insert": "\u0011" },
+          "^r": { "label": "r", "insert": "\u0012" },
+          "^s": { "label": "s", "insert": "\u0013" },
+          "^t": { "label": "t", "insert": "\u0014" },
+          "^u": { "label": "u", "insert": "\u0015" },
+          "^v": { "label": "v", "insert": "\u0016" },
+          "^w": { "label": "w", "insert": "\u0017" },
+          "^x": { "label": "x", "insert": "\u0018" },
+          "^y": { "label": "y", "insert": "\u0019" },
+          "^z": { "label": "z", "insert": "\u001a" }
+        },
+        "terminal_portrait": {
+          "height": 440,
+          "layers": [
+            {
+              "id": "base",
+              "columns": 12,
+              "layout": [
+                ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"],
+                ["Tab", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+                ["Ctrl", "a", "s", "d", "f", "g", "h", "j", "k", "l", "Enter"],
+                ["Shift", "z", "x", "c", "v", "b", "n", "m", ",", ".", "'"],
+                ["?#&", "-", "/", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            },
+            {
+              "id": "shift",
+              "columns": 12,
+              "layout": [
+                ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"],
+                ["Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+                ["Ctrl", "A", "S", "D", "F", "G", "H", "J", "K", "L", "Enter"],
+                ["Shift*", "Z", "X", "C", "V", "B", "N", "M", "<", ">", "\""],
+                ["?#&", "_", "?", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            },
+            {
+              "id": "caps",
+              "columns": 12,
+              "layout": [
+                ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"],
+                ["Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+                ["Ctrl", "A", "S", "D", "F", "G", "H", "J", "K", "L", "Enter"],
+                ["ShiftLock", "Z", "X", "C", "V", "B", "N", "M", "<", ">", "\""],
+                ["?#&", "_", "?", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            },
+            {
+              "id": "ctrl",
+              "columns": 12,
+              "layout": [
+                ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"],
+                ["Tab", "^q", "^w", "^e", "^r", "^t", "^y", "^u", "^i", "^o", "^p"],
+                ["Ctrl*", "^a", "^s", "^d", "^f", "^g", "^h", "^j", "^k", "^l", "Enter"],
+                ["Shift", "^z", "^x", "^c", "^v", "^b", "^n", "^m", ",", ".", "'"],
+                ["?#&", "-", "/", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            },
+            {
+              "id": "sym",
+              "columns": 12,
+              "layout": [
+                ["Esc", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "BS"],
+                ["Tab", "~", "`", "|", "\\", "{", "}", "[", "]", "<", ">"],
+                ["Ctrl", ";", ":", "\"", "=", "+", "_", "?", "Enter3.5"],
+                ["Shift", "Home", "End", "PgUp", "PgDn", "Ins", "Del"],
+                ["?#&*", "-", "/", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            }
+          ]
+        },
+        "terminal_landscape": {
+          "height": 316,
+          "layers": [
+            {
+              "id": "base",
+              "columns": 12,
+              "layout": [
+                ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"],
+                ["Tab", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+                ["Ctrl", "a", "s", "d", "f", "g", "h", "j", "k", "l", "Enter"],
+                ["Shift", "z", "x", "c", "v", "b", "n", "m", ",", ".", "'"],
+                ["?#&", "-", "/", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            },
+            {
+              "id": "shift",
+              "columns": 12,
+              "layout": [
+                ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"],
+                ["Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+                ["Ctrl", "A", "S", "D", "F", "G", "H", "J", "K", "L", "Enter"],
+                ["Shift*", "Z", "X", "C", "V", "B", "N", "M", "<", ">", "\""],
+                ["?#&", "_", "?", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            },
+            {
+              "id": "caps",
+              "columns": 12,
+              "layout": [
+                ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"],
+                ["Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+                ["Ctrl", "A", "S", "D", "F", "G", "H", "J", "K", "L", "Enter"],
+                ["ShiftLock", "Z", "X", "C", "V", "B", "N", "M", "<", ">", "\""],
+                ["?#&", "_", "?", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            },
+            {
+              "id": "ctrl",
+              "columns": 12,
+              "layout": [
+                ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "BS"],
+                ["Tab", "^q", "^w", "^e", "^r", "^t", "^y", "^u", "^i", "^o", "^p"],
+                ["Ctrl*", "^a", "^s", "^d", "^f", "^g", "^h", "^j", "^k", "^l", "Enter"],
+                ["Shift", "^z", "^x", "^c", "^v", "^b", "^n", "^m", ",", ".", "'"],
+                ["?#&", "-", "/", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            },
+            {
+              "id": "sym",
+              "columns": 12,
+              "layout": [
+                ["Esc", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "BS"],
+                ["Tab", "~", "`", "|", "\\", "{", "}", "[", "]", "<", ">"],
+                ["Ctrl", ";", ":", "\"", "=", "+", "_", "?", "Enter3.5"],
+                ["Shift", "Home", "End", "PgUp", "PgDn", "Ins", "Del"],
+                ["?#&*", "-", "/", "Space", "Left", "Up", "Down", "Right"]
+              ]
+            }
+          ]
+        }
       }
     }
   },
@@ -100,8 +274,24 @@
         "VOLUME_UP": "icons/volume.svg",
         "VOLUME_DOWN": "icons/volume-2.svg",
         "HIDE": "icons/chevron-down.svg",
-        "ANDROID": "icons/brand-android.svg"
+        "ANDROID": "icons/brand-android.svg",
+        "KEYBOARD": "icons/keyboard.svg",
+        "KEYBOARD_HIDE": "icons/keyboard-hide.svg"
       }
+    },
+    "mono_18": {
+      "size": 18,
+      "font": "fonts/JetBrainsMono-Regular.ttf",
+      "glyph": [
+        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      ]
+    },
+    "key_symbols_24": {
+      "size": 24,
+      "font": "fonts/JetBrainsMono-Regular.ttf",
+      "glyph": [
+        "←↑↓→"
+      ]
     }
   }
 }

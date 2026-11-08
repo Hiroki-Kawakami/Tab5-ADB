@@ -6,6 +6,7 @@
 use crate::link::base64;
 use crate::link::identity::{n0inv, r_squared};
 use crate::link::packet::{A_CNXN, A_VERSION, Header, Packet};
+use crate::services::shell::{packet, window_size};
 
 #[test]
 fn packet_header() {
@@ -43,4 +44,10 @@ fn n0inv_inverts() {
     for n0 in [1u32, 3, 0x1234_5679, 0xffff_ffff] {
         assert_eq!(n0.wrapping_mul(n0inv(n0)), u32::MAX);
     }
+}
+
+#[test]
+fn shell_protocol_packets() {
+    assert_eq!(packet(0, b"ls\r"), [0, 3, 0, 0, 0, b'l', b's', b'\r']);
+    assert_eq!(window_size(42, 72), b"42x72,0x0\0");
 }
