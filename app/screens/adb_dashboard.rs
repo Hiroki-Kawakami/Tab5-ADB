@@ -14,7 +14,7 @@ use adb::link::{Connection, State as LinkState};
 use agent_link::Link;
 use devkit_gfx::Color;
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, ColorRole, Component, Cx, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Transition, Ui, id};
+use devkit_ui::{Align, ColorRole, Component, Cx, Drag, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Transition, Ui, id};
 use idf::log::error;
 
 use crate::adb_link::Route;
@@ -25,7 +25,7 @@ use crate::preview::{self, Preview};
 use crate::resources::{colors, icons};
 
 use super::message::MessageScreen;
-use super::mirror::MirrorScreen;
+use super::mirror::{MirrorScreen, keycode};
 
 const TAG: &CStr = c"dashboard";
 
@@ -52,10 +52,7 @@ pub enum Msg {
     Info,
     Preview,
     VideoUnavailable,
-    Back,
-    Home,
-    Recents,
-    Power,
+    Key(u16, bool),
     Shell,
     FileManager,
     Apps,
@@ -88,13 +85,41 @@ pub struct AdbDashboardScreen {
     watch: Option<Task>,
     agent: Option<Agent>,
     video_unavailable: bool,
+    /// Keys pressed, so that a held finger sends one press.
+    keys: Vec<u16>,
 }
 
 impl AdbDashboardScreen {
     /// Without `agent`, only what plain adb can do.
     pub fn new(conn: Connection, route: Route, agent: Option<Agent>) -> Self {
         let model = device_info::model(&conn.banner());
-        Self { conn, route, model, info: None, watch: None, agent, video_unavailable: false }
+        Self { conn, route, model, info: None, watch: None, agent, video_unavailable: false, keys: Vec::new() }
+    }
+
+    fn key(&mut self, code: u16, down: bool, cx: &mut Cx<Self>) {
+        if down == self.keys.contains(&code) {
+            return;
+        }
+        if down {
+            self.keys.push(code);
+        } else {
+            self.keys.retain(|&k| k != code);
+        }
+        if let Some(agent) = &self.agent {
+            if let Err(err) = agent.link().key(code, down) {
+                error!(TAG, "key {code}: {err}");
+            }
+            return;
+        }
+        if down {
+            return;
+        }
+        let conn = self.conn.clone();
+        cx.spawn(move |_| async move {
+            if let Err(err) = adb::services::exec(&conn, &alloc::format!("input keyevent {code}")).await {
+                error!(TAG, "input keyevent {code}: {err}");
+            }
+        });
     }
 
     fn header<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
@@ -206,6 +231,7 @@ impl Component for AdbDashboardScreen {
                 self.video_unavailable = true;
                 cx.rebuild();
             }
+            Msg::Key(code, down) => self.key(code, down, cx),
             _ => {}
         }
     }
@@ -237,26 +263,44 @@ impl Screen for AdbDashboardScreen {
         let (conn, link) = (self.conn.clone(), self.agent.as_ref().map(|a| a.link().clone()));
         self.watch = Some(cx.spawn(|this| watch(this, conn, link)));
     }
+
+    fn will_disappear(&mut self, _: &mut Cx<Self>) {
+        self.keys.clear();
+        if let Some(agent) = &self.agent
+            && let Err(err) = agent.link().input_clear()
+        {
+            error!(TAG, "input clear: {err}");
+        }
+    }
+}
+
+fn key_msg<const CODE: u16>(drag: Drag) -> Msg {
+    Msg::Key(CODE, !drag.ended)
 }
 
 fn nav_bar<'a>(ui: &'a Ui<Msg>, vertical: bool) -> Element<'a, Msg> {
-    let mut keys = [(icons::NAV_BACK, Msg::Back), (icons::NAV_HOME, Msg::Home), (icons::NAV_RECENTS, Msg::Recents), (icons::POWER, Msg::Power)];
+    let mut keys: [(char, fn(Drag) -> Msg); 4] = [
+        (icons::NAV_BACK, key_msg::<{ keycode::BACK }>),
+        (icons::NAV_HOME, key_msg::<{ keycode::HOME }>),
+        (icons::NAV_RECENTS, key_msg::<{ keycode::APP_SWITCH }>),
+        (icons::POWER, key_msg::<{ keycode::POWER }>),
+    ];
     if vertical {
         keys.reverse();
     }
     let mut items = Vec::new();
-    for (i, &(glyph, msg)) in keys.iter().enumerate() {
-        if i > 0 && (matches!(msg, Msg::Power) || matches!(keys[i - 1].1, Msg::Power)) {
+    for (i, &(glyph, on_drag)) in keys.iter().enumerate() {
+        if i > 0 && (glyph == icons::POWER || keys[i - 1].0 == icons::POWER) {
             items.push(if vertical { divider(ui).padding_x(ui.theme().widgets.unit.gap) } else { vertical_divider(ui) });
         }
-        items.push(nav_key(ui, icon(glyph), msg).grow(1));
+        items.push(nav_key(ui, icon(glyph), on_drag).grow(1));
     }
     let bar = if vertical { ui.column(items).width(NAV_BAR_SIZE_LANDSCAPE).padding_y(8) } else { ui.row(items).height(NAV_BAR_SIZE) }.align(Align::Center);
     bar.radius(RADIUS).background(ui.colors().surface)
 }
 
-fn nav_key<'a>(ui: &'a Ui<Msg>, icon: Icon, msg: Msg) -> Element<'a, Msg> {
-    ui.row([key(ui, icon).inherit_state(State::PRESSED)]).align(Align::Center).justify(Justify::Center).state_source().on_tap(msg)
+fn nav_key<'a>(ui: &'a Ui<Msg>, icon: Icon, on_drag: fn(Drag) -> Msg) -> Element<'a, Msg> {
+    ui.row([key(ui, icon).inherit_state(State::PRESSED)]).align(Align::Center).justify(Justify::Center).state_source().on_drag(on_drag)
 }
 
 fn key<'a>(ui: &'a Ui<Msg>, icon: Icon) -> Element<'a, Msg> {

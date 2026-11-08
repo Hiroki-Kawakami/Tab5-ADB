@@ -50,12 +50,16 @@ const BAR_SPACE: i16 = BAR_MARGIN + BAR_THICKNESS + BAR_MARGIN;
 const KEY_SIZE: i16 = 64;
 const REVEAL_CORNER: i16 = 96;
 const REVEAL_DISTANCE: i32 = 48;
-const KEYCODE_HOME: u16 = 3;
-const KEYCODE_BACK: u16 = 4;
-const KEYCODE_VOLUME_UP: u16 = 24;
-const KEYCODE_VOLUME_DOWN: u16 = 25;
-const KEYCODE_POWER: u16 = 26;
-const KEYCODE_APP_SWITCH: u16 = 187;
+
+/// Android's `KeyEvent.KEYCODE_*`.
+pub mod keycode {
+    pub const HOME: u16 = 3;
+    pub const BACK: u16 = 4;
+    pub const VOLUME_UP: u16 = 24;
+    pub const VOLUME_DOWN: u16 = 25;
+    pub const POWER: u16 = 26;
+    pub const APP_SWITCH: u16 = 187;
+}
 
 type Spare = Vec<u8, Caps>;
 type Sram = Lease<'static, SharedSram>;
@@ -770,8 +774,8 @@ impl Component for MirrorScreen {
 fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool, passthrough: bool) -> Element<'a, MirrorMsg> {
     let mut groups: [&[(char, Action)]; 4] = [
         &[(icons::HIDE, Action::Tap(MirrorMsg::Hide))],
-        &[(icons::NAV_BACK, Action::Key(key::<KEYCODE_BACK>)), (icons::NAV_HOME, Action::Key(key::<KEYCODE_HOME>)), (icons::NAV_RECENTS, Action::Key(key::<KEYCODE_APP_SWITCH>))],
-        &[(icons::VOLUME_DOWN, Action::Key(key::<KEYCODE_VOLUME_DOWN>)), (icons::VOLUME_UP, Action::Key(key::<KEYCODE_VOLUME_UP>)), (icons::POWER, Action::Key(key::<KEYCODE_POWER>))],
+        &[(icons::NAV_BACK, Action::Key(key::<{ keycode::BACK }>)), (icons::NAV_HOME, Action::Key(key::<{ keycode::HOME }>)), (icons::NAV_RECENTS, Action::Key(key::<{ keycode::APP_SWITCH }>))],
+        &[(icons::VOLUME_DOWN, Action::Key(key::<{ keycode::VOLUME_DOWN }>)), (icons::VOLUME_UP, Action::Key(key::<{ keycode::VOLUME_UP }>)), (icons::POWER, Action::Key(key::<{ keycode::POWER }>))],
         &[(icons::TOUCH, Action::Tap(MirrorMsg::Passthrough)), (icons::DISPLAY_MODE, Action::Nothing), (icons::CLOSE, Action::Tap(MirrorMsg::Back))],
     ];
     if vertical {
