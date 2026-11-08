@@ -14,7 +14,7 @@ use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
-use crate::protocol::{self, Channel, HEADER_BYTES, HELLO, Header, Hello, HelloReply, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
+use crate::protocol::{self, Channel, HEADER_BYTES, HELLO, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::video::Video;
 use crate::{Error, Result};
 
@@ -282,6 +282,16 @@ impl Link {
 
     pub fn touch(&self, touch: &Touch) -> Result<()> {
         self.input(TOUCH, &touch.encode())
+    }
+
+    /// `keycode` is Android's `KeyEvent.KEYCODE_*`.
+    pub fn key(&self, keycode: u16, down: bool) -> Result<()> {
+        self.input(KEY, &protocol::key(keycode, down))
+    }
+
+    /// Has the agent let go of every finger and key still down.
+    pub fn input_clear(&self) -> Result<()> {
+        self.input(INPUT_CLEAR, &[])
     }
 
     /// A video stream sending as `start` asks; one at a time, so opening

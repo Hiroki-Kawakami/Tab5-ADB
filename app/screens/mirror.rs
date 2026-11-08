@@ -50,6 +50,12 @@ const BAR_SPACE: i16 = BAR_MARGIN + BAR_THICKNESS + BAR_MARGIN;
 const KEY_SIZE: i16 = 64;
 const REVEAL_CORNER: i16 = 96;
 const REVEAL_DISTANCE: i32 = 48;
+const KEYCODE_HOME: u16 = 3;
+const KEYCODE_BACK: u16 = 4;
+const KEYCODE_VOLUME_UP: u16 = 24;
+const KEYCODE_VOLUME_DOWN: u16 = 25;
+const KEYCODE_POWER: u16 = 26;
+const KEYCODE_APP_SWITCH: u16 = 187;
 
 type Spare = Vec<u8, Caps>;
 type Sram = Lease<'static, SharedSram>;
@@ -531,6 +537,18 @@ pub enum MirrorMsg {
     Hide,
     Reveal(Drag),
     Passthrough,
+    Key(u16, bool),
+}
+
+fn key<const CODE: u16>(drag: Drag) -> MirrorMsg {
+    MirrorMsg::Key(CODE, !drag.ended)
+}
+
+#[derive(Clone, Copy)]
+enum Action {
+    Tap(MirrorMsg),
+    Key(fn(Drag) -> MirrorMsg),
+    Nothing,
 }
 
 pub struct MirrorScreen {
@@ -543,6 +561,8 @@ pub struct MirrorScreen {
     leaving: bool,
     bar: bool,
     passthrough: bool,
+    /// Keys pressed, so that a held finger sends one press.
+    keys: Vec<u16>,
     swipe: Option<(i16, i16)>,
     /// The surface is in the view; screen moves cannot draw over it.
     live: bool,
@@ -577,7 +597,7 @@ impl MirrorScreen {
         });
         let mut passthrough = Passthrough { link: link.clone(), shared: shared.clone(), entered: Vec::new(), last: None, failing: false };
         surface.set_on_touch(move |points, sampled_ms| passthrough.touched(points, sampled_ms));
-        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, swipe: None, live: false })
+        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, keys: Vec::new(), swipe: None, live: false })
     }
 
     fn start(&mut self, cx: &mut Cx<Self>) {
@@ -707,6 +727,20 @@ impl Component for MirrorScreen {
                     cx.rebuild();
                 }
             }
+            MirrorMsg::Key(code, down) => {
+                let held = self.keys.contains(&code);
+                if down == held {
+                    return;
+                }
+                if down {
+                    self.keys.push(code);
+                } else {
+                    self.keys.retain(|&k| k != code);
+                }
+                if let Err(err) = self.link.key(code, down) {
+                    error!(TAG, "key {code}: {err}");
+                }
+            }
             MirrorMsg::Passthrough => {
                 self.passthrough = !self.passthrough;
                 self.shared.passthrough.store(self.passthrough, Ordering::Release);
@@ -734,11 +768,11 @@ impl Component for MirrorScreen {
 }
 
 fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool, passthrough: bool) -> Element<'a, MirrorMsg> {
-    let mut groups: [&[(char, Option<MirrorMsg>)]; 4] = [
-        &[(icons::HIDE, Some(MirrorMsg::Hide))],
-        &[(icons::NAV_BACK, None), (icons::NAV_HOME, None), (icons::NAV_RECENTS, None)],
-        &[(icons::VOLUME_DOWN, None), (icons::VOLUME_UP, None), (icons::POWER, None)],
-        &[(icons::TOUCH, Some(MirrorMsg::Passthrough)), (icons::DISPLAY_MODE, None), (icons::CLOSE, Some(MirrorMsg::Back))],
+    let mut groups: [&[(char, Action)]; 4] = [
+        &[(icons::HIDE, Action::Tap(MirrorMsg::Hide))],
+        &[(icons::NAV_BACK, Action::Key(key::<KEYCODE_BACK>)), (icons::NAV_HOME, Action::Key(key::<KEYCODE_HOME>)), (icons::NAV_RECENTS, Action::Key(key::<KEYCODE_APP_SWITCH>))],
+        &[(icons::VOLUME_DOWN, Action::Key(key::<KEYCODE_VOLUME_DOWN>)), (icons::VOLUME_UP, Action::Key(key::<KEYCODE_VOLUME_UP>)), (icons::POWER, Action::Key(key::<KEYCODE_POWER>))],
+        &[(icons::TOUCH, Action::Tap(MirrorMsg::Passthrough)), (icons::DISPLAY_MODE, Action::Nothing), (icons::CLOSE, Action::Tap(MirrorMsg::Back))],
     ];
     if vertical {
         groups.reverse();
@@ -748,7 +782,7 @@ fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool, passthrough: bool) -> 
         if i > 0 {
             items.push(if vertical { divider(ui).padding_x(ui.theme().widgets.unit.gap) } else { vertical_divider(ui) });
         }
-        let mut keys: Vec<_> = group.iter().map(|&(glyph, msg)| control_key(ui, glyph, msg, passthrough)).collect();
+        let mut keys: Vec<_> = group.iter().map(|&(glyph, action)| control_key(ui, glyph, action, passthrough)).collect();
         if vertical {
             keys.reverse();
         }
@@ -759,10 +793,10 @@ fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool, passthrough: bool) -> 
     bar.align(Align::Center).radius(BAR_RADIUS).background(ui.colors().surface)
 }
 
-fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, msg: Option<MirrorMsg>, passthrough: bool) -> Element<'a, MirrorMsg> {
-    let color = match msg {
-        Some(MirrorMsg::Back) => colors::DESTRUCTIVE,
-        Some(MirrorMsg::Passthrough) if passthrough => ColorRole::Primary,
+fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, action: Action, passthrough: bool) -> Element<'a, MirrorMsg> {
+    let color = match action {
+        Action::Tap(MirrorMsg::Back) => colors::DESTRUCTIVE,
+        Action::Tap(MirrorMsg::Passthrough) if passthrough => ColorRole::Primary,
         _ => ColorRole::Text,
     };
     let key = ui
@@ -772,9 +806,10 @@ fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, msg: Option<MirrorMsg>, p
         .align(Align::Center)
         .justify(Justify::Center)
         .when(State::PRESSED, &[Prop::Background(colors::PRESSED)]);
-    match msg {
-        Some(msg) => key.on_tap(msg),
-        None => key,
+    match action {
+        Action::Tap(msg) => key.on_tap(msg),
+        Action::Key(on_drag) => key.on_drag(on_drag),
+        Action::Nothing => key,
     }
 }
 
@@ -795,6 +830,10 @@ impl Screen for MirrorScreen {
     fn will_disappear(&mut self, cx: &mut Cx<Self>) {
         self.live = false;
         cx.rebuild();
+        self.keys.clear();
+        if let Err(err) = self.link.input_clear() {
+            error!(TAG, "input clear: {err}");
+        }
         if self.switching {
             self.leaving = true;
             return;

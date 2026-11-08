@@ -8,11 +8,15 @@ package com.tab5adb.agent;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.InputEvent;
+import android.view.KeyCharacterMap;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 
 import java.lang.reflect.Method;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
-// Turns TOUCH snapshots into MotionEvents injected through IInputManager.
+// Turns TOUCH and KEY into events injected through IInputManager.
 final class Input {
     private static final int INJECT_MODE_ASYNC = 0;
     private static final int MAX_POINTERS = 10;
@@ -30,6 +34,7 @@ final class Input {
     private long uptimeAnchor;
     private long downTime;
     private long lastTime;
+    private final Map<Integer, Long> heldKeys = new LinkedHashMap<>();
 
     private Input(Object inputManager, Method injectInputEvent) {
         this.inputManager = inputManager;
@@ -65,7 +70,7 @@ final class Input {
             if (indexOf(pid, n, ids[i]) >= 0) {
                 continue;
             }
-            inject(count == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP | (i << MotionEvent.ACTION_POINTER_INDEX_SHIFT), when);
+            injectMotion(count == 1 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP | (i << MotionEvent.ACTION_POINTER_INDEX_SHIFT), when);
             remove(i);
             changed = true;
         }
@@ -81,11 +86,11 @@ final class Input {
             xs[count] = px[i];
             ys[count] = py[i];
             count++;
-            inject(count == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN | ((count - 1) << MotionEvent.ACTION_POINTER_INDEX_SHIFT), when);
+            injectMotion(count == 1 ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN | ((count - 1) << MotionEvent.ACTION_POINTER_INDEX_SHIFT), when);
             changed = true;
         }
         if (moved && !changed && count > 0) {
-            inject(MotionEvent.ACTION_MOVE, when);
+            injectMotion(MotionEvent.ACTION_MOVE, when);
         }
     }
 
@@ -93,8 +98,33 @@ final class Input {
         if (count == 0) {
             return;
         }
-        inject(MotionEvent.ACTION_CANCEL, SystemClock.uptimeMillis());
+        injectMotion(MotionEvent.ACTION_CANCEL, SystemClock.uptimeMillis());
         count = 0;
+    }
+
+    synchronized void key(int code, boolean down) {
+        long now = SystemClock.uptimeMillis();
+        if (down) {
+            if (heldKeys.containsKey(code)) {
+                return;
+            }
+            heldKeys.put(code, now);
+            injectKey(now, now, KeyEvent.ACTION_DOWN, code, 0);
+            return;
+        }
+        Long downAt = heldKeys.remove(code);
+        if (downAt != null) {
+            injectKey(downAt, now, KeyEvent.ACTION_UP, code, 0);
+        }
+    }
+
+    synchronized void clear() {
+        cancel();
+        long now = SystemClock.uptimeMillis();
+        for (Map.Entry<Integer, Long> held : heldKeys.entrySet()) {
+            injectKey(held.getValue(), now, KeyEvent.ACTION_UP, held.getKey(), KeyEvent.FLAG_CANCELED);
+        }
+        heldKeys.clear();
     }
 
     private long eventTime(long time) {
@@ -135,7 +165,11 @@ final class Input {
         count--;
     }
 
-    private void inject(int action, long when) {
+    private void injectKey(long downAt, long when, int action, int code, int flags) {
+        inject(new KeyEvent(downAt, when, action, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, flags, InputDevice.SOURCE_KEYBOARD), "key " + code + " action " + action);
+    }
+
+    private void injectMotion(int action, long when) {
         MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[count];
         MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[count];
         for (int i = 0; i < count; i++) {
@@ -149,14 +183,17 @@ final class Input {
             coords[i].size = 1f;
         }
         MotionEvent event = MotionEvent.obtain(downTime, when, action, count, props, coords, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+        inject(event, "action " + action + " pointers " + count);
+        event.recycle();
+    }
+
+    private void inject(InputEvent event, String what) {
         try {
             if (!(boolean) injectInputEvent.invoke(inputManager, event, INJECT_MODE_ASYNC)) {
-                System.out.println("inject: refused action " + action + " pointers " + count);
+                System.out.println("inject: refused " + what);
             }
         } catch (Exception e) {
             System.out.println("inject: " + e);
-        } finally {
-            event.recycle();
         }
     }
 }

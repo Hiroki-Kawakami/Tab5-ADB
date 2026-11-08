@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, REPLY, Touch, TouchPoint, VideoStart, message, reply};
+use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, REPLY, Touch, TouchPoint, VideoStart, key, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -74,4 +74,10 @@ fn touch_bytes() {
     let touch = Touch { time_ms: 0x0102_0304, width: 720, height: 1280, rotation: 1, points: alloc::vec![TouchPoint { id: 7, x: 0x123, y: 0x456 }] };
     assert_eq!(touch.encode(), [4, 3, 2, 1, 0xd0, 0x02, 0x00, 0x05, 1, 1, 0, 0, 7, 0, 0x23, 0x01, 0x56, 0x04]);
     assert_eq!(Touch { points: Vec::new(), ..touch }.encode().len(), 12);
+}
+
+#[test]
+fn key_bytes() {
+    assert_eq!(key(187, true), [187, 0, 0, 0]);
+    assert_eq!(key(0x0123, false), [0x23, 0x01, 1, 0]);
 }

@@ -15,6 +15,8 @@ pub const SET_ROTATION: u8 = 0x10;
 pub const REPLY: u8 = 0x40;
 
 pub const TOUCH: u8 = 0x60;
+pub const KEY: u8 = 0x61;
+pub const INPUT_CLEAR: u8 = 0x62;
 
 pub const VIDEO_START: u8 = 0x01;
 pub const FRAME: u8 = 0x41;
@@ -192,6 +194,11 @@ impl Touch {
         }
         out
     }
+}
+
+pub fn key(keycode: u16, down: bool) -> [u8; 4] {
+    let [k0, k1] = keycode.to_le_bytes();
+    [k0, k1, if down { 0 } else { 1 }, 0]
 }
 
 /// One band of a frame.

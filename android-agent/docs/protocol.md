@@ -164,6 +164,8 @@ REPLY result
 | type | 名前 | 内容 |
 |---|---|---|
 | `0x60` | `TOUCH` | 映像に触れている指 |
+| `0x61` | `KEY` | キーを押した・離した |
+| `0x62` | `INPUT_CLEAR` | 押したままの指とキーをすべて離す |
 
 ### TOUCH
 
@@ -195,6 +197,29 @@ TOUCH
 - agent はジェスチャーの最初のメッセージの `time_ms` を `SystemClock.uptimeMillis()` に
   対応付け、以降はその差を `MotionEvent` の時刻にする。
 - 前と同じ内容のメッセージは Tab5 は送らない。
+
+### KEY
+
+```
+KEY
+  u16 keycode            Android の KeyEvent.KEYCODE_*
+  u8  action             0 = 押した, 1 = 離した
+  u8  reserved
+```
+
+- 押している間の長押しやキーリピートは Android に任せる。Tab5 は押した時と離した時だけ送る。
+- 押したままのキーの「押した」は agent が無視する。押していないキーの「離した」も無視する。
+
+### INPUT_CLEAR
+
+```
+INPUT_CLEAR
+  なし
+```
+
+- agent は注入中の指を取り消し（`ACTION_CANCEL`）、押したままのキーを `FLAG_CANCELED` 付きで
+  離す。Tab5 は入力を送る画面を離れるときに送る。
+- 制御ストリームが閉じたときも agent は同じことをしてから終了する。
 
 ## 映像・音声ストリーム
 

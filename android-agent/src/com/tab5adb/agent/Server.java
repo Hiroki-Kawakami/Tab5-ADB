@@ -30,6 +30,9 @@ public final class Server {
     private static final int REQUEST_LAST = 0x3F;
     private static final int REPLY = 0x40;
     private static final int TOUCH = 0x60;
+    private static final int KEY = 0x61;
+    private static final int INPUT_CLEAR = 0x62;
+    private static final int KEY_BYTES = 4;
     private static final int TOUCH_HEAD = 12;
     private static final int TOUCH_POINT = 6;
     private static final int MAX_POINTERS = 10;
@@ -88,14 +91,19 @@ public final class Server {
         Runtime.getRuntime().addShutdownHook(new Thread(RotationLock::release));
         System.out.println("listening");
         System.out.flush();
+        Server server = null;
         try (LocalSocket socket = control.accept()) {
             watchdog.interrupt();
             control.close();
-            new Server(socket.getOutputStream()).serve(new DataInputStream(socket.getInputStream()));
+            server = new Server(socket.getOutputStream());
+            server.serve(new DataInputStream(socket.getInputStream()));
         } catch (EOFException e) {
             System.out.println("closed");
         } catch (IOException e) {
             System.out.println("control: " + e);
+        }
+        if (server != null && server.input != null) {
+            server.input.clear();
         }
         System.exit(0);
     }
@@ -145,6 +153,12 @@ public final class Server {
                 onSetRotation(id, payload);
             } else if (kind == TOUCH) {
                 onTouch(payload);
+            } else if (kind == KEY) {
+                onKey(payload);
+            } else if (kind == INPUT_CLEAR) {
+                if (input != null) {
+                    input.clear();
+                }
             } else if (kind <= REQUEST_LAST) {
                 reply(id, ENOTSUP, new byte[0]);
             }
@@ -197,18 +211,7 @@ public final class Server {
         }
         ByteBuffer p = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
         int n = Math.min(payload[9] & 0xFF, MAX_POINTERS);
-        if (payload.length < TOUCH_HEAD + n * TOUCH_POINT) {
-            return;
-        }
-        if (input == null && !inputFailed) {
-            try {
-                input = Input.create();
-            } catch (Throwable t) {
-                inputFailed = true;
-                System.out.println("input: " + t);
-            }
-        }
-        if (input == null) {
+        if (payload.length < TOUCH_HEAD + n * TOUCH_POINT || !openInput()) {
             return;
         }
         int width = p.getShort(4) & 0xFFFF;
@@ -228,6 +231,26 @@ public final class Server {
             touchYs[i] = (p.getShort(at + 4) & 0xFFFF) * sy;
         }
         input.touch(p.getInt(0) & 0xFFFFFFFFL, n, touchIds, touchXs, touchYs);
+    }
+
+    private void onKey(byte[] payload) {
+        if (payload.length < KEY_BYTES || !openInput()) {
+            return;
+        }
+        int code = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getShort(0) & 0xFFFF;
+        input.key(code, payload[2] == 0);
+    }
+
+    private boolean openInput() {
+        if (input == null && !inputFailed) {
+            try {
+                input = Input.create();
+            } catch (Throwable t) {
+                inputFailed = true;
+                System.out.println("input: " + t);
+            }
+        }
+        return input != null;
     }
 
     private void reply(int id, int status, byte[] result) throws IOException {
