@@ -24,6 +24,7 @@ use crate::fonts::{icon, small_icon};
 use crate::preview::{self, Preview};
 use crate::resources::{colors, icons};
 
+use super::device_info::DeviceInfoScreen;
 use super::message::MessageScreen;
 use super::mirror::{MirrorScreen, keycode};
 
@@ -214,6 +215,7 @@ impl Component for AdbDashboardScreen {
                 self.agent = None;
                 cx.nav_of::<Root>().root();
             }
+            Msg::Info => cx.nav_of::<Root>().push(DeviceInfoScreen::new(self.conn.clone())),
             Msg::Preview => match &self.agent {
                 Some(_) if self.video_unavailable => {
                     cx.nav_of::<Overlay>().push(MessageScreen::new("Mirroring unavailable", "The agent cannot capture this device's screen, so mirroring is disabled."));

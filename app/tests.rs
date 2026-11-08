@@ -6,7 +6,7 @@
 use agent_link::FrameHead;
 use devkit_gfx::{Rect, Rotation};
 
-use crate::device_info::{self, Battery};
+use crate::device_info::{self, Battery, Cellular, CpuTimes, Memory, Storage, Wifi};
 use crate::screens::mirror::{Placed, strip_rect};
 
 const SUMMARY: &str = "Example Phone\n---SEP---\n15\n---SEP---\nCurrent Battery Service state:\n  AC powered: false\n  USB powered: true\n  status: 2\n  health: 2\n  level: 64\n  scale: 100\n---SEP---\nFilesystem     1K-blocks     Used Available Use% Mounted on\n/dev/block/dm-48 115343360 41234567 74108793  36% /data\n---SEP---\nWifi is enabled\nWifi scanning is always available\nWifi is connected to \"example-ap\"\n";
@@ -34,6 +34,71 @@ fn device_summary_unset() {
 fn banner_model() {
     assert_eq!(device_info::model("device::ro.product.name=example;ro.product.model=Example Phone;features=shell_v2").as_deref(), Some("Example Phone"));
     assert_eq!(device_info::model("device::features=shell_v2"), None);
+}
+
+const HARDWARE: &str = "[ro.product.model]: [Example Phone]\n[ro.product.manufacturer]: [Example]\n[ro.soc.manufacturer]: [ExampleSoC]\n[ro.soc.model]: [X100]\n[ro.build.date]: [Mon Oct  5 12:34:56 UTC 2026]\n[empty]: []\n---SEP---\nPhysical size: 1080x2400\nOverride size: 720x1600\nPhysical density: 420\n---SEP---\n3000000\n---SEP---\n8\n---SEP---\nLinux version 6.1.0-example (builder@host) (clang) #1 SMP PREEMPT\n";
+
+#[test]
+fn device_hardware() {
+    let hw = device_info::parse_hardware(HARDWARE);
+    assert_eq!(hw.prop("ro.product.model"), "Example Phone");
+    assert_eq!(hw.prop("empty"), "");
+    assert_eq!(hw.prop("missing"), "");
+    assert_eq!(hw.soc(), "X100");
+    assert_eq!(hw.display.as_deref(), Some("720x1600 @ 420 dpi"));
+    assert_eq!(hw.max_freq_khz, Some(3000000));
+    assert_eq!(hw.cores, Some(8));
+    assert_eq!(hw.kernel.as_deref(), Some("6.1.0-example"));
+    assert_eq!(device_info::format_build_date(hw.prop("ro.build.date")), "Mon Oct 5 2026");
+}
+
+const STATUS: &str = "MemTotal:       11849728 kB\nMemAvailable:    4823449 kB\n---SEP---\nFilesystem     1K-blocks     Used Available Use% Mounted on\n/dev/block/dm-48 114609152 86507520 28101632  76% /data\n---SEP---\nCurrent Battery Service state:\n  AC powered: false\n  status: 2\n  health: 2\n  level: 22\n  voltage: 3855\n  temperature: 254\n  technology: Li-ion\n---SEP---\nWifi is enabled\nWifi is connected to \"example-ap\"\nWifiInfo: SSID: \"example-ap\", RSSI: -51, Link speed: 866Mbps, IP: /192.168.x.x, Frequency: 5180MHz\n---SEP---\nLOADED\n---SEP---\n  mServiceState={mVoiceRegState=0(IN_SERVICE), mDataRegState=0(IN_SERVICE)}\n  mSignalStrength=SignalStrength:{mLte=CellSignalStrengthLte: rssi=-61 level=3,mNr=CellSignalStrengthNr:{ level = 2 },mGsm=CellSignalStrengthGsm: level=2147483647}\n---SEP---\n273120.55 1987654.32\n";
+
+#[test]
+fn device_status() {
+    let status = device_info::parse_status(STATUS);
+    assert_eq!(status.memory, Some(Memory { total_kb: 11849728, available_kb: 4823449 }));
+    assert_eq!(status.storage, Some(Storage { total_kb: 114609152, used_kb: 86507520 }));
+    let battery = status.battery.unwrap();
+    assert_eq!((battery.level, battery.status_text(), battery.health_text(), battery.voltage_mv), (22, "Charging", "Good", 3855));
+    assert_eq!(device_info::format_temperature(battery.temperature_dc), "25.4\u{b0}C");
+    assert_eq!(battery.technology, "Li-ion");
+    assert_eq!(status.wifi, Wifi::Connected { rssi: -51, ip: Some("192.168.x.x".into()) });
+    assert_eq!(Wifi::bars(-51), 4);
+    assert_eq!(status.cellular, Cellular { sim_state: "LOADED".into(), in_service: true, level: 3 });
+    assert!(status.cellular.sim_present());
+    assert_eq!(device_info::format_uptime(status.uptime_s.unwrap()), "3 d 3 h 52 m");
+}
+
+#[test]
+fn device_status_unset() {
+    let status = device_info::parse_status("---SEP---\n---SEP---\n---SEP---\nWifi is disabled\n---SEP---\nABSENT\n---SEP---\n---SEP---\n");
+    assert_eq!((status.memory, status.storage, status.battery, status.uptime_s), (None, None, None, None));
+    assert_eq!(status.wifi, Wifi::Off);
+    assert!(!status.cellular.sim_present());
+}
+
+#[test]
+fn device_sizes() {
+    assert_eq!(device_info::format_kb(114609152), "109.3 GB");
+    assert_eq!(device_info::format_kb(524288), "512 MB");
+    assert_eq!(device_info::marketed_storage_gb(114609152), Some(128));
+    assert_eq!(device_info::marketed_ram_gb(11849728), Some(12));
+    assert_eq!(device_info::marketed_ram_gb(0), None);
+    assert_eq!(device_info::format_frequency(3782000), "3.78 GHz");
+    assert_eq!(device_info::format_uptime(59), "0 m");
+}
+
+#[test]
+fn device_metrics() {
+    let first = device_info::parse_metrics("cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 50 0 50 400 0 0 0\ncpu1 50 0 50 400 0 0 0\nMemTotal: 1000 kB\nMemAvailable: 400 kB\n3.98 5.02 5.68 2/3733 6728\n  level: 22\n  temperature: 254\n");
+    assert_eq!(first.cpu, CpuTimes(alloc::vec![(200, 1000), (100, 500), (100, 500)]));
+    assert_eq!(first.memory.map(|m| m.used_kb()), Some(600));
+    assert_eq!(first.load.as_deref(), Some("3.98 5.02 5.68"));
+    assert_eq!((first.battery_level, first.temperature_dc), (Some(22), Some(254)));
+    let second = device_info::parse_metrics("cpu  150 0 150 900 0 0 0 0 0 0\ncpu0 100 0 100 400 0 0 0\ncpu1 50 0 50 500 0 0 0\n");
+    assert_eq!(device_info::cpu_usage(&first.cpu, &second.cpu), Some(alloc::vec![50, 100, 0]));
+    assert_eq!(device_info::cpu_usage(&CpuTimes::default(), &second.cpu), None);
 }
 
 #[test]

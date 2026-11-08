@@ -6,16 +6,25 @@
         "light": {
           "card_title": "#37474f",
           "card_icon": "#455a64",
-          "online": "#2e7d32"
+          "online": "#2e7d32",
+          "chart_background": "#f5f6f7",
+          "chart_memory": "#2e7d32",
+          "android": "#2e7d32",
+          "android_badge": "#e8f5e9"
         },
         "dark": {
           "card_title": "#cfd8dc",
           "card_icon": "#90a4ae",
-          "online": "#66bb6a"
+          "online": "#66bb6a",
+          "chart_background": "#22262b",
+          "chart_memory": "#66bb6a",
+          "android": "#66bb6a",
+          "android_badge": "#1f3324"
         }
       },
       "fonts": {
-        "caption": "caption_20"
+        "caption": "caption_20",
+        "body": "body_24"
       }
     }
   },
@@ -27,7 +36,17 @@
         "wght": 400
       },
       "glyph": [
-        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~…›•"
+        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~…›•°"
+      ]
+    },
+    "body_24": {
+      "size": 24,
+      "font": "@montserrat",
+      "variation": {
+        "wght": 400
+      },
+      "glyph": [
+        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~…›•°"
       ]
     },
     "hero_56": {
@@ -47,7 +66,11 @@
         "BATTERY": "icons/battery-3.svg",
         "LINK": "icons/link.svg",
         "HISTORY": "icons/history.svg",
-        "BATTERY_CHARGING": "icons/battery-charging.svg"
+        "BATTERY_CHARGING": "icons/battery-charging.svg",
+        "CPU": "icons/cpu.svg",
+        "MEMORY": "icons/stack-2.svg",
+        "STORAGE": "icons/database.svg",
+        "INFO": "icons/info-circle.svg"
       }
     },
     "icon_40": {
@@ -76,7 +99,8 @@
         "TOUCH": "icons/hand-finger.svg",
         "VOLUME_UP": "icons/volume.svg",
         "VOLUME_DOWN": "icons/volume-2.svg",
-        "HIDE": "icons/chevron-down.svg"
+        "HIDE": "icons/chevron-down.svg",
+        "ANDROID": "icons/brand-android.svg"
       }
     }
   }
