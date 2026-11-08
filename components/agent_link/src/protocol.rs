@@ -12,6 +12,7 @@ pub const HEADER_BYTES: usize = 8;
 
 pub const HELLO: u8 = 0x01;
 pub const SET_ROTATION: u8 = 0x10;
+pub const ADAPT_DISPLAY: u8 = 0x11;
 pub const REPLY: u8 = 0x40;
 
 pub const TOUCH: u8 = 0x60;
@@ -151,13 +152,15 @@ pub struct VideoStart {
     pub max_fps: u8,
     /// Horizontal bands a frame comes in; 0 and 1 for whole frames.
     pub strips: u8,
+    /// Covers the box and sends its middle, instead of fitting in it.
+    pub fill: bool,
 }
 
 impl VideoStart {
     pub fn encode(&self) -> [u8; 8] {
         let [w0, w1] = self.box_width.to_le_bytes();
         let [h0, h1] = self.box_height.to_le_bytes();
-        [w0, w1, h0, h1, u8::from(self.swap), self.quality, self.max_fps, self.strips]
+        [w0, w1, h0, h1, u8::from(self.swap) | u8::from(self.fill) << 1, self.quality, self.max_fps, self.strips]
     }
 }
 
@@ -194,6 +197,12 @@ impl Touch {
         }
         out
     }
+}
+
+pub fn adapt_display(width: u16, height: u16) -> [u8; 4] {
+    let [w0, w1] = width.to_le_bytes();
+    let [h0, h1] = height.to_le_bytes();
+    [w0, w1, h0, h1]
 }
 
 pub fn key(keycode: u16, down: bool) -> [u8; 4] {

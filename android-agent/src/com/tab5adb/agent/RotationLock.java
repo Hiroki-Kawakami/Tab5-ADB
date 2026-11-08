@@ -46,7 +46,7 @@ final class RotationLock {
         }
     }
 
-    private static Object windowManager() throws Exception {
+    static Object windowManager() throws Exception {
         Class<?> sm = Class.forName("android.os.ServiceManager");
         Object binder = sm.getMethod("getService", String.class).invoke(null, "window");
         Class<?> stub = Class.forName("android.view.IWindowManager$Stub");

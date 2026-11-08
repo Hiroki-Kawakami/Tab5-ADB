@@ -184,7 +184,7 @@ async fn video(this: &This<Preview>, spawner: &Spawner, link: Link, size: (u16, 
 }
 
 async fn receive(link: Link, (width, height): (u16, u16), tx: &Sender<Received>) -> Received {
-    let start = VideoStart { box_width: width, box_height: height, swap: false, quality: QUALITY, max_fps: MAX_FPS, strips: 1 };
+    let start = VideoStart { box_width: width, box_height: height, swap: false, quality: QUALITY, max_fps: MAX_FPS, strips: 1, fill: false };
     let mut video = match link.open_video(&start, OPEN_TIMEOUT).await {
         Ok(video) => video,
         Err(err) => {

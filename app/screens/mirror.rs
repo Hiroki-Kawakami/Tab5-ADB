@@ -7,7 +7,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ffi::CStr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use core::time::Duration;
 
 use agent_link::protocol::ROTATION_RELEASE;
@@ -15,7 +15,7 @@ use agent_link::{Frame, FrameHead, Jpeg, Link, Touch, VideoStart};
 use devkit::Lease;
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, State, Strips, TouchPoint, Ui, id};
+use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Handle, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, State, Strips, TouchPoint, Ui, id};
 use idf::executor::JoinHandle;
 use idf::cache::{self, Flags};
 use idf::heap::Caps;
@@ -35,6 +35,10 @@ const TAG: &CStr = c"mirror";
 const UI_STRIP_BYTES: usize = 128 * 1024;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const ROTATION_TIMEOUT: Duration = Duration::from_secs(2);
+const ADAPT_TIMEOUT: Duration = Duration::from_secs(3);
+/// How much of the box a fitted frame covers, in percent, for it to count as
+/// filling it.
+const FILLS_PERCENT: u32 = 98;
 const IDLE: Duration = Duration::from_millis(20);
 const STRIPS: u8 = 4;
 /// How long a frame being drawn waits for its next strip.
@@ -70,12 +74,41 @@ struct Shared {
     bar: AtomicBool,
     passthrough: AtomicBool,
     placed: Mutex<Option<Placed>>,
+    display: AtomicU8,
+    /// The box frames are sent for.
+    box_size: Mutex<(u16, u16)>,
     wake: Semaphore,
     strips: Mutex<VecDeque<Frame<Caps>>>,
     spare: Mutex<Vec<Spare>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DisplayMode {
+    Fit,
+    Fill,
+    Adapt,
+}
+
+impl DisplayMode {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Fill,
+            2 => Self::Adapt,
+            _ => Self::Fit,
+        }
+    }
+}
+
 impl Shared {
+    fn display(&self) -> DisplayMode {
+        DisplayMode::from_u8(self.display.load(Ordering::Acquire))
+    }
+
+    fn redraw_all(&self) {
+        *self.refresh.lock() = Some(Rect::new(0, 0, i16::MAX, i16::MAX));
+        self.wake.give();
+    }
+
     fn recycle(&self, strip: Frame<Caps>) {
         if let Jpeg::Copied(vec) = strip.jpeg {
             self.spare.lock().push(vec);
@@ -212,14 +245,14 @@ fn from_quarters(q: u8) -> Rotation {
 }
 
 impl Geometry {
-    fn of(frame: &ExternalFrame, mode: MirrorOrientation) -> Self {
+    fn of(frame: &ExternalFrame, mode: MirrorOrientation, fill: bool) -> Self {
         let area = frame.area;
         let (w, h) = (area.w as u16, area.h as u16);
         let start = match mode {
-            MirrorOrientation::Fit => VideoStart { box_width: w, box_height: h, swap: false, quality: 0, max_fps: 0, strips: STRIPS },
+            MirrorOrientation::Fit => VideoStart { box_width: w, box_height: h, swap: false, quality: 0, max_fps: 0, strips: STRIPS, fill },
             MirrorOrientation::Device | MirrorOrientation::Rotate => {
                 let (w, h) = if frame.rotation.swaps_axes() { (h, w) } else { (w, h) };
-                VideoStart { box_width: w, box_height: h, swap: true, quality: 0, max_fps: 0, strips: STRIPS }
+                VideoStart { box_width: w, box_height: h, swap: true, quality: 0, max_fps: 0, strips: STRIPS, fill }
             }
         };
         Self { start, area, ui: frame.rotation }
@@ -288,6 +321,9 @@ struct Player {
     stale: [Rect; MAX_FRAME_BUFFERS],
     seq: u32,
     stats: (Instant, u32, usize),
+    handle: Handle<MirrorMsg>,
+    /// Whether fitted frames fill the box, as last told to the screen.
+    fills: Option<bool>,
 }
 
 impl Player {
@@ -308,11 +344,12 @@ impl Player {
                 }
                 continue;
             };
-            let geometry = Geometry::of(&frame, self.mode);
+            let geometry = Geometry::of(&frame, self.mode, self.shared.display() == DisplayMode::Fill);
             let reopen = self.geometry.is_none_or(|g| g.start != geometry.start || g.device_rotation(self.mode) != geometry.device_rotation(self.mode));
             if self.geometry != Some(geometry) {
                 self.geometry = Some(geometry);
                 self.blacked = [None; MAX_FRAME_BUFFERS];
+                *self.shared.box_size.lock() = (geometry.start.box_width, geometry.start.box_height);
             }
             if reopen {
                 self.restart(geometry);
@@ -360,6 +397,7 @@ impl Player {
             *self.shared.placed.lock() = None;
             return Ok(None);
         };
+        self.check_fills(&geometry.start, head);
         let area = frame.area;
         let turn = geometry.turn(self.mode, head.rotation);
         let (w, h) = (head.width as i16, head.height as i16);
@@ -388,6 +426,18 @@ impl Player {
         }
         self.blacked[index] = Some(rect);
         Ok(Some((rect, turn, moved)))
+    }
+
+    fn check_fills(&mut self, start: &VideoStart, head: &FrameHead) {
+        if self.shared.display() != DisplayMode::Fit {
+            return;
+        }
+        let (bw, bh) = (u32::from(start.box_width), u32::from(start.box_height));
+        let (bw, bh) = if start.swap && head.rotation & 1 != 0 { (bh, bw) } else { (bw, bh) };
+        let fills = u32::from(head.width) * 100 >= bw * FILLS_PERCENT && u32::from(head.height) * 100 >= bh * FILLS_PERCENT;
+        if self.fills != Some(fills) && self.handle.post(MirrorMsg::Fills(fills)) {
+            self.fills = Some(fills);
+        }
     }
 
     fn render(&mut self, frame: &ExternalFrame, strip: &Frame<Caps>, (rect, turn): (Rect, Rotation), sram: &mut SharedSram) -> idf::Result<()> {
@@ -542,6 +592,8 @@ pub enum MirrorMsg {
     Reveal(Drag),
     Passthrough,
     Key(u16, bool),
+    DisplayMode,
+    Fills(bool),
 }
 
 fn key<const CODE: u16>(drag: Drag) -> MirrorMsg {
@@ -552,7 +604,7 @@ fn key<const CODE: u16>(drag: Drag) -> MirrorMsg {
 enum Action {
     Tap(MirrorMsg),
     Key(fn(Drag) -> MirrorMsg),
-    Nothing,
+    Disabled,
 }
 
 pub struct MirrorScreen {
@@ -567,6 +619,13 @@ pub struct MirrorScreen {
     passthrough: bool,
     /// Keys pressed, so that a held finger sends one press.
     keys: Vec<u16>,
+    display: DisplayMode,
+    /// An `adapt_display` is on its way.
+    adapting: bool,
+    /// The device keeps a resolution the user set, so Adapt is skipped.
+    adapt_refused: bool,
+    /// Fitted frames already fill the box, so the modes look the same.
+    fills: bool,
     swipe: Option<(i16, i16)>,
     /// The surface is in the view; screen moves cannot draw over it.
     live: bool,
@@ -588,6 +647,8 @@ impl MirrorScreen {
             bar: AtomicBool::new(true),
             passthrough: AtomicBool::new(true),
             placed: Mutex::new(None),
+            display: AtomicU8::new(DisplayMode::Fit as u8),
+            box_size: Mutex::new((0, 0)),
             wake: Semaphore::new(0, 1),
             strips: Mutex::new(VecDeque::new()),
             spare: Mutex::new(Vec::new()),
@@ -601,7 +662,7 @@ impl MirrorScreen {
         });
         let mut passthrough = Passthrough { link: link.clone(), shared: shared.clone(), entered: Vec::new(), last: None, failing: false };
         surface.set_on_touch(move |points, sampled_ms| passthrough.touched(points, sampled_ms));
-        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, keys: Vec::new(), swipe: None, live: false })
+        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, keys: Vec::new(), display: DisplayMode::Fit, adapting: false, adapt_refused: false, fills: false, swipe: None, live: false })
     }
 
     fn start(&mut self, cx: &mut Cx<Self>) {
@@ -616,7 +677,7 @@ impl MirrorScreen {
         self.switching = true;
     }
 
-    fn play(&mut self, mut sram: Sram) {
+    fn play(&mut self, mut sram: Sram, handle: Handle<MirrorMsg>) {
         self.shared.stop.store(false, Ordering::Release);
         let mut player = Player {
             surface: self.surface.clone(),
@@ -632,6 +693,8 @@ impl MirrorScreen {
             stale: [Rect::default(); MAX_FRAME_BUFFERS],
             seq: 0,
             stats: (Instant::now(), 0, 0),
+            handle,
+            fills: None,
         };
         let spawned = thread::Builder::new().name("mirror").stack_size(8192).priority(5).spawn(move || {
             player.run(&mut sram);
@@ -659,8 +722,66 @@ impl MirrorScreen {
     fn show_bar(&mut self, shown: bool) {
         self.bar = shown;
         self.shared.bar.store(shown, Ordering::Release);
-        *self.shared.refresh.lock() = Some(Rect::new(0, 0, i16::MAX, i16::MAX));
-        self.shared.wake.give();
+        self.shared.redraw_all();
+    }
+
+    fn set_display(&mut self, display: DisplayMode) {
+        if self.display == DisplayMode::Adapt && display != DisplayMode::Adapt {
+            self.release_display();
+        }
+        self.display = display;
+        self.shared.display.store(display as u8, Ordering::Release);
+        self.shared.redraw_all();
+    }
+
+    fn next_display(&mut self, cx: &mut Cx<Self>) {
+        if self.adapting {
+            return;
+        }
+        match self.display {
+            DisplayMode::Fit => self.set_display(DisplayMode::Fill),
+            DisplayMode::Fill if self.adapt_refused => self.set_display(DisplayMode::Fit),
+            DisplayMode::Fill => {
+                let (w, h) = *self.shared.box_size.lock();
+                let link = self.link.clone();
+                self.adapting = true;
+                cx.spawn(move |this| async move {
+                    let result = link.adapt_display(w, h, ADAPT_TIMEOUT).await;
+                    this.with(|s, cx| s.adapted(result, cx));
+                });
+            }
+            DisplayMode::Adapt => self.set_display(DisplayMode::Fit),
+        }
+    }
+
+    fn adapted(&mut self, result: agent_link::Result<()>, cx: &mut Cx<Self>) {
+        self.adapting = false;
+        if !self.live {
+            return;
+        }
+        match result {
+            Ok(()) => self.set_display(DisplayMode::Adapt),
+            Err(agent_link::Error::Status(agent_link::protocol::ESTATE)) => {
+                info!(TAG, "the device keeps a resolution the user set; no Adapt");
+                self.adapt_refused = true;
+                self.set_display(DisplayMode::Fit);
+            }
+            Err(err) => {
+                error!(TAG, "adapt display: {err}");
+                self.set_display(DisplayMode::Fit);
+            }
+        }
+        cx.rebuild();
+    }
+
+    fn release_display(&self) {
+        let Some(spawner) = adb_link::spawner() else { return };
+        let link = self.link.clone();
+        drop(spawner.spawn(async move {
+            if let Err(err) = link.adapt_display(0, 0, ADAPT_TIMEOUT).await {
+                error!(TAG, "release display: {err}");
+            }
+        }));
     }
 
     /// `true` when the view changed.
@@ -696,6 +817,9 @@ impl Drop for MirrorScreen {
         if self.stop().is_some() {
             self.release_rotation();
         }
+        if self.display == DisplayMode::Adapt || self.adapting {
+            self.release_display();
+        }
     }
 }
 
@@ -718,7 +842,7 @@ impl Component for MirrorScreen {
                 if self.leaving {
                     self.restore(sram, cx);
                 } else {
-                    self.play(sram);
+                    self.play(sram, cx.handle());
                 }
             }
             MirrorMsg::Restored => drop(cx.take_strips()),
@@ -745,6 +869,13 @@ impl Component for MirrorScreen {
                     error!(TAG, "key {code}: {err}");
                 }
             }
+            MirrorMsg::DisplayMode => self.next_display(cx),
+            MirrorMsg::Fills(fills) => {
+                if self.fills != fills {
+                    self.fills = fills;
+                    cx.rebuild();
+                }
+            }
             MirrorMsg::Passthrough => {
                 self.passthrough = !self.passthrough;
                 self.shared.passthrough.store(self.passthrough, Ordering::Release);
@@ -764,19 +895,22 @@ impl Component for MirrorScreen {
             let (w, h) = ui.screen_size();
             let reach = BAR_MARGIN + BAR_THICKNESS;
             let presence = if w < h { Presence::from_edge(Edge::Left).offset(0, reach) } else { Presence::from_edge(Edge::Bottom).offset(-reach, 0) };
-            let bar = control_bar(ui, w < h, self.passthrough).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN));
+            let display = !(self.fills && self.display == DisplayMode::Fit);
+            let bar = control_bar(ui, w < h, self.passthrough, display).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN));
             children.push(if self.live { bar.appear(presence) } else { bar }.id(id!("controls")));
         }
         ui.column(children).background(BLACK)
     }
 }
 
-fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool, passthrough: bool) -> Element<'a, MirrorMsg> {
+fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool, passthrough: bool, display: bool) -> Element<'a, MirrorMsg> {
+    let display = if display { Action::Tap(MirrorMsg::DisplayMode) } else { Action::Disabled };
+    let last = [(icons::TOUCH, Action::Tap(MirrorMsg::Passthrough)), (icons::DISPLAY_MODE, display), (icons::CLOSE, Action::Tap(MirrorMsg::Back))];
     let mut groups: [&[(char, Action)]; 4] = [
         &[(icons::HIDE, Action::Tap(MirrorMsg::Hide))],
         &[(icons::NAV_BACK, Action::Key(key::<{ keycode::BACK }>)), (icons::NAV_HOME, Action::Key(key::<{ keycode::HOME }>)), (icons::NAV_RECENTS, Action::Key(key::<{ keycode::APP_SWITCH }>))],
         &[(icons::VOLUME_DOWN, Action::Key(key::<{ keycode::VOLUME_DOWN }>)), (icons::VOLUME_UP, Action::Key(key::<{ keycode::VOLUME_UP }>)), (icons::POWER, Action::Key(key::<{ keycode::POWER }>))],
-        &[(icons::TOUCH, Action::Tap(MirrorMsg::Passthrough)), (icons::DISPLAY_MODE, Action::Nothing), (icons::CLOSE, Action::Tap(MirrorMsg::Back))],
+        &last,
     ];
     if vertical {
         groups.reverse();
@@ -801,6 +935,7 @@ fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, action: Action, passthrou
     let color = match action {
         Action::Tap(MirrorMsg::Back) => colors::DESTRUCTIVE,
         Action::Tap(MirrorMsg::Passthrough) if passthrough => ColorRole::Primary,
+        Action::Disabled => colors::MUTED,
         _ => ColorRole::Text,
     };
     let key = ui
@@ -813,7 +948,7 @@ fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, action: Action, passthrou
     match action {
         Action::Tap(msg) => key.on_tap(msg),
         Action::Key(on_drag) => key.on_drag(on_drag),
-        Action::Nothing => key,
+        Action::Disabled => key,
     }
 }
 
@@ -842,6 +977,10 @@ impl Screen for MirrorScreen {
             self.leaving = true;
             return;
         }
+        if self.adapting {
+            self.release_display();
+        }
+        self.set_display(DisplayMode::Fit);
         if let Some(sram) = self.stop() {
             self.release_rotation();
             self.restore(sram, cx);

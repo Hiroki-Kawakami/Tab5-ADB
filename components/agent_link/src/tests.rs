@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, REPLY, Touch, TouchPoint, VideoStart, key, message, reply};
+use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, REPLY, Touch, TouchPoint, VideoStart, adapt_display, key, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -59,8 +59,9 @@ fn services() {
 
 #[test]
 fn video_start_bytes() {
-    let start = VideoStart { box_width: 720, box_height: 1280, swap: true, quality: 60, max_fps: 30, strips: 4 };
+    let start = VideoStart { box_width: 720, box_height: 1280, swap: true, quality: 60, max_fps: 30, strips: 4, fill: false };
     assert_eq!(start.encode(), [0xd0, 0x02, 0x00, 0x05, 1, 60, 30, 4]);
+    assert_eq!(VideoStart { swap: false, fill: true, ..start }.encode()[4], 2);
 }
 
 #[test]
@@ -80,4 +81,10 @@ fn touch_bytes() {
 fn key_bytes() {
     assert_eq!(key(187, true), [187, 0, 0, 0]);
     assert_eq!(key(0x0123, false), [0x23, 0x01, 1, 0]);
+}
+
+#[test]
+fn adapt_display_bytes() {
+    assert_eq!(adapt_display(720, 1280), [0xd0, 0x02, 0x00, 0x05]);
+    assert_eq!(adapt_display(0, 0), [0; 4]);
 }

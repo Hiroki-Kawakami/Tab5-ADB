@@ -14,7 +14,7 @@ use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
-use crate::protocol::{self, Channel, HEADER_BYTES, HELLO, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
+use crate::protocol::{self, Channel, HEADER_BYTES, ADAPT_DISPLAY, HELLO, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::video::Video;
 use crate::{Error, Result};
 
@@ -307,6 +307,12 @@ impl Link {
     /// `protocol::ROTATION_RELEASE`.
     pub async fn set_rotation(&self, rotation: u8, timeout: Duration) -> Result<()> {
         self.request(SET_ROTATION, &[rotation, 0, 0, 0], timeout).await.map(drop)
+    }
+
+    /// Gives the device a resolution of `width`:`height`, or its own back
+    /// with 0×0. `Error::Status(ESTATE)` when the user set one already.
+    pub async fn adapt_display(&self, width: u16, height: u16, timeout: Duration) -> Result<()> {
+        self.request(ADAPT_DISPLAY, &protocol::adapt_display(width, height), timeout).await.map(drop)
     }
 
     pub fn is_closed(&self) -> bool {

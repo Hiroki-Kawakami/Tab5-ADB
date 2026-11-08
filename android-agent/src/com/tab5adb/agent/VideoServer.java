@@ -30,6 +30,7 @@ final class VideoServer {
     private static final int EINVAL = 0x01;
     private static final int CODEC_JPEG = 1;
     private static final int FLAG_SWAP = 0x01;
+    private static final int FLAG_FILL = 0x02;
     private static final int DEFAULT_QUALITY = 80;
     private static final int MIN_QUALITY = 10;
     private static final int QUALITY_STEP = 15;
@@ -42,12 +43,21 @@ final class VideoServer {
         final int width;
         final int height;
         final int rotation;
+        // Where the frame lies in the captured picture of captureWidth x captureHeight.
+        final int cropX;
+        final int cropY;
+        final int captureWidth;
+        final int captureHeight;
         final int logicalWidth;
         final int logicalHeight;
 
-        Sent(int width, int height, int rotation, Point logical) {
-            this.width = width;
-            this.height = height;
+        Sent(int[] shape, int rotation, Point logical) {
+            this.width = shape[0];
+            this.height = shape[1];
+            this.captureWidth = shape[2];
+            this.captureHeight = shape[3];
+            this.cropX = shape[4];
+            this.cropY = shape[5];
             this.rotation = rotation;
             this.logicalWidth = logical.x;
             this.logicalHeight = logical.y;
@@ -152,6 +162,7 @@ final class VideoServer {
             int boxW = p.getShort(0) & 0xFFFF;
             int boxH = p.getShort(2) & 0xFFFF;
             boolean swap = (payload[4] & FLAG_SWAP) != 0;
+            boolean fill = (payload[4] & FLAG_FILL) != 0;
             int quality = payload[5] & 0xFF;
             int maxFps = payload[6] & 0xFF;
             int strips = Math.max(1, payload[7] & 0xFF);
@@ -161,9 +172,9 @@ final class VideoServer {
             }
             quality = quality == 0 ? DEFAULT_QUALITY : Math.min(quality, 100);
             reply(out, OK);
-            System.out.println("video: box " + boxW + "x" + boxH + (swap ? " swap" : "") + " q" + quality + " fps " + maxFps + " strips " + strips);
+            System.out.println("video: box " + boxW + "x" + boxH + (swap ? " swap" : "") + (fill ? " fill" : "") + " q" + quality + " fps " + maxFps + " strips " + strips);
             watchClose(in);
-            stream(out, boxW, boxH, swap, quality, maxFps, strips);
+            stream(out, boxW, boxH, swap, fill, quality, maxFps, strips);
         }
 
         private void watchClose(InputStream in) {
@@ -179,12 +190,13 @@ final class VideoServer {
             thread.start();
         }
 
-        private void stream(OutputStream out, int boxW, int boxH, boolean swap, int quality, int maxFps, int strips) throws Exception {
+        private void stream(OutputStream out, int boxW, int boxH, boolean swap, boolean fill, int quality, int maxFps, int strips) throws Exception {
             long frameNs = maxFps > 0 ? 1_000_000_000L / maxFps : 0;
             int max = Server.videoMaxMessage();
             ScreenCapture capture = null;
             int rotation = -1;
             Point logical = null;
+            int[] shape = null;
             int frames = 0;
             try {
                 while (!stopped) {
@@ -198,15 +210,20 @@ final class VideoServer {
                         rotation = now;
                         logical = size;
                         boolean turned = swap && (rotation & 1) != 0;
-                        int[] fit = fit(size.x, size.y, turned ? boxH : boxW, turned ? boxW : boxH);
-                        capture = new ScreenCapture(fit[0], fit[1], size.x, size.y);
-                        sent = new Sent(fit[0], fit[1], rotation, size);
-                        System.out.println("video: " + fit[0] + "x" + fit[1] + " rotation " + rotation);
+                        shape = shape(size.x, size.y, turned ? boxH : boxW, turned ? boxW : boxH, fill);
+                        capture = new ScreenCapture(shape[2], shape[3], size.x, size.y);
+                        sent = new Sent(shape, rotation, size);
+                        System.out.println("video: " + shape[0] + "x" + shape[1] + " of " + shape[2] + "x" + shape[3] + " rotation " + rotation);
                     }
                     Bitmap bitmap = capture.acquire();
                     if (bitmap == null) {
                         Thread.sleep(IDLE_MS);
                         continue;
+                    }
+                    if (shape[0] != shape[2] || shape[1] != shape[3]) {
+                        Bitmap cropped = Bitmap.createBitmap(bitmap, shape[4], shape[5], shape[0], shape[1]);
+                        bitmap.recycle();
+                        bitmap = cropped;
                     }
                     try {
                         sendFrame(out, bitmap, rotation, quality, max, strips);
@@ -231,11 +248,21 @@ final class VideoServer {
         }
     }
 
-    static int[] fit(int srcW, int srcH, int boxW, int boxH) {
-        double s = Math.min((double) boxW / srcW, (double) boxH / srcH);
-        int w = Math.max(4, Math.min(boxW, (int) (srcW * s)) & ~3);
-        int h = Math.max(4, Math.min(boxH, (int) (srcH * s)) & ~3);
-        return new int[]{w, h};
+    // {frame w, h, capture w, h, crop x, y}: fitted in the box, or covering it
+    // and cropped to it.
+    static int[] shape(int srcW, int srcH, int boxW, int boxH, boolean fill) {
+        if (!fill) {
+            double s = Math.min((double) boxW / srcW, (double) boxH / srcH);
+            int w = Math.max(4, Math.min(boxW, (int) (srcW * s)) & ~3);
+            int h = Math.max(4, Math.min(boxH, (int) (srcH * s)) & ~3);
+            return new int[]{w, h, w, h, 0, 0};
+        }
+        int w = Math.max(4, boxW & ~3);
+        int h = Math.max(4, boxH & ~3);
+        double s = Math.max((double) w / srcW, (double) h / srcH);
+        int cw = Math.max(w, (int) Math.ceil(srcW * s));
+        int ch = Math.max(h, (int) Math.ceil(srcH * s));
+        return new int[]{w, h, cw, ch, (cw - w) / 2, (ch - h) / 2};
     }
 
     private static void sendFrame(OutputStream out, Bitmap frame, int rotation, int quality, int max, int strips) throws IOException {

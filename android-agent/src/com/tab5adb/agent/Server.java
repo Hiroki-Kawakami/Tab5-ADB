@@ -27,6 +27,7 @@ public final class Server {
 
     private static final int HELLO = 0x01;
     private static final int SET_ROTATION = 0x10;
+    private static final int ADAPT_DISPLAY = 0x11;
     private static final int REQUEST_LAST = 0x3F;
     private static final int REPLY = 0x40;
     private static final int TOUCH = 0x60;
@@ -40,6 +41,7 @@ public final class Server {
     private static final int OK = 0x00;
     private static final int EINVAL = 0x01;
     private static final int ENOTSUP = 0x02;
+    private static final int ESTATE = 0x04;
     private static final int EFAIL = 0xFF;
 
     private static final int CAP_VIDEO = 1 << 0;
@@ -88,7 +90,10 @@ public final class Server {
         });
         watchdog.setDaemon(true);
         watchdog.start();
-        Runtime.getRuntime().addShutdownHook(new Thread(RotationLock::release));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            RotationLock.release();
+            DisplaySize.release();
+        }));
         System.out.println("listening");
         System.out.flush();
         Server server = null;
@@ -151,6 +156,8 @@ public final class Server {
                 onHello(id, payload);
             } else if (kind == SET_ROTATION) {
                 onSetRotation(id, payload);
+            } else if (kind == ADAPT_DISPLAY) {
+                onAdaptDisplay(id, payload);
             } else if (kind == TOUCH) {
                 onTouch(payload);
             } else if (kind == KEY) {
@@ -205,6 +212,31 @@ public final class Server {
         }
     }
 
+    private void onAdaptDisplay(int id, byte[] payload) throws IOException {
+        if (payload.length < 4) {
+            reply(id, EINVAL, new byte[0]);
+            return;
+        }
+        ByteBuffer p = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+        int width = p.getShort(0) & 0xFFFF;
+        int height = p.getShort(2) & 0xFFFF;
+        if (width == 0 && height == 0) {
+            DisplaySize.release();
+            reply(id, OK, new byte[0]);
+            return;
+        }
+        if (width == 0 || height == 0) {
+            reply(id, EINVAL, new byte[0]);
+            return;
+        }
+        try {
+            reply(id, DisplaySize.adapt(width, height) ? OK : ESTATE, new byte[0]);
+        } catch (Throwable t) {
+            System.out.println("adapt display: " + t);
+            reply(id, EFAIL, new byte[0]);
+        }
+    }
+
     private void onTouch(byte[] payload) {
         if (payload.length < TOUCH_HEAD) {
             return;
@@ -222,13 +254,13 @@ public final class Server {
             input.cancel();
             return;
         }
-        float sx = (float) sent.logicalWidth / width;
-        float sy = (float) sent.logicalHeight / height;
+        float sx = (float) sent.logicalWidth / sent.captureWidth;
+        float sy = (float) sent.logicalHeight / sent.captureHeight;
         for (int i = 0; i < n; i++) {
             int at = TOUCH_HEAD + i * TOUCH_POINT;
             touchIds[i] = payload[at] & 0xFF;
-            touchXs[i] = (p.getShort(at + 2) & 0xFFFF) * sx;
-            touchYs[i] = (p.getShort(at + 4) & 0xFFFF) * sy;
+            touchXs[i] = ((p.getShort(at + 2) & 0xFFFF) + sent.cropX) * sx;
+            touchYs[i] = ((p.getShort(at + 4) & 0xFFFF) + sent.cropY) * sy;
         }
         input.touch(p.getInt(0) & 0xFFFFFFFFL, n, touchIds, touchXs, touchYs);
     }
