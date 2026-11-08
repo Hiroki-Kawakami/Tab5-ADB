@@ -14,6 +14,8 @@ pub const HELLO: u8 = 0x01;
 pub const SET_ROTATION: u8 = 0x10;
 pub const REPLY: u8 = 0x40;
 
+pub const TOUCH: u8 = 0x60;
+
 pub const VIDEO_START: u8 = 0x01;
 pub const FRAME: u8 = 0x41;
 
@@ -35,6 +37,7 @@ pub const REPLY_HEAD: usize = 4;
 const HELLO_BYTES: usize = 20;
 const HELLO_REPLY_BYTES: usize = 16;
 pub const FRAME_HEAD: usize = 12;
+pub const MAX_TOUCHES: usize = 10;
 const FLAG_LAST: u8 = 0x01;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,6 +156,41 @@ impl VideoStart {
         let [w0, w1] = self.box_width.to_le_bytes();
         let [h0, h1] = self.box_height.to_le_bytes();
         [w0, w1, h0, h1, u8::from(self.swap), self.quality, self.max_fps, self.strips]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TouchPoint {
+    pub id: u8,
+    /// Pixels of the frame.
+    pub x: u16,
+    pub y: u16,
+}
+
+/// Every finger on the device's screen, against the frame it was placed on.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Touch {
+    pub time_ms: u32,
+    pub width: u16,
+    pub height: u16,
+    pub rotation: u8,
+    /// At most `MAX_TOUCHES`, each id once.
+    pub points: Vec<TouchPoint>,
+}
+
+impl Touch {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(12 + 6 * self.points.len());
+        out.extend_from_slice(&self.time_ms.to_le_bytes());
+        out.extend_from_slice(&self.width.to_le_bytes());
+        out.extend_from_slice(&self.height.to_le_bytes());
+        out.extend_from_slice(&[self.rotation, self.points.len() as u8, 0, 0]);
+        for p in &self.points {
+            out.extend_from_slice(&[p.id, 0]);
+            out.extend_from_slice(&p.x.to_le_bytes());
+            out.extend_from_slice(&p.y.to_le_bytes());
+        }
+        out
     }
 }
 

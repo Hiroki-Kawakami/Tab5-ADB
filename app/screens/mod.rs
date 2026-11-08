@@ -7,7 +7,7 @@ mod adb_dashboard;
 mod connecting;
 mod home;
 mod message;
-mod mirror;
+pub(crate) mod mirror;
 mod settings;
 
 pub use home::{HomeScreen, adb_command};

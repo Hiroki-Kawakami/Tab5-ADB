@@ -29,6 +29,10 @@ public final class Server {
     private static final int SET_ROTATION = 0x10;
     private static final int REQUEST_LAST = 0x3F;
     private static final int REPLY = 0x40;
+    private static final int TOUCH = 0x60;
+    private static final int TOUCH_HEAD = 12;
+    private static final int TOUCH_POINT = 6;
+    private static final int MAX_POINTERS = 10;
 
     private static final int OK = 0x00;
     private static final int EINVAL = 0x01;
@@ -44,6 +48,11 @@ public final class Server {
 
     private final OutputStream out;
     private boolean hello;
+    private Input input;
+    private boolean inputFailed;
+    private final int[] touchIds = new int[MAX_POINTERS];
+    private final float[] touchXs = new float[MAX_POINTERS];
+    private final float[] touchYs = new float[MAX_POINTERS];
 
     private Server(OutputStream out) {
         this.out = out;
@@ -134,6 +143,8 @@ public final class Server {
                 onHello(id, payload);
             } else if (kind == SET_ROTATION) {
                 onSetRotation(id, payload);
+            } else if (kind == TOUCH) {
+                onTouch(payload);
             } else if (kind <= REQUEST_LAST) {
                 reply(id, ENOTSUP, new byte[0]);
             }
@@ -178,6 +189,45 @@ public final class Server {
             System.out.println("rotation: " + t);
             reply(id, EFAIL, new byte[0]);
         }
+    }
+
+    private void onTouch(byte[] payload) {
+        if (payload.length < TOUCH_HEAD) {
+            return;
+        }
+        ByteBuffer p = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+        int n = Math.min(payload[9] & 0xFF, MAX_POINTERS);
+        if (payload.length < TOUCH_HEAD + n * TOUCH_POINT) {
+            return;
+        }
+        if (input == null && !inputFailed) {
+            try {
+                input = Input.create();
+            } catch (Throwable t) {
+                inputFailed = true;
+                System.out.println("input: " + t);
+            }
+        }
+        if (input == null) {
+            return;
+        }
+        int width = p.getShort(4) & 0xFFFF;
+        int height = p.getShort(6) & 0xFFFF;
+        int rotation = payload[8] & 0xFF;
+        VideoServer.Sent sent = VideoServer.sent();
+        if (sent == null || sent.width != width || sent.height != height || sent.rotation != rotation) {
+            input.cancel();
+            return;
+        }
+        float sx = (float) sent.logicalWidth / width;
+        float sy = (float) sent.logicalHeight / height;
+        for (int i = 0; i < n; i++) {
+            int at = TOUCH_HEAD + i * TOUCH_POINT;
+            touchIds[i] = payload[at] & 0xFF;
+            touchXs[i] = (p.getShort(at + 2) & 0xFFFF) * sx;
+            touchYs[i] = (p.getShort(at + 4) & 0xFFFF) * sy;
+        }
+        input.touch(p.getInt(0) & 0xFFFFFFFFL, n, touchIds, touchXs, touchYs);
     }
 
     private void reply(int id, int status, byte[] result) throws IOException {

@@ -14,7 +14,7 @@ use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
-use crate::protocol::{self, Channel, HEADER_BYTES, HELLO, Header, Hello, HelloReply, OK, PROTO_VERSION, REPLY, SET_ROTATION, VideoStart};
+use crate::protocol::{self, Channel, HEADER_BYTES, HELLO, Header, Hello, HelloReply, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::video::Video;
 use crate::{Error, Result};
 
@@ -278,6 +278,10 @@ impl Link {
     /// Queues an input message; it goes out with whatever else is queued.
     pub fn input(&self, kind: u8, payload: &[u8]) -> Result<()> {
         self.shared.queue(kind, 0, payload)
+    }
+
+    pub fn touch(&self, touch: &Touch) -> Result<()> {
+        self.input(TOUCH, &touch.encode())
     }
 
     /// A video stream sending as `start` asks; one at a time, so opening

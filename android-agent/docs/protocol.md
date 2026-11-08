@@ -135,7 +135,7 @@ REPLY result
 
 | bit | 名前 | 機能 |
 |---|---|---|
-| 0 | `VIDEO` | 映像ストリームと `SET_ROTATION` |
+| 0 | `VIDEO` | 映像ストリーム、`SET_ROTATION`、`TOUCH` |
 
 ### SET_ROTATION
 
@@ -158,6 +158,43 @@ REPLY result
 `rotation` は Android の `Surface.ROTATION_*` と同じ値で、端末の自然な向きに対して描画内容が
 時計回りに `rotation × 90°` 回っていることを表す。端末を反時計回りに 90° 傾けて横長に
 使っている状態が 1。
+
+### 入力一覧
+
+| type | 名前 | 内容 |
+|---|---|---|
+| `0x60` | `TOUCH` | 映像に触れている指 |
+
+### TOUCH
+
+```
+TOUCH
+  u32 time_ms            Tab5 が指を採取した時刻 [ms]。単調増加の下位 32 bit
+  u16 width              座標の基準にしたフレームの幅と高さ [px]
+  u16 height
+  u8  rotation           そのフレームの rotation
+  u8  count              0..10
+  u16 reserved
+  count × {
+    u8  id               指の識別子。メッセージの中で一意
+    u8  reserved
+    u16 x                フレームの画素座標
+    u16 y
+  }
+```
+
+- その時点で端末へ渡す指をすべて載せる。DOWN・MOVE・UP には分けない。前のメッセージに
+  無かった `id` は触れた指、両方にある `id` は動いた指、前にあって今回無い `id` は離れた指。
+  `count` = 0 はすべての指が離れたことを表す。
+- 座標は Tab5 が回転・配置を戻した、フレームの画素座標。agent はフレームの大きさと端末の
+  論理解像度の比で端末の座標にする。
+- `width`・`height`・`rotation` が agent が今送っているフレームと異なるメッセージは、
+  agent は捨てる。注入中の指があれば取り消す（`ACTION_CANCEL`）。
+- Tab5 はフレームの外で触れた指を、フレームに入るまで載せない。入った最初の位置で触れた
+  ことになる。フレームの中で触れた指が外へ出たら、座標をフレームの縁に寄せて載せ続ける。
+- agent はジェスチャーの最初のメッセージの `time_ms` を `SystemClock.uptimeMillis()` に
+  対応付け、以降はその差を `MotionEvent` の時刻にする。
+- 前と同じ内容のメッセージは Tab5 は送らない。
 
 ## 映像・音声ストリーム
 

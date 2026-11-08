@@ -36,8 +36,29 @@ final class VideoServer {
     private static final long IDLE_MS = 5;
 
     private static Session current;
+    private static volatile Sent sent;
+
+    static final class Sent {
+        final int width;
+        final int height;
+        final int rotation;
+        final int logicalWidth;
+        final int logicalHeight;
+
+        Sent(int width, int height, int rotation, Point logical) {
+            this.width = width;
+            this.height = height;
+            this.rotation = rotation;
+            this.logicalWidth = logical.x;
+            this.logicalHeight = logical.y;
+        }
+    }
 
     private VideoServer() {
+    }
+
+    static Sent sent() {
+        return sent;
     }
 
     static void listen(LocalServerSocket server) {
@@ -179,6 +200,7 @@ final class VideoServer {
                         boolean turned = swap && (rotation & 1) != 0;
                         int[] fit = fit(size.x, size.y, turned ? boxH : boxW, turned ? boxW : boxH);
                         capture = new ScreenCapture(fit[0], fit[1], size.x, size.y);
+                        sent = new Sent(fit[0], fit[1], rotation, size);
                         System.out.println("video: " + fit[0] + "x" + fit[1] + " rotation " + rotation);
                     }
                     Bitmap bitmap = capture.acquire();
@@ -200,6 +222,7 @@ final class VideoServer {
                     }
                 }
             } finally {
+                sent = null;
                 if (capture != null) {
                     capture.close();
                 }

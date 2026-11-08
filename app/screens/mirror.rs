@@ -11,11 +11,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
 use agent_link::protocol::ROTATION_RELEASE;
-use agent_link::{Frame, FrameHead, Jpeg, Link, VideoStart};
+use agent_link::{Frame, FrameHead, Jpeg, Link, Touch, VideoStart};
 use devkit::Lease;
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, State, Strips, Ui, id};
+use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, State, Strips, TouchPoint, Ui, id};
 use idf::executor::JoinHandle;
 use idf::cache::{self, Flags};
 use idf::heap::Caps;
@@ -58,6 +58,8 @@ struct Shared {
     stop: AtomicBool,
     refresh: Mutex<Option<Rect>>,
     bar: AtomicBool,
+    passthrough: AtomicBool,
+    placed: Mutex<Option<Placed>>,
     wake: Semaphore,
     strips: Mutex<VecDeque<Frame<Caps>>>,
     spare: Mutex<Vec<Spare>>,
@@ -94,6 +96,83 @@ impl Shared {
         drop(strips);
         dropped.into_iter().for_each(|s| self.recycle(s));
         first
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Placed {
+    pub(crate) rect: Rect,
+    pub(crate) turn: Rotation,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) rotation: u8,
+}
+
+impl Placed {
+    /// The frame's pixel under `(x, y)`, which may lie outside the frame.
+    pub(crate) fn to_frame(&self, x: i16, y: i16) -> (i32, i32) {
+        let (sx, sy) = (i32::from(x) - i32::from(self.rect.x), i32::from(y) - i32::from(self.rect.y));
+        let (w, h) = (i32::from(self.width), i32::from(self.height));
+        match self.turn {
+            Rotation::R0 => (sx, sy),
+            Rotation::R90 => (w - 1 - sy, sx),
+            Rotation::R180 => (w - 1 - sx, h - 1 - sy),
+            Rotation::R270 => (sy, h - 1 - sx),
+        }
+    }
+
+    fn contains(&self, (fx, fy): (i32, i32)) -> bool {
+        (0..i32::from(self.width)).contains(&fx) && (0..i32::from(self.height)).contains(&fy)
+    }
+
+    fn clamp(&self, (fx, fy): (i32, i32)) -> (u16, u16) {
+        (fx.clamp(0, i32::from(self.width) - 1) as u16, fy.clamp(0, i32::from(self.height) - 1) as u16)
+    }
+}
+
+struct Passthrough {
+    link: Link,
+    shared: Arc<Shared>,
+    /// Fingers that reached the frame; the others wait until they do.
+    entered: Vec<u8>,
+    last: Option<Touch>,
+    failing: bool,
+}
+
+impl Passthrough {
+    fn touched(&mut self, points: &[TouchPoint], sampled_ms: u32) {
+        let placed = *self.shared.placed.lock();
+        let placed = placed.filter(|_| self.shared.passthrough.load(Ordering::Acquire));
+        let mut touch = Touch { time_ms: sampled_ms, ..Touch::default() };
+        let mut entered = Vec::new();
+        if let Some(placed) = placed {
+            (touch.width, touch.height, touch.rotation) = (placed.width, placed.height, placed.rotation);
+            for p in points.iter().take(agent_link::protocol::MAX_TOUCHES) {
+                let at = placed.to_frame(p.x, p.y);
+                if self.entered.contains(&p.id) || placed.contains(at) {
+                    let (x, y) = placed.clamp(at);
+                    touch.points.push(agent_link::TouchPoint { id: p.id, x, y });
+                    entered.push(p.id);
+                }
+            }
+        }
+        self.entered = entered;
+        let same = match &self.last {
+            Some(last) => (last.width, last.height, last.rotation, &last.points) == (touch.width, touch.height, touch.rotation, &touch.points),
+            None => touch.points.is_empty(),
+        };
+        if same {
+            return;
+        }
+        match self.link.touch(&touch) {
+            Ok(()) => self.failing = false,
+            Err(err) => {
+                if !core::mem::replace(&mut self.failing, true) {
+                    error!(TAG, "touch: {err}");
+                }
+            }
+        }
+        self.last = (!touch.points.is_empty()).then_some(touch);
     }
 }
 
@@ -267,7 +346,10 @@ impl Player {
     /// this geometry: a frame sent for the box before the screen turned may
     /// not fit.
     fn place(&mut self, frame: &ExternalFrame, head: &FrameHead) -> idf::Result<Option<(Rect, Rotation, bool)>> {
-        let Some(geometry) = self.geometry else { return Ok(None) };
+        let Some(geometry) = self.geometry else {
+            *self.shared.placed.lock() = None;
+            return Ok(None);
+        };
         let area = frame.area;
         let turn = geometry.turn(self.mode, head.rotation);
         let (w, h) = (head.width as i16, head.height as i16);
@@ -282,8 +364,10 @@ impl Player {
         }
         let rect = Rect::new(x, y, w, h);
         if !area.contains(&rect) {
+            *self.shared.placed.lock() = None;
             return Ok(None);
         }
+        *self.shared.placed.lock() = Some(Placed { rect, turn, width: head.width, height: head.height, rotation: head.rotation });
         let index = buffer(frame);
         let moved = self.blacked[index] != Some(rect);
         let stale = if moved { area } else { self.stale[index] };
@@ -401,7 +485,7 @@ fn buffer(frame: &ExternalFrame) -> usize {
 }
 
 /// Where `head`'s rows land in a frame placed at `rect`, turned by `turn`.
-fn strip_rect(head: &FrameHead, rect: Rect, turn: Rotation) -> Rect {
+pub(crate) fn strip_rect(head: &FrameHead, rect: Rect, turn: Rotation) -> Rect {
     let trims = [0, head.y as i16, 0, head.height as i16 - head.y as i16 - head.rows as i16];
     let k = usize::from(quarters(turn));
     let (w, h) = (head.width as i16, head.rows as i16);
@@ -446,6 +530,7 @@ pub enum MirrorMsg {
     Restored,
     Hide,
     Reveal(Drag),
+    Passthrough,
 }
 
 pub struct MirrorScreen {
@@ -457,6 +542,7 @@ pub struct MirrorScreen {
     switching: bool,
     leaving: bool,
     bar: bool,
+    passthrough: bool,
     swipe: Option<(i16, i16)>,
     /// The surface is in the view; screen moves cannot draw over it.
     live: bool,
@@ -476,6 +562,8 @@ impl MirrorScreen {
             stop: AtomicBool::new(false),
             refresh: Mutex::new(None),
             bar: AtomicBool::new(true),
+            passthrough: AtomicBool::new(true),
+            placed: Mutex::new(None),
             wake: Semaphore::new(0, 1),
             strips: Mutex::new(VecDeque::new()),
             spare: Mutex::new(Vec::new()),
@@ -487,7 +575,9 @@ impl MirrorScreen {
             drop(pending);
             refresh.wake.give();
         });
-        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, swipe: None, live: false })
+        let mut passthrough = Passthrough { link: link.clone(), shared: shared.clone(), entered: Vec::new(), last: None, failing: false };
+        surface.set_on_touch(move |points, sampled_ms| passthrough.touched(points, sampled_ms));
+        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, swipe: None, live: false })
     }
 
     fn start(&mut self, cx: &mut Cx<Self>) {
@@ -533,7 +623,9 @@ impl MirrorScreen {
         let player = self.player.take()?;
         self.shared.stop.store(true, Ordering::Release);
         self.shared.wake.give();
-        Some(player.join())
+        let sram = player.join();
+        *self.shared.placed.lock() = None;
+        Some(sram)
     }
 
     fn restore(&mut self, sram: Sram, cx: &mut Cx<Self>) {
@@ -615,6 +707,11 @@ impl Component for MirrorScreen {
                     cx.rebuild();
                 }
             }
+            MirrorMsg::Passthrough => {
+                self.passthrough = !self.passthrough;
+                self.shared.passthrough.store(self.passthrough, Ordering::Release);
+                cx.rebuild();
+            }
         }
     }
 
@@ -629,19 +726,19 @@ impl Component for MirrorScreen {
             let (w, h) = ui.screen_size();
             let reach = BAR_MARGIN + BAR_THICKNESS;
             let presence = if w < h { Presence::from_edge(Edge::Left).offset(0, reach) } else { Presence::from_edge(Edge::Bottom).offset(-reach, 0) };
-            let bar = control_bar(ui, w < h).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN));
+            let bar = control_bar(ui, w < h, self.passthrough).absolute(Some(BAR_MARGIN), None, None, Some(BAR_MARGIN));
             children.push(if self.live { bar.appear(presence) } else { bar }.id(id!("controls")));
         }
         ui.column(children).background(BLACK)
     }
 }
 
-fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool) -> Element<'a, MirrorMsg> {
+fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool, passthrough: bool) -> Element<'a, MirrorMsg> {
     let mut groups: [&[(char, Option<MirrorMsg>)]; 4] = [
         &[(icons::HIDE, Some(MirrorMsg::Hide))],
         &[(icons::NAV_BACK, None), (icons::NAV_HOME, None), (icons::NAV_RECENTS, None)],
         &[(icons::VOLUME_DOWN, None), (icons::VOLUME_UP, None), (icons::POWER, None)],
-        &[(icons::TOUCH, None), (icons::DISPLAY_MODE, None), (icons::CLOSE, Some(MirrorMsg::Back))],
+        &[(icons::TOUCH, Some(MirrorMsg::Passthrough)), (icons::DISPLAY_MODE, None), (icons::CLOSE, Some(MirrorMsg::Back))],
     ];
     if vertical {
         groups.reverse();
@@ -651,7 +748,7 @@ fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool) -> Element<'a, MirrorM
         if i > 0 {
             items.push(if vertical { divider(ui).padding_x(ui.theme().widgets.unit.gap) } else { vertical_divider(ui) });
         }
-        let mut keys: Vec<_> = group.iter().map(|&(glyph, msg)| control_key(ui, glyph, msg)).collect();
+        let mut keys: Vec<_> = group.iter().map(|&(glyph, msg)| control_key(ui, glyph, msg, passthrough)).collect();
         if vertical {
             keys.reverse();
         }
@@ -662,8 +759,12 @@ fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool) -> Element<'a, MirrorM
     bar.align(Align::Center).radius(BAR_RADIUS).background(ui.colors().surface)
 }
 
-fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, msg: Option<MirrorMsg>) -> Element<'a, MirrorMsg> {
-    let color = if matches!(msg, Some(MirrorMsg::Back)) { colors::DESTRUCTIVE } else { ColorRole::Text };
+fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, msg: Option<MirrorMsg>, passthrough: bool) -> Element<'a, MirrorMsg> {
+    let color = match msg {
+        Some(MirrorMsg::Back) => colors::DESTRUCTIVE,
+        Some(MirrorMsg::Passthrough) if passthrough => ColorRole::Primary,
+        _ => ColorRole::Text,
+    };
     let key = ui
         .row([ui.icon(icon(glyph)).foreground(color)])
         .size(KEY_SIZE, KEY_SIZE)
