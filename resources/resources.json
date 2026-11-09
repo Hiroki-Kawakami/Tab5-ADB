@@ -11,7 +11,16 @@
           "chart_memory": "#2e7d32",
           "android": "#2e7d32",
           "android_badge": "#e8f5e9",
-          "destructive_tonal": "#fdecea"
+          "destructive_tonal": "#fdecea",
+          "log_debug": "#1565c0",
+          "log_info": "#2e7d32",
+          "log_warning": "#d84315",
+          "log_error": "#c62828",
+          "log_warning_tonal": "#fff3e0",
+          "log_error_tonal": "#fdecea",
+          "log_debug_tonal": "#e3f2fd",
+          "log_info_tonal": "#e8f5e9",
+          "log_message": "#f5f6f7"
         },
         "dark": {
           "card_title": "#cfd8dc",
@@ -21,7 +30,16 @@
           "chart_memory": "#66bb6a",
           "android": "#66bb6a",
           "android_badge": "#1f3324",
-          "destructive_tonal": "#3a1f1f"
+          "destructive_tonal": "#3a1f1f",
+          "log_debug": "#64b5f6",
+          "log_info": "#81c784",
+          "log_warning": "#ff8a65",
+          "log_error": "#ef5350",
+          "log_warning_tonal": "#3a2a1a",
+          "log_error_tonal": "#3a1f1f",
+          "log_debug_tonal": "#1a2a3a",
+          "log_info_tonal": "#1f3324",
+          "log_message": "#22262b"
         }
       },
       "fonts": {
@@ -259,7 +277,10 @@
         "PLAY": "icons/player-play.svg",
         "STOP": "icons/square.svg",
         "BAN": "icons/ban.svg",
-        "ERASER": "icons/eraser.svg"
+        "ERASER": "icons/eraser.svg",
+        "FILTER": "icons/filter.svg",
+        "UP": "icons/chevron-up.svg",
+        "DOWN": "icons/chevron-down.svg"
       }
     },
     "icon_40": {
@@ -301,7 +322,10 @@
         "SD_CARD": "icons/device-sd-card.svg",
         "STORAGE": "icons/database.svg",
         "INSTALL": "icons/package-export.svg",
-        "REFRESH": "icons/refresh.svg"
+        "REFRESH": "icons/refresh.svg",
+        "PAUSE": "icons/player-pause.svg",
+        "ERASER": "icons/eraser.svg",
+        "SAVE": "icons/device-floppy.svg"
       }
     },
     "mono_18": {

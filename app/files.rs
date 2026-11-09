@@ -274,7 +274,7 @@ pub fn sd_space() -> Result<Space, String> {
     sd.space().map_err(|err| alloc::format!("{err}"))
 }
 
-fn mount_sd() -> Result<(), String> {
+pub fn mount_sd() -> Result<(), String> {
     let sd = SD.get().ok_or("no card slot")?;
     if sd.is_mounted() {
         return Ok(());

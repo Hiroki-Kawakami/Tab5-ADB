@@ -12,6 +12,7 @@ use core::future::Future;
 use crate::apk;
 use crate::apps::{self, Action};
 use crate::clock;
+use crate::logcat::{Filter, Level, LineSplitter, Log};
 use crate::files::{self, Entry, FileType, Kind};
 use crate::screens::mirror::{Placed, strip_rect};
 
@@ -314,4 +315,101 @@ fn device_date() {
     assert_eq!(clock::parse_date("1800000000 +0960"), None);
     assert_eq!(clock::parse_date("date: bad format"), None);
     assert_eq!(clock::parse_date(""), None);
+}
+
+const LOG_D: &str = "10-25 05:29:49.510  2030  2091 D WindowManager: Remove SleepToken: tag=keyguard";
+const LOG_W: &str = "10-25 05:29:49.574  5349  5349 W df      : type=1400 audit(0.0:8506): avc: denied";
+const LOG_E: &str = "10-25 05:29:50.159  4796  4796 E ConsumerBase: abandonImpl";
+
+fn shown(log: &Log) -> Vec<&str> {
+    (0..log.shown_len()).map(|i| log.get(log.shown_seq(i).unwrap()).unwrap().text).collect()
+}
+
+#[test]
+fn logcat_line_fields() {
+    let mut log = Log::new();
+    log.push(LOG_D);
+    log.push(LOG_W);
+    log.push("--------- beginning of main");
+    let d = log.get(0).unwrap();
+    let h = d.header().unwrap();
+    assert_eq!((h.time, h.pid, h.tid, h.tag), ("10-25 05:29:49.510", 2030, 2091, "WindowManager"));
+    assert_eq!((d.level, d.message()), (Level::Debug, "Remove SleepToken: tag=keyguard"));
+    let w = log.get(1).unwrap();
+    assert_eq!(w.header().unwrap().tag, "df");
+    assert_eq!(w.message(), "type=1400 audit(0.0:8506): avc: denied");
+    let marker = log.get(2).unwrap();
+    assert!(marker.header().is_none());
+    assert_eq!((marker.level, marker.message()), (Level::Warning, "--------- beginning of main"));
+}
+
+#[test]
+fn logcat_filters() {
+    assert_eq!(Filter::parse("  "), Filter::All);
+    assert_eq!(Filter::parse("TAG: windowmanager"), Filter::Tag("windowmanager".into()));
+    assert_eq!(Filter::parse("pid:5349"), Filter::Pid(5349));
+    assert_eq!(Filter::parse("pid:x"), Filter::Text("pid:x".into()));
+    let mut log = Log::new();
+    for line in [LOG_D, LOG_W, LOG_E] {
+        log.push(line);
+    }
+    log.set_min_level(Level::Warning);
+    assert_eq!(shown(&log), [LOG_W, LOG_E]);
+    log.set_min_level(Level::Verbose);
+    log.set_filter(Filter::parse("tag:windowmanager"));
+    assert_eq!(shown(&log), [LOG_D]);
+    log.set_filter(Filter::parse("tag:Window"));
+    assert!(shown(&log).is_empty());
+    log.set_filter(Filter::parse("pid:4796"));
+    assert_eq!(shown(&log), [LOG_E]);
+    log.set_filter(Filter::parse("AVC: DENIED"));
+    assert_eq!(shown(&log), [LOG_W]);
+    log.push(LOG_D);
+    log.push("10-25 05:29:51.000   100   100 I x: avc: denied again");
+    assert_eq!(shown(&log).len(), 2);
+    assert_eq!(log.shown_index(4), Some(1));
+}
+
+#[test]
+fn logcat_resume_skips_what_came_before() {
+    let mut log = Log::new();
+    log.push(LOG_D);
+    log.push(LOG_W);
+    log.resume();
+    log.push("--------- beginning of main");
+    log.push(LOG_D);
+    log.push(LOG_W);
+    log.push("10-25 05:29:49.574  5349  5349 W df      : same time, new text");
+    log.push(LOG_E);
+    assert_eq!(log.shown_len(), 4);
+    assert_eq!(log.last_time(), Some("10-25 05:29:50.159"));
+}
+
+#[test]
+fn logcat_evicts_the_oldest_chunk() {
+    let mut log = Log::new();
+    let line = alloc::format!("10-25 05:29:49.510  2030  2091 I Tag: {}", "x".repeat(900));
+    let mut removed = 0;
+    for _ in 0..3000 {
+        removed += log.push(&line);
+    }
+    assert!(removed > 0);
+    assert_eq!(log.shown_len() + removed, 3000);
+    let first = log.shown_seq(0).unwrap();
+    assert_eq!(first as usize, removed);
+    assert!(log.get(first - 1).is_none());
+    assert_eq!(log.get(2999).unwrap().text, line);
+    log.clear();
+    assert_eq!(log.shown_len(), 0);
+    log.push(LOG_E);
+    assert_eq!(log.shown_seq(0), Some(3000));
+}
+
+#[test]
+fn logcat_lines_split_across_reads() {
+    let mut splitter = LineSplitter::new();
+    let mut lines = Vec::new();
+    splitter.feed(b"first\nsec", |l| lines.push(l.to_string()));
+    splitter.feed(b"ond\r\n\nthird", |l| lines.push(l.to_string()));
+    assert_eq!(lines, ["first", "second\r", ""]);
 }

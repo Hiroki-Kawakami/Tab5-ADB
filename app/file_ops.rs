@@ -188,6 +188,36 @@ pub fn install(from: Endpoint, conn: Connection, path: String) -> Option<Operati
     })
 }
 
+/// Writes `data` to a new file at `target` on the card.
+pub fn save(data: Vec<u8, Caps>, target: String) -> Option<Operation> {
+    start(move |op| async move {
+        op.update(|p| {
+            p.total = 1;
+            p.bytes_total = data.len() as u64;
+            p.current = name_of(&target).to_string();
+        });
+        let output = create_sd(&target).map_err(|err| failed(&target, err))?;
+        let mut result = Ok(());
+        for piece in data.chunks(CHUNK) {
+            if op.cancelled() {
+                result = Err(None);
+                break;
+            }
+            if let Err(err) = output.write_all(piece) {
+                result = Err(failed(&target, alloc::format!("write: {err}")));
+                break;
+            }
+            op.update(|p| p.bytes_done += piece.len() as u64);
+        }
+        drop(output);
+        if result.is_err() {
+            remove_partial_sd(&target);
+        }
+        op.update(|p| p.done = 1);
+        result
+    })
+}
+
 fn start<F, Fut>(job: F) -> Option<Operation>
 where
     F: FnOnce(Operation) -> Fut + Send + 'static,

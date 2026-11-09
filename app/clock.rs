@@ -3,6 +3,7 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+use alloc::string::String;
 use core::ffi::CStr;
 
 use adb::link::Connection;
@@ -40,7 +41,7 @@ pub async fn sync(conn: &Connection) {
             return;
         }
     };
-    let text = alloc::string::String::from_utf8_lossy(&out);
+    let text = String::from_utf8_lossy(&out);
     let Some((seconds, offset)) = parse_date(&text) else {
         error!(TAG, "date: unexpected {:?}", text.trim());
         return;
@@ -79,4 +80,10 @@ pub fn parse_date(out: &str) -> Option<(i64, i16)> {
         return None;
     }
     Some((seconds, sign * (hours * 60 + minutes)))
+}
+
+/// "YYYYMMDD_HHMMSS" in local time, for file names.
+pub fn file_stamp() -> Option<String> {
+    let t = local_now()?;
+    Some(alloc::format!("{:04}{:02}{:02}_{:02}{:02}{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second))
 }

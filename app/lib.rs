@@ -16,6 +16,7 @@ mod device_info;
 mod file_ops;
 mod files;
 mod fonts;
+mod logcat;
 mod preview;
 mod screens;
 mod settings;
