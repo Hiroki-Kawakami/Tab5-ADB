@@ -11,6 +11,7 @@ use core::future::Future;
 
 use crate::apk;
 use crate::apps::{self, Action};
+use crate::clock;
 use crate::files::{self, Entry, FileType, Kind};
 use crate::screens::mirror::{Placed, strip_rect};
 
@@ -301,4 +302,16 @@ fn app_actions() {
     assert_eq!(apps::failure_reason("  bash arg: -p\n  bash arg: x\n** No activities found to run, monkey aborted.\n"), "** No activities found to run, monkey aborted.");
     assert_eq!(apps::failure_reason("Failure [DELETE_FAILED_INTERNAL_ERROR]\n"), "Failure [DELETE_FAILED_INTERNAL_ERROR]");
     assert_eq!(apps::failure_reason(""), "The command failed.");
+}
+
+#[test]
+fn device_date() {
+    assert_eq!(clock::parse_date("1800000000 +0900\n"), Some((1_800_000_000, 540)));
+    assert_eq!(clock::parse_date("1800000000 -0330"), Some((1_800_000_000, -210)));
+    assert_eq!(clock::parse_date("1800000000 +0000"), Some((1_800_000_000, 0)));
+    assert_eq!(clock::parse_date("1800000000 0900"), None);
+    assert_eq!(clock::parse_date("1800000000 +09"), None);
+    assert_eq!(clock::parse_date("1800000000 +0960"), None);
+    assert_eq!(clock::parse_date("date: bad format"), None);
+    assert_eq!(clock::parse_date(""), None);
 }

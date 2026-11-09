@@ -176,6 +176,7 @@ struct Store {
     sound_playback: Setting<SoundPlayback>,
     agent_mode: Setting<AgentMode>,
     mirror_orientation: Setting<MirrorOrientation>,
+    utc_offset: Setting<i16>,
 }
 
 static STORE: Mutex<Store> = Mutex::new(Store {
@@ -186,6 +187,7 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     sound_playback: Setting::new(c"playback", SoundPlayback::Tab5, keep),
     agent_mode: Setting::new(c"agent_mode", AgentMode::Normal, keep),
     mirror_orientation: Setting::new(c"mirror_orient", MirrorOrientation::Device, keep),
+    utc_offset: Setting::new(c"utc_offset", 0, |minutes| minutes.clamp(-14 * 60, 14 * 60)),
 });
 
 pub fn init() {
@@ -197,6 +199,7 @@ pub fn init() {
             store.sound_playback.load(&nvs);
             store.agent_mode.load(&nvs);
             store.mirror_orientation.load(&nvs);
+            store.utc_offset.load(&nvs);
             store.nvs = Some(nvs);
         }
         Err(err) => error!(TAG, "open: {err}"),
@@ -220,6 +223,7 @@ pub fn commit() {
     written |= store.sound_playback.commit(nvs);
     written |= store.agent_mode.commit(nvs);
     written |= store.mirror_orientation.commit(nvs);
+    written |= store.utc_offset.commit(nvs);
     if written && let Err(err) = nvs.commit() {
         error!(TAG, "commit: {err}");
     }
@@ -274,4 +278,13 @@ pub fn mirror_orientation() -> MirrorOrientation {
 
 pub fn set_mirror_orientation(orientation: MirrorOrientation) {
     STORE.lock().mirror_orientation.set(orientation);
+}
+
+/// Minutes east of UTC, as the last device connected had it.
+pub fn utc_offset() -> i16 {
+    STORE.lock().utc_offset.value
+}
+
+pub fn set_utc_offset(minutes: i16) {
+    STORE.lock().utc_offset.set(minutes);
 }

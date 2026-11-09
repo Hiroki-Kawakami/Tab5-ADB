@@ -18,7 +18,6 @@ use core::time::Duration;
 
 use adb::link::Connection;
 use adb::services::sync::Sync;
-use bsp_rs::rtc::Rtc;
 use idf::executor::Spawner;
 use idf::fs::{File, OpenOptions};
 use idf::heap::Caps;
@@ -26,6 +25,7 @@ use idf::log::error;
 use idf::sync::{Mutex, OnceLock};
 use idf::thread::Builder;
 
+use crate::clock;
 use crate::files::{self, c_path, name_of, run, shell_quote};
 
 const TAG: &CStr = c"file_ops";
@@ -37,12 +37,7 @@ const MKDIR_BATCH: usize = 2048;
 const INSTALL_TEMP: &str = "/data/local/tmp/tab5adb-install.apk";
 
 static SPAWNER: OnceLock<Spawner> = OnceLock::new();
-static RTC: OnceLock<&'static Rtc> = OnceLock::new();
 static RUNNING: AtomicBool = AtomicBool::new(false);
-
-pub fn set_rtc(rtc: &'static Rtc) {
-    let _ = RTC.set(rtc);
-}
 
 #[derive(Clone, Default)]
 pub struct Progress {
@@ -547,7 +542,7 @@ async fn pull(op: &Operation, buf: &mut [u8], session: &mut Sync, source: &str, 
 /// The file is read a whole `buf` at a time and handed out as the session asks.
 async fn push(op: &Operation, buf: &mut [u8], session: &mut Sync, conn: &Connection, source: &str, target: &str) -> Result<(), String> {
     let input = File::open(&c_path(source)?).map_err(|err| alloc::format!("open: {err}"))?;
-    let mtime = RTC.get().and_then(|rtc| rtc.now().ok()).map_or(0, |now| now.seconds().max(0) as u32);
+    let mtime = clock::unix_time().map_or(0, |t| t as u32);
     let (mut start, mut end) = (0, 0);
     let result = session
         .push(target, 0o644, mtime, |out| {

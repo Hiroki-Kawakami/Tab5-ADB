@@ -21,6 +21,8 @@ use idf::sync::{Mutex, OnceLock};
 use usb_host_rs::{Device, Event};
 use idf::thread::Builder;
 
+use crate::clock;
+
 const TAG: &CStr = c"adb_link";
 const KEY_NAMESPACE: &CStr = c"adb";
 const DEFAULT_HOST_ID: &str = "00000000";
@@ -125,6 +127,12 @@ fn begin(route: Route, transport: Box<dyn Transport>) -> Result<Connection, Stri
     let (Some(spawner), Some(identity)) = (SPAWNER.get(), IDENTITY.get()) else { return Err("not started".into()) };
     let conn = Connection::connect(transport, identity.clone(), spawner);
     *CONNECTION.lock() = Some((route, conn.clone()));
+    let synced = conn.clone();
+    drop(spawner.spawn(async move {
+        if synced.online().await.is_ok() {
+            clock::sync(&synced).await;
+        }
+    }));
     let logged = conn.clone();
     drop(spawner.spawn(async move {
         let conn = logged;

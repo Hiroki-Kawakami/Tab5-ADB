@@ -11,6 +11,7 @@ mod adb_link;
 mod apk;
 mod apps;
 mod agent;
+mod clock;
 mod device_info;
 mod file_ops;
 mod files;
@@ -54,6 +55,7 @@ static SRAM: StaticLease<SharedSram> = StaticLease::new(SharedSram([0; SHARED_SR
 
 pub fn run() {
     settings::init();
+    clock::init();
     let mut bsp_config = bsp_rs::Config::default();
     bsp_config.display.fb_num = 3;
     bsp_config.display.pixel_format = Some(settings::color_depth().pixel_format());
@@ -70,9 +72,6 @@ pub fn run() {
     };
     if let Some(sd) = board.sd {
         files::set_sd(sd);
-    }
-    if let Some(rtc) = board.rtc {
-        file_ops::set_rtc(rtc);
     }
     adb_link::start(board.power);
     harness_rs::register("adb", screens::adb_command);
@@ -99,6 +98,6 @@ pub fn run() {
         }
     };
     screens::set_input(app.input());
-    app.chrome(StatusBar::new(board.rtc, board.power));
+    app.chrome(StatusBar::new(board.power));
     app.run();
 }
