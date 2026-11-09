@@ -325,7 +325,11 @@
         "REFRESH": "icons/refresh.svg",
         "PAUSE": "icons/player-pause.svg",
         "ERASER": "icons/eraser.svg",
-        "SAVE": "icons/device-floppy.svg"
+        "SAVE": "icons/device-floppy.svg",
+        "CPU": "icons/cpu.svg",
+        "TOOL": "icons/tool.svg",
+        "MOON": "icons/moon.svg",
+        "SUN": "icons/sun.svg"
       }
     },
     "mono_18": {

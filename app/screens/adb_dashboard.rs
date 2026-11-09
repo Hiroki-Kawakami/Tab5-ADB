@@ -30,6 +30,7 @@ use super::file_manager::FileManagerScreen;
 use super::logcat::LogcatScreen;
 use super::message::MessageScreen;
 use super::mirror::{MirrorScreen, keycode};
+use super::power_menu::{PowerAction, PowerMenuScreen};
 use super::screenshot::ScreenshotScreen;
 use super::settings::SettingsScreen;
 use super::terminal::TerminalScreen;
@@ -66,6 +67,7 @@ pub enum Msg {
     Logcat,
     Screenshot,
     PowerMenu,
+    Power(PowerAction),
     Settings,
     Disconnect,
     Previous,
@@ -228,6 +230,18 @@ impl Component for AdbDashboardScreen {
             Msg::Screenshot => cx.nav_of::<Root>().push(ScreenshotScreen::new(self.conn.clone())),
             Msg::FileManager => cx.nav_of::<Root>().push(FileManagerScreen::new(true)),
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
+            Msg::PowerMenu => {
+                let handle = cx.handle();
+                cx.nav_of::<Overlay>().push(PowerMenuScreen::new(handle));
+            }
+            Msg::Power(action) => {
+                let conn = self.conn.clone();
+                cx.spawn(move |_| async move {
+                    if let Err(err) = adb::services::exec(&conn, action.command()).await {
+                        error!(TAG, "{}: {err}", action.command());
+                    }
+                });
+            }
             Msg::Preview => match &self.agent {
                 Some(_) if self.video_unavailable => {
                     cx.nav_of::<Overlay>().push(MessageScreen::new("Mirroring unavailable", "The agent cannot capture this device's screen, so mirroring is disabled."));
