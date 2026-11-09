@@ -1,5 +1,5 @@
 /*
- * SPDX-Lic.map(|e| Entry { name: e.file_name().to_string_lossy().into_owned(), kind: if e.is_dir() { Kind::Dir } else { Kind::File }})nse-Identifier: MIT
+ * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
@@ -86,6 +86,12 @@ pub fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('/') { alloc::format!("{dir}{name}") } else { alloc::format!("{dir}/{name}") }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Storage {
+    Android,
+    Sd,
+}
+
 #[derive(Clone)]
 pub enum Volume {
     Android(Android),
@@ -93,6 +99,40 @@ pub enum Volume {
 }
 
 impl Volume {
+    pub fn storage(&self) -> Storage {
+        match self {
+            Volume::Android(_) => Storage::Android,
+            Volume::Sd => Storage::Sd,
+        }
+    }
+
+    pub fn connection(&self) -> Option<Connection> {
+        match self {
+            Volume::Android(android) => Some(android.conn.clone()),
+            Volume::Sd => None,
+        }
+    }
+
+    pub async fn rename(&self, from: &str, to: &str) -> Result<(), String> {
+        match self {
+            Volume::Android(android) => run(&android.conn, &alloc::format!("mv -- {} {}", shell_quote(from), shell_quote(to))).await,
+            Volume::Sd => idf::fs::rename(&c_path(from)?, &c_path(to)?).map_err(|err| {
+                error!(TAG, "rename {from} -> {to}: {err}");
+                String::from("The item could not be renamed.")
+            }),
+        }
+    }
+
+    pub async fn create_dir(&self, path: &str) -> Result<(), String> {
+        match self {
+            Volume::Android(android) => run(&android.conn, &alloc::format!("mkdir -- {}", shell_quote(path))).await,
+            Volume::Sd => idf::fs::create_dir(&c_path(path)?).map_err(|err| {
+                error!(TAG, "mkdir {path}: {err}");
+                String::from("The folder could not be created.")
+            }),
+        }
+    }
+
     pub async fn list(&self, path: &str) -> Result<Vec<Entry>, String> {
         let mut entries = match self {
             Volume::Android(android) => android.list(path).await?,
@@ -196,7 +236,9 @@ fn mount_sd() -> Result<(), String> {
     if sd.is_mounted() {
         return Ok(());
     }
-    sd.mount(SD_ROOT_C, &MountConfig::default()).map_err(|err| {
+    let mut config = MountConfig::default();
+    config.psram_bounce_buffer = true;
+    sd.mount(SD_ROOT_C, &config).map_err(|err| {
         error!(TAG, "mount: {err}");
         String::from("The SD card could not be mounted.")
     })
@@ -239,4 +281,70 @@ pub fn format_bytes(bytes: u64) -> String {
     }
     let tenths = (bytes * 10 + scale / 2) / scale;
     alloc::format!("{}.{} {}", tenths / 10, tenths % 10, UNITS[unit])
+}
+
+pub fn c_path(path: &str) -> Result<CString, String> {
+    CString::new(path).map_err(|_| String::from("The name is not valid."))
+}
+
+pub fn shell_quote(text: &str) -> String {
+    alloc::format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// Runs `command` on the device; its output becomes the error when it exits
+/// with a status other than 0.
+pub async fn run(conn: &Connection, command: &str) -> Result<(), String> {
+    let out = adb::services::exec(conn, &alloc::format!("{command} 2>&1; echo \":$?\"")).await.map_err(|err| {
+        error!(TAG, "{command}: {err}");
+        err.to_string()
+    })?;
+    let out = String::from_utf8_lossy(&out);
+    let (message, status) = out.trim_end().rsplit_once(':').unwrap_or(("", "1"));
+    if status == "0" {
+        return Ok(());
+    }
+    let message = message.trim();
+    error!(TAG, "{command}: {message} ({status})");
+    Err(if message.is_empty() { alloc::format!("exit status {status}") } else { message.to_string() })
+}
+
+pub fn name_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// `path` is `ancestor` or inside it.
+pub fn is_within(path: &str, ancestor: &str) -> bool {
+    path.strip_prefix(ancestor).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+const INVALID_NAME_CHARS: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+
+pub fn validate_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        Err("Enter a name.")
+    } else if name == "." || name == ".." {
+        Err("This name is not allowed.")
+    } else if name.contains(INVALID_NAME_CHARS) {
+        Err("A name can't contain / \\ : * ? \" < > |")
+    } else {
+        Ok(())
+    }
+}
+
+/// Where the extension of `name` starts, if a file's name has one.
+pub fn extension_at(name: &str, folder: bool) -> Option<usize> {
+    if folder {
+        return None;
+    }
+    name.rfind('.').filter(|&dot| dot > 0)
+}
+
+/// `name`, or `name (2)`, `name (3)`... before the extension, whichever
+/// `taken` does not hold.
+pub fn unused_name(name: &str, folder: bool, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(name) {
+        return name.to_string();
+    }
+    let (stem, extension) = extension_at(name, folder).map_or((name, ""), |dot| name.split_at(dot));
+    (2..).map(|n| alloc::format!("{stem} ({n}){extension}")).find(|candidate| !taken(candidate)).unwrap()
 }

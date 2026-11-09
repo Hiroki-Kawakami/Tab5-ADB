@@ -10,6 +10,7 @@ extern crate alloc;
 mod adb_link;
 mod agent;
 mod device_info;
+mod file_ops;
 mod files;
 mod fonts;
 mod preview;
@@ -67,6 +68,9 @@ pub fn run() {
     };
     if let Some(sd) = board.sd {
         files::set_sd(sd);
+    }
+    if let Some(rtc) = board.rtc {
+        file_ops::set_rtc(rtc);
     }
     adb_link::start(board.power);
     harness_rs::register("adb", screens::adb_command);

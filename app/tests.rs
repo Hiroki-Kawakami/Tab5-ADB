@@ -169,3 +169,36 @@ fn byte_sizes() {
     assert_eq!(files::format_bytes(26_600_000_000), "26.6 GB");
     assert_eq!(files::format_bytes(29_700_000_000), "29.7 GB");
 }
+
+#[test]
+fn unused_names() {
+    let taken = |names: &'static [&'static str]| move |name: &str| names.contains(&name);
+    assert_eq!(files::unused_name("a.txt", false, taken(&[])), "a.txt");
+    assert_eq!(files::unused_name("a.txt", false, taken(&["a.txt"])), "a (2).txt");
+    assert_eq!(files::unused_name("a.txt", false, taken(&["a.txt", "a (2).txt"])), "a (3).txt");
+    assert_eq!(files::unused_name("archive.v1", true, taken(&["archive.v1"])), "archive.v1 (2)");
+    assert_eq!(files::unused_name(".profile", false, taken(&[".profile"])), ".profile (2)");
+}
+
+#[test]
+fn names_checked() {
+    assert!(files::validate_name("notes.txt").is_ok());
+    assert!(files::validate_name("").is_err());
+    assert!(files::validate_name("..").is_err());
+    assert!(files::validate_name("a/b").is_err());
+    assert!(files::validate_name("what?").is_err());
+}
+
+#[test]
+fn paths_within() {
+    assert!(files::is_within("/sdcard/A", "/sdcard/A"));
+    assert!(files::is_within("/sdcard/A/b", "/sdcard/A"));
+    assert!(!files::is_within("/sdcard/AB", "/sdcard/A"));
+    assert!(!files::is_within("/sdcard", "/sdcard/A"));
+}
+
+#[test]
+fn shell_quoting() {
+    assert_eq!(files::shell_quote("a b"), "'a b'");
+    assert_eq!(files::shell_quote("it's"), "'it'\\''s'");
+}

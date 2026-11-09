@@ -10,7 +10,8 @@
           "chart_background": "#f5f6f7",
           "chart_memory": "#2e7d32",
           "android": "#2e7d32",
-          "android_badge": "#e8f5e9"
+          "android_badge": "#e8f5e9",
+          "destructive_tonal": "#fdecea"
         },
         "dark": {
           "card_title": "#cfd8dc",
@@ -19,7 +20,8 @@
           "chart_background": "#22262b",
           "chart_memory": "#66bb6a",
           "android": "#66bb6a",
-          "android_badge": "#1f3324"
+          "android_badge": "#1f3324",
+          "destructive_tonal": "#3a1f1f"
         }
       },
       "fonts": {
@@ -245,7 +247,14 @@
         "MEMORY": "icons/stack-2.svg",
         "STORAGE": "icons/database.svg",
         "INFO": "icons/info-circle.svg",
-        "REFRESH": "icons/refresh.svg"
+        "REFRESH": "icons/refresh.svg",
+        "CIRCLE": "icons/circle.svg",
+        "CIRCLE_CHECK": "icons/circle-check.svg",
+        "MOVE": "icons/file-export.svg",
+        "COPY": "icons/copy.svg",
+        "PENCIL": "icons/pencil.svg",
+        "TRASH": "icons/trash.svg",
+        "FOLDER_PLUS": "icons/folder-plus.svg"
       }
     },
     "icon_40": {
