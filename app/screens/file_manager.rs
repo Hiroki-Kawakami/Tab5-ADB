@@ -3,8 +3,10 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -14,14 +16,16 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use devkit_ui::widgets::{button, icon_button, menu, menu_item, progress_indicator, table, table_chevron, table_header, table_row, table_section, top_bar};
 use devkit_ui::{Align, Child, CollectionLayout, ColorRole, Component, Cx, Elide, Element, Handle, Icon, Id, Justify, Overlay, Popover, PopoverAlign, Prop, Root, Screen, Sides, SplitRole, State, StateStyle, Task, This, Ui, id};
 use idf::log::error;
+use idf::sync::Mutex;
 
 use crate::adb_link;
 use crate::file_ops::{self, Copy, Endpoint};
-use crate::files::{self, Android, Entry, FileType, Kind, Volume};
+use crate::files::{self, Android, Entry, FileRef, FileType, Kind, Volume};
 use crate::fonts::{icon, small_icon};
 use crate::resources::{colors, icons};
 
 use super::file_dialogs::{Action, Choice, NameDialog, Naming, ProgressDialog};
+use super::file_preview::FilePreviewScreen;
 use super::message::MessageScreen;
 
 const TAG: &CStr = c"file_manager";
@@ -64,14 +68,36 @@ pub fn changed() {
 /// Marks the navigator of the storage list and the folders.
 pub struct Pane;
 
-pub struct FileManagerScreen {
+/// A folder to copy one item named `name` into. Once one is chosen, `result`
+/// holds the volume and the path the item gets there, and `done` runs.
+pub struct FolderPick {
+    pub name: String,
+    pub result: Arc<Mutex<Option<(Volume, String)>>>,
+    pub done: Box<dyn Fn() + Send>,
+}
+
+static PENDING_PICK: Mutex<Option<FolderPick>> = Mutex::new(None);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Mode {
     android: bool,
+    pick: bool,
+}
+
+pub struct FileManagerScreen {
+    mode: Mode,
 }
 
 impl FileManagerScreen {
     /// Without `android`, only the Tab5's own storage.
     pub fn new(android: bool) -> Self {
-        Self { android }
+        Self { mode: Mode { android, pick: false } }
+    }
+
+    /// Browses for a folder instead; closes once one is chosen or on Cancel.
+    pub fn pick_folder(android: bool, pick: FolderPick) -> Self {
+        *PENDING_PICK.lock() = Some(pick);
+        Self { mode: Mode { android, pick: true } }
     }
 }
 
@@ -82,7 +108,7 @@ impl Component for FileManagerScreen {
 
     fn view<'a>(&'a self, ui: &'a Ui<()>) -> Element<'a, ()> {
         let (width, height) = ui.screen_size();
-        let pane = ui.navigator::<Pane, Storages>(self.android).split(width > height, SIDEBAR_WIDTH).grow(1).id(id!("pane"));
+        let pane = ui.navigator::<Pane, Storages>(self.mode).split(width > height, SIDEBAR_WIDTH).grow(1).id(id!("pane"));
         ui.column([pane]).background(ui.colors().background)
     }
 }
@@ -107,6 +133,7 @@ pub struct Clipboard {
 struct Shared {
     clipboard: Rc<RefCell<Option<Clipboard>>>,
     storages: Handle<StorageMsg>,
+    pick: Option<Rc<FolderPick>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,6 +181,7 @@ pub struct Storages {
     internal_free: Option<String>,
     sd_space: String,
     clipboard: Rc<RefCell<Option<Clipboard>>>,
+    pick: Option<Rc<FolderPick>>,
 }
 
 impl Storages {
@@ -240,7 +268,7 @@ async fn load_internal_free(this: This<Storages>, android: Android) {
 
 impl Component for Storages {
     type Msg = StorageMsg;
-    type Props = bool;
+    type Props = Mode;
 
     fn update(&mut self, msg: StorageMsg, cx: &mut Cx<Self>) {
         match msg {
@@ -260,7 +288,7 @@ impl Component for Storages {
                     Storage::Sd => files::SD_ROOT,
                 };
                 self.selected = Some(storage);
-                let shared = Shared { clipboard: self.clipboard.clone(), storages: cx.handle() };
+                let shared = Shared { clipboard: self.clipboard.clone(), storages: cx.handle(), pick: self.pick.clone() };
                 cx.nav().show(Browser::new(volume, storage.label(), root, root.to_string(), shared));
             }
             StorageMsg::Clipboard => {}
@@ -299,12 +327,13 @@ impl Screen for Storages {
 }
 
 impl Child for Storages {
-    fn create(android: &bool) -> Self {
-        let android = if *android { adb_link::connection().map(Android::new) } else { None };
-        Self { android, selected: None, internal_free: None, sd_space: String::new(), clipboard: Rc::new(RefCell::new(None)) }
+    fn create(mode: &Mode) -> Self {
+        let android = if mode.android { adb_link::connection().map(Android::new) } else { None };
+        let pick = if mode.pick { PENDING_PICK.lock().take().map(Rc::new) } else { None };
+        Self { android, selected: None, internal_free: None, sd_space: String::new(), clipboard: Rc::new(RefCell::new(None)), pick }
     }
 
-    fn set_props(&mut self, _: &bool) {}
+    fn set_props(&mut self, _: &Mode) {}
 }
 
 #[derive(Clone, Copy)]
@@ -420,9 +449,10 @@ impl Browser {
         cx.send_to(&self.shared.storages, StorageMsg::Clipboard);
     }
 
-    fn menu<'a>(_: &'a (), ui: &'a Ui<Msg>) -> Element<'a, Msg> {
+    fn menu<'a>(picking: &'a bool, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
+        let select = if *picking { ui.empty() } else { menu_item(ui, Some(small_icon(icons::CIRCLE_CHECK)), "Select", Msg::Select).id(id!("menu-select")) };
         menu(ui, [
-            menu_item(ui, Some(small_icon(icons::CIRCLE_CHECK)), "Select", Msg::Select).id(id!("menu-select")),
+            select,
             menu_item(ui, Some(small_icon(icons::FOLDER_PLUS)), "New Folder", Msg::NewFolder).id(id!("menu-new-folder")),
             menu_item(ui, Some(small_icon(icons::REFRESH)), "Refresh", Msg::Refresh).id(id!("menu-refresh")),
         ])
@@ -447,7 +477,13 @@ impl Browser {
             .height(theme.widgets.list_item.height)
             .grow(1);
         let row = ui.row([line]).padding_x(24).on_tap(Msg::Open(index as u32));
-        let row = if checked == Some(true) { row.background(colors::SELECTED) } else { row.when(State::PRESSED, &[Prop::Background(colors::PRESSED)]) };
+        let row = if self.shared.pick.is_some() && entry.kind == Kind::File {
+            row.when(State::DISABLED, &[Prop::Opacity(102)]).disabled(true)
+        } else if checked == Some(true) {
+            row.background(colors::SELECTED)
+        } else {
+            row.when(State::PRESSED, &[Prop::Background(colors::PRESSED)])
+        };
         if entry.kind == Kind::Link { row.task(move |this: This<Browser>| resolve(this, index)) } else { row }
     }
 
@@ -526,11 +562,10 @@ impl Browser {
         clip.volume.storage() != self.volume.storage() || !clip.items.iter().any(|item| item.kind != Kind::File && files::is_within(&self.path, &files::join(&clip.dir, &item.name)))
     }
 
-    fn paste_bar<'a>(&'a self, ui: &'a Ui<Msg>, clip: &Clipboard) -> Element<'a, Msg> {
+    fn paste_bar<'a>(&'a self, ui: &'a Ui<Msg>, transfer: Transfer, count: usize, enabled: bool) -> Element<'a, Msg> {
         let theme = ui.theme();
         let b = &theme.widgets.button;
-        let count = clip.items.len();
-        let (verb, action) = match clip.transfer {
+        let (verb, action) = match transfer {
             Transfer::Move => ("Move", "Move Here"),
             Transfer::Copy => ("Copy", "Copy Here"),
         };
@@ -538,13 +573,36 @@ impl Browser {
         ui.row([
             ui.column([ui.text(theme.fonts.body, what), ui.text(theme.fonts.caption, "Open the destination folder").foreground(colors::MUTED).ellipsis(Elide::End)]).gap(4).grow(1),
             ui.row([ui.text(theme.fonts.body, "Cancel")]).style(&TONAL).height(72).padding_x(24).align(Align::Center).on_tap(Msg::CancelPaste).id(id!("cancel-paste")),
-            button(ui, action, b.primary, Msg::Paste).padding_x(28).disabled(!self.can_paste(clip)).id(id!("paste")),
+            button(ui, action, b.primary, Msg::Paste).padding_x(28).disabled(!enabled).id(id!("paste")),
         ])
         .gap(12)
         .align(Align::Center)
         .padding_each(24, 16, 24, 16 + ui.insets().bottom)
         .border(ui.colors().divider, 1)
         .border_sides(Sides::TOP)
+    }
+
+    fn start_pick(&mut self, cx: &mut Cx<Self>) {
+        let Some(pick) = self.shared.pick.clone() else { return };
+        if !matches!(self.entries, Some(Ok(_))) {
+            return;
+        }
+        if !self.taken(&pick.name) {
+            self.finish_pick(cx);
+            return;
+        }
+        let message = alloc::format!("An item named \"{}\" already exists in \"{}\".", pick.name, self.title());
+        let buttons = vec![("Cancel", Action::Secondary, None), ("Skip", Action::Secondary, Some(Msg::PasteSkip)), ("Keep Both", Action::Primary, Some(Msg::PasteKeepBoth))];
+        let handle = cx.handle();
+        cx.nav_of::<Overlay>().push(Choice::new("Item Already Exists", message, buttons, handle));
+    }
+
+    fn finish_pick(&mut self, cx: &mut Cx<Self>) {
+        let Some(pick) = self.shared.pick.clone() else { return };
+        let name = files::unused_name(&pick.name, false, |name| self.taken(name));
+        *pick.result.lock() = Some((self.volume.clone(), files::join(&self.path, &name)));
+        (pick.done)();
+        cx.nav_of::<Root>().pop();
     }
 
     fn start_paste(&mut self, cx: &mut Cx<Self>) {
@@ -592,7 +650,7 @@ impl Browser {
                 match file_ops::copy(Endpoint::from(&clip.volume), Endpoint::from(&self.volume), copies) {
                     Some(op) => {
                         let handle = cx.handle();
-                        cx.nav_of::<Overlay>().push(ProgressDialog::new("Copying", "Copy failed", op, handle))
+                        cx.nav_of::<Overlay>().push(ProgressDialog::new("Copying", "Copy failed", op).on_done(move || reload(&handle)))
                     }
                     None => cx.nav_of::<Overlay>().push(MessageScreen::new("Cannot Copy", BUSY)),
                 }
@@ -628,7 +686,7 @@ impl Browser {
             Some(op) => {
                 self.end_selection();
                 let handle = cx.handle();
-                cx.nav_of::<Overlay>().push(ProgressDialog::new("Deleting", "Delete failed", op, handle));
+                cx.nav_of::<Overlay>().push(ProgressDialog::new("Deleting", "Delete failed", op).on_done(move || reload(&handle)));
             }
             None => cx.nav_of::<Overlay>().push(MessageScreen::new("Cannot Delete", BUSY)),
         }
@@ -696,14 +754,18 @@ impl Component for Browser {
                         *on = !*on;
                     }
                     self.revision += 1;
-                } else if let Some(entry) = self.entry(index).filter(|e| e.kind != Kind::File) {
+                } else if let Some(entry) = self.entry(index) {
                     let path = files::join(&self.path, &entry.name);
-                    cx.nav().push(Browser::new(self.volume.clone(), self.label, self.root, path, self.shared.clone()));
+                    if entry.kind != Kind::File {
+                        cx.nav().push(Browser::new(self.volume.clone(), self.label, self.root, path, self.shared.clone()));
+                    } else if self.shared.pick.is_none() {
+                        cx.nav_of::<Root>().push(FilePreviewScreen::new(FileRef { volume: self.volume.clone(), label: self.label, path }));
+                    }
                 }
             }
             Msg::OpenMenu => {
                 if let Some(anchor) = cx.tap_rect() {
-                    cx.popup(Popover::new(anchor, (), Self::menu, cx.handle()).align(PopoverAlign::End));
+                    cx.popup(Popover::new(anchor, self.shared.pick.is_some(), Self::menu, cx.handle()).align(PopoverAlign::End));
                 }
             }
             Msg::Refresh | Msg::Reload => self.reload(cx),
@@ -740,12 +802,16 @@ impl Component for Browser {
             }
             Msg::Delete => self.confirm_delete(cx),
             Msg::DeleteConfirmed => self.delete(cx),
+            Msg::CancelPaste if self.shared.pick.is_some() => cx.nav_of::<Root>().pop(),
             Msg::CancelPaste => {
                 self.shared.clipboard.borrow_mut().take();
                 self.clipboard_changed(cx);
             }
+            Msg::Paste if self.shared.pick.is_some() => self.start_pick(cx),
             Msg::Paste => self.start_paste(cx),
+            Msg::PasteSkip if self.shared.pick.is_some() => cx.nav_of::<Root>().pop(),
             Msg::PasteSkip => self.paste(true, cx),
+            Msg::PasteKeepBoth if self.shared.pick.is_some() => self.finish_pick(cx),
             Msg::PasteKeepBoth => self.paste(false, cx),
         }
         cx.rebuild();
@@ -757,8 +823,10 @@ impl Component for Browser {
         let clipboard = self.shared.clipboard.borrow();
         let footer = if self.selection.is_some() {
             self.tools(ui)
+        } else if self.shared.pick.is_some() {
+            self.paste_bar(ui, Transfer::Copy, 1, matches!(self.entries, Some(Ok(_))))
         } else if let Some(clip) = clipboard.as_ref() {
-            self.paste_bar(ui, clip)
+            self.paste_bar(ui, clip.transfer, clip.items.len(), self.can_paste(clip))
         } else {
             ui.column([]).height(ui.insets().bottom)
         };
@@ -802,4 +870,10 @@ fn entry_icon(entry: &Entry) -> Icon {
         FileType::Text => icons::FILE_TEXT,
         FileType::Other => icons::FILE,
     })
+}
+
+fn reload(handle: &Handle<Msg>) {
+    if !handle.post(Msg::Reload) {
+        error!(TAG, "reload: UI queue full");
+    }
 }

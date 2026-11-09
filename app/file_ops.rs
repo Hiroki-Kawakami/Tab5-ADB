@@ -34,6 +34,7 @@ const STACK: usize = 16384;
 const CHUNK: usize = 1024 * 1024;
 const CANCEL_POLL: Duration = Duration::from_millis(100);
 const MKDIR_BATCH: usize = 2048;
+const INSTALL_TEMP: &str = "/data/local/tmp/tab5adb-install.apk";
 
 static SPAWNER: OnceLock<Spawner> = OnceLock::new();
 static RTC: OnceLock<&'static Rtc> = OnceLock::new();
@@ -143,6 +144,52 @@ pub fn copy(from: Endpoint, to: Endpoint, copies: Vec<Copy>) -> Option<Operation
             (Endpoint::Android(conn), Endpoint::Android(_)) => copy_on_device(&op, conn, &copies).await,
             _ => copy_between(&op, &from, &to, &copies).await,
         }
+    })
+}
+
+/// Installs the APK at `path` on the device of `conn`, from a copy in the
+/// device's temporary folder.
+pub fn install(from: Endpoint, conn: Connection, path: String) -> Option<Operation> {
+    start(move |op| async move {
+        let name = name_of(&path).to_string();
+        op.update(|p| {
+            p.total = 1;
+            p.current = name.clone();
+        });
+        match from {
+            // The package manager cannot open files on shared storage, so it
+            // installs from a copy where it can.
+            Endpoint::Android(_) => {
+                op.update(|p| p.indeterminate = true);
+                run(&conn, &alloc::format!("cp -- {} {INSTALL_TEMP}", shell_quote(&path))).await.map_err(|err| failed(&path, err))?;
+            }
+            Endpoint::Sd => {
+                let (size, _) = files::Volume::Sd.stat(&path).await.map_err(|err| failed(&path, err))?;
+                op.update(|p| p.bytes_total = size);
+                let mut buf = idf::heap::zeroed_slice::<u8>(CHUNK, Caps::SPIRAM | Caps::CACHE_ALIGNED).map_err(|err| failed(&path, alloc::format!("buffer: {err}")))?;
+                let mut session = Sync::open(&conn).await.map_err(|err| failed(&path, err))?;
+                match push(&op, &mut buf, &mut session, &conn, &path, INSTALL_TEMP).await {
+                    Ok(()) => {}
+                    Err(_) if op.cancelled() => return Err(None),
+                    Err(err) => return Err(failed(&path, err)),
+                }
+                let _ = session.close().await;
+            }
+        }
+        if op.cancelled() {
+            return Err(None);
+        }
+        op.update(|p| p.indeterminate = true);
+        let out = adb::services::exec(&conn, &alloc::format!("pm install -r {INSTALL_TEMP} 2>&1")).await;
+        let _ = run(&conn, &alloc::format!("rm -f {INSTALL_TEMP}")).await;
+        let out = String::from_utf8_lossy(&out.map_err(|err| failed(&path, err))?).trim().to_string();
+        if !out.lines().any(|line| line.trim() == "Success") {
+            error!(TAG, "pm install {path}: {out}");
+            let reason = out.lines().find(|line| line.starts_with("Failure")).or_else(|| out.lines().next()).unwrap_or("The installation failed.");
+            return Err(failed(&path, reason));
+        }
+        op.update(|p| p.done = 1);
+        Ok(())
     })
 }
 

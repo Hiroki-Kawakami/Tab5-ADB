@@ -3,6 +3,7 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ffi::CStr;
@@ -31,15 +32,15 @@ pub enum Action {
 
 /// A question answered by one of its buttons; the first one is also what a
 /// tap on the scrim picks.
-pub struct Choice {
+pub struct Choice<M: Copy + 'static> {
     title: &'static str,
     message: String,
-    buttons: Vec<(&'static str, Action, Option<Msg>)>,
-    target: Handle<Msg>,
+    buttons: Vec<(&'static str, Action, Option<M>)>,
+    target: Handle<M>,
 }
 
-impl Choice {
-    pub fn new(title: &'static str, message: String, buttons: Vec<(&'static str, Action, Option<Msg>)>, target: Handle<Msg>) -> Self {
+impl<M: Copy + 'static> Choice<M> {
+    pub fn new(title: &'static str, message: String, buttons: Vec<(&'static str, Action, Option<M>)>, target: Handle<M>) -> Self {
         Self { title, message, buttons, target }
     }
 }
@@ -47,7 +48,7 @@ impl Choice {
 #[derive(Clone, Copy)]
 pub struct Pick(u8);
 
-impl Component for Choice {
+impl<M: Copy + 'static> Component for Choice<M> {
     type Msg = Pick;
 
     fn update(&mut self, Pick(index): Pick, cx: &mut Cx<Self>) {
@@ -67,7 +68,7 @@ impl Component for Choice {
     }
 }
 
-impl Screen for Choice {
+impl<M: Copy + 'static> Screen for Choice<M> {
     fn scrim_tap(&self) -> Option<Pick> {
         Some(Pick(0))
     }
@@ -226,13 +227,26 @@ pub struct ProgressDialog {
     op: Operation,
     progress: Progress,
     cancelling: bool,
-    target: Handle<Msg>,
+    done: Option<Box<dyn FnOnce()>>,
+    success: Option<(&'static str, String)>,
 }
 
 impl ProgressDialog {
-    pub fn new(title: &'static str, failure: &'static str, op: Operation, target: Handle<Msg>) -> Self {
+    pub fn new(title: &'static str, failure: &'static str, op: Operation) -> Self {
         let progress = op.progress();
-        Self { title, failure, op, progress, cancelling: false, target }
+        Self { title, failure, op, progress, cancelling: false, done: None, success: None }
+    }
+
+    /// Runs once the operation ends, however it ends.
+    pub fn on_done(mut self, done: impl FnOnce() + 'static) -> Self {
+        self.done = Some(Box::new(done));
+        self
+    }
+
+    /// Shown when the operation succeeds; otherwise the dialog just closes.
+    pub fn on_success(mut self, title: &'static str, text: String) -> Self {
+        self.success = Some((title, text));
+        self
     }
 }
 
@@ -246,10 +260,13 @@ async fn follow(this: This<ProgressDialog>) {
                 return false;
             }
             changed();
-            cx.send_to(&s.target, Msg::Reload);
-            match &s.progress.error {
-                Some(err) => cx.nav_of::<Overlay>().push(MessageScreen::new(s.failure, err.clone())),
-                None => cx.nav_of::<Overlay>().pop(),
+            if let Some(done) = s.done.take() {
+                done();
+            }
+            match (&s.progress.error, s.success.take()) {
+                (Some(err), _) => cx.nav_of::<Overlay>().push(MessageScreen::new(s.failure, err.clone())),
+                (None, Some((title, text))) if !s.progress.cancelled => cx.nav_of::<Overlay>().push(MessageScreen::new(title, text)),
+                _ => cx.nav_of::<Overlay>().pop(),
             }
             true
         });

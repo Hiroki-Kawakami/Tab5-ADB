@@ -133,6 +133,31 @@ impl Volume {
         }
     }
 
+    /// Size and modification time in seconds since 1970, following links.
+    pub async fn stat(&self, path: &str) -> Result<(u64, i64), String> {
+        match self {
+            Volume::Android(android) => android.stat(path).await,
+            Volume::Sd => {
+                let meta = idf::fs::metadata(&c_path(path)?).map_err(|err| {
+                    error!(TAG, "stat {path}: {err}");
+                    String::from("The file could not be read.")
+                })?;
+                Ok((meta.len(), meta.modified()))
+            }
+        }
+    }
+
+    /// Up to `len` bytes from `offset`, fewer at the end of the file.
+    pub async fn read_at(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        match self {
+            Volume::Android(android) => {
+                let command = alloc::format!("tail -c +{} {} 2>/dev/null | head -c {len}", offset + 1, shell_quote(path));
+                adb::services::exec(&android.conn, &command).await.map_err(|err| err.to_string())
+            }
+            Volume::Sd => read_at_sd(path, offset, len),
+        }
+    }
+
     pub async fn list(&self, path: &str) -> Result<Vec<Entry>, String> {
         let mut entries = match self {
             Volume::Android(android) => android.list(path).await?,
@@ -190,6 +215,24 @@ impl Android {
                 Entry { name: e.name, kind }
             })
             .collect())
+    }
+
+    async fn stat(&self, path: &str) -> Result<(u64, i64), String> {
+        let mut session = self.session.lock_async().await;
+        let result = match open(&mut session, &self.conn).await {
+            Ok(sync) if self.stat_v2 => sync.stat_v2(path).await,
+            Ok(sync) => sync.stat(path).await,
+            Err(err) => Err(err),
+        };
+        match result {
+            Ok(stat) if stat.exists() => Ok((stat.size, i64::from(stat.mtime))),
+            Ok(_) => Err(String::from("The file no longer exists.")),
+            Err(err) => {
+                error!(TAG, "stat {path}: {err}");
+                *session = None;
+                Err(err.to_string())
+            }
+        }
     }
 
     async fn resolve(&self, path: &str) -> Option<Kind> {
@@ -347,4 +390,61 @@ pub fn unused_name(name: &str, folder: bool, taken: impl Fn(&str) -> bool) -> St
     }
     let (stem, extension) = extension_at(name, folder).map_or((name, ""), |dot| name.split_at(dot));
     (2..).map(|n| alloc::format!("{stem} ({n}){extension}")).find(|candidate| !taken(candidate)).unwrap()
+}
+
+/// A file opened from a browser.
+#[derive(Clone)]
+pub struct FileRef {
+    pub volume: Volume,
+    /// The storage as the browser names it.
+    pub label: &'static str,
+    pub path: String,
+}
+
+impl FileRef {
+    pub fn name(&self) -> &str {
+        name_of(&self.path)
+    }
+}
+
+fn read_at_sd(path: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+    let file = idf::fs::File::open(&c_path(path)?).map_err(|err| alloc::format!("open: {err}"))?;
+    file.seek(offset).map_err(|err| alloc::format!("seek: {err}"))?;
+    let mut out = alloc::vec![0u8; len];
+    let mut filled = 0;
+    while filled < len {
+        match file.read(&mut out[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(err) => return Err(alloc::format!("read: {err}")),
+        }
+    }
+    out.truncate(filled);
+    Ok(out)
+}
+
+pub fn type_label(file_type: FileType) -> &'static str {
+    match file_type {
+        FileType::Apk => "Android package",
+        FileType::Image => "Image",
+        FileType::Video => "Video",
+        FileType::Audio => "Audio",
+        FileType::Text => "Text file",
+        FileType::Other => "File",
+    }
+}
+
+/// `YYYY-MM-DD HH:MM` in UTC.
+pub fn format_date_time(secs: i64) -> String {
+    let (days, rest) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    alloc::format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rest / 3600, rest % 3600 / 60)
 }

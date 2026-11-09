@@ -7,6 +7,9 @@ use agent_link::FrameHead;
 use devkit_gfx::{Rect, Rotation};
 
 use crate::device_info::{self, Battery, Cellular, CpuTimes, Memory, Storage, Wifi};
+use core::future::Future;
+
+use crate::apk;
 use crate::files::{self, Entry, FileType, Kind};
 use crate::screens::mirror::{Placed, strip_rect};
 
@@ -201,4 +204,65 @@ fn paths_within() {
 fn shell_quoting() {
     assert_eq!(files::shell_quote("a b"), "'a b'");
     assert_eq!(files::shell_quote("it's"), "'it'\\''s'");
+}
+
+struct Bytes(&'static [u8]);
+
+impl apk::ReadAt for Bytes {
+    fn len(&self) -> u64 {
+        self.0.len() as u64
+    }
+
+    async fn read_at(&mut self, offset: u64, len: usize) -> Result<alloc::vec::Vec<u8>, alloc::string::String> {
+        let start = (offset as usize).min(self.0.len());
+        Ok(self.0[start..(start + len).min(self.0.len())].to_vec())
+    }
+}
+
+fn read_apk(bytes: &'static [u8]) -> Result<apk::ApkInfo, alloc::string::String> {
+    let mut future = core::pin::pin!(async { apk::read(&mut Bytes(bytes)).await });
+    match future.as_mut().poll(&mut core::task::Context::from_waker(core::task::Waker::noop())) {
+        core::task::Poll::Ready(result) => result,
+        core::task::Poll::Pending => panic!("a slice never waits"),
+    }
+}
+
+#[test]
+fn apk_with_a_literal_label() {
+    let info = read_apk(include_bytes!("../simulator/sdcard/testapp.apk")).unwrap();
+    assert_eq!(info.package, "com.tab5adb.testapp");
+    assert_eq!(info.label, "Tab5 Test App");
+    assert!(info.icon.is_none());
+    assert_eq!(info.version(), "1.0 (1)");
+    assert_eq!(info.sdk(), "min 21 / target 34");
+}
+
+#[test]
+fn apk_label_from_its_resources() {
+    let info = read_apk(include_bytes!("../simulator/sdcard/resapp.apk")).unwrap();
+    assert_eq!(info.package, "com.tab5adb.resapp");
+    assert_eq!(info.label, "Resource Label App");
+    assert_eq!(info.version(), "2.3.1 (7)");
+    assert_eq!(info.sdk(), "min 24 / target 35");
+    let icon = info.icon.expect("the densest bitmap icon");
+    assert_eq!((&icon[..4], icon.len()), (&b"\x89PNG"[..], 1672));
+}
+
+#[test]
+fn not_an_apk() {
+    assert!(read_apk(include_bytes!("../simulator/sdcard/dummy.apk")).is_err());
+}
+
+#[test]
+fn date_times() {
+    assert_eq!(files::format_date_time(0), "1970-01-01 00:00");
+    assert_eq!(files::format_date_time(1_791_571_920), "2026-10-09 18:52");
+}
+
+#[test]
+fn apk_label_from_compact_resources() {
+    let info = read_apk(include_bytes!("../simulator/sdcard/resapp-compact.apk")).unwrap();
+    assert_eq!(info.label, "Resource Label App");
+    assert_eq!(info.icon.as_ref().map(Vec::len), Some(1672));
+    assert_eq!(info.sdk(), "min 34 / target 35");
 }

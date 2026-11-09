@@ -254,7 +254,8 @@
         "COPY": "icons/copy.svg",
         "PENCIL": "icons/pencil.svg",
         "TRASH": "icons/trash.svg",
-        "FOLDER_PLUS": "icons/folder-plus.svg"
+        "FOLDER_PLUS": "icons/folder-plus.svg",
+        "DOWNLOAD": "icons/download.svg"
       }
     },
     "icon_40": {
