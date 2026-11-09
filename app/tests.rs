@@ -10,6 +10,7 @@ use crate::device_info::{self, Battery, Cellular, CpuTimes, Memory, Storage, Wif
 use core::future::Future;
 
 use crate::apk;
+use crate::apps::{self, Action};
 use crate::files::{self, Entry, FileType, Kind};
 use crate::screens::mirror::{Placed, strip_rect};
 
@@ -265,4 +266,39 @@ fn apk_label_from_compact_resources() {
     assert_eq!(info.label, "Resource Label App");
     assert_eq!(info.icon.as_ref().map(Vec::len), Some(1672));
     assert_eq!(info.sdk(), "min 34 / target 35");
+}
+
+#[test]
+fn app_list() {
+    let out = "package:com.example.zeta\npackage:com.example.Alpha\n---SEP---\npackage:android\npackage:com.example.system\n---SEP---\npackage:com.example.zeta\npackage:com.example.system\n";
+    let list = apps::parse_list(out);
+    let names: alloc::vec::Vec<_> = list.iter().map(|a| (a.package.as_str(), a.system, a.disabled)).collect();
+    assert_eq!(names, [("android", true, false), ("com.example.Alpha", false, false), ("com.example.system", true, true), ("com.example.zeta", false, true)]);
+    assert!(apps::parse_list("---SEP---\n---SEP---\n").is_empty());
+}
+
+#[test]
+fn app_details() {
+    let out = "Packages:\n  Package [com.example.app] (1a2b3c):\n    versionCode=42 minSdk=28 targetSdk=35\n    versionName=1.2.3\n    timeStamp=2026-01-02 03:04:05\n    firstInstallTime=2025-12-31 23:59:58\n    lastUpdateTime=2026-01-02 03:04:05\n\nHidden system packages:\n  Package [com.example.app] (4d5e6f):\n    versionName=1.0\n---SEP---\npackage:/data/app/~~AAAA==/com.example.app-BBBB==/base.apk\npackage:/data/app/~~AAAA==/com.example.app-BBBB==/split_config.en.apk\n";
+    let details = apps::parse_details(out, "com.example.app");
+    assert_eq!(details.version, "1.2.3");
+    assert_eq!(details.installed, "2025-12-31 23:59");
+    assert_eq!(details.updated, "2026-01-02 03:04");
+    assert_eq!(details.path, "/data/app/~~AAAA==/com.example.app-BBBB==/base.apk");
+    assert_eq!(apps::parse_details("---SEP---\n", "com.example.app"), apps::Details::default());
+}
+
+#[test]
+fn app_actions() {
+    assert_eq!(Action::Disable.command("com.example.app"), "pm disable-user --user 0 'com.example.app' 2>&1");
+    assert!(Action::Launch.succeeded("  bash arg: -p\nEvents injected: 1\n## Network stats: elapsed time=10ms\n"));
+    assert!(!Action::Launch.succeeded("  bash arg: -p\n** No activities found to run, monkey aborted.\n"));
+    assert!(Action::ForceStop.succeeded("\n"));
+    assert!(Action::Uninstall.succeeded("Success\n"));
+    assert!(!Action::ClearData.succeeded("Failed\n"));
+    assert!(Action::Disable.succeeded("Package com.example.app new state: disabled-user\n"));
+    assert!(Action::Enable.succeeded("Package com.example.app new state: enabled\n"));
+    assert_eq!(apps::failure_reason("  bash arg: -p\n  bash arg: x\n** No activities found to run, monkey aborted.\n"), "** No activities found to run, monkey aborted.");
+    assert_eq!(apps::failure_reason("Failure [DELETE_FAILED_INTERNAL_ERROR]\n"), "Failure [DELETE_FAILED_INTERNAL_ERROR]");
+    assert_eq!(apps::failure_reason(""), "The command failed.");
 }

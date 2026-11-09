@@ -76,7 +76,20 @@ pub struct FolderPick {
     pub done: Box<dyn Fn() + Send>,
 }
 
-static PENDING_PICK: Mutex<Option<FolderPick>> = Mutex::new(None);
+/// A file of `file_type` to open. Once one is chosen, `result` holds its
+/// volume and path, and `done` runs.
+pub struct FilePick {
+    pub file_type: FileType,
+    pub result: Arc<Mutex<Option<(Volume, String)>>>,
+    pub done: Box<dyn Fn() + Send>,
+}
+
+enum Picking {
+    Folder(FolderPick),
+    File(FilePick),
+}
+
+static PENDING_PICK: Mutex<Option<Picking>> = Mutex::new(None);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Mode {
@@ -96,7 +109,13 @@ impl FileManagerScreen {
 
     /// Browses for a folder instead; closes once one is chosen or on Cancel.
     pub fn pick_folder(android: bool, pick: FolderPick) -> Self {
-        *PENDING_PICK.lock() = Some(pick);
+        *PENDING_PICK.lock() = Some(Picking::Folder(pick));
+        Self { mode: Mode { android, pick: true } }
+    }
+
+    /// Browses for a file instead; closes once one is chosen or on Cancel.
+    pub fn pick_file(android: bool, pick: FilePick) -> Self {
+        *PENDING_PICK.lock() = Some(Picking::File(pick));
         Self { mode: Mode { android, pick: true } }
     }
 }
@@ -133,7 +152,7 @@ pub struct Clipboard {
 struct Shared {
     clipboard: Rc<RefCell<Option<Clipboard>>>,
     storages: Handle<StorageMsg>,
-    pick: Option<Rc<FolderPick>>,
+    pick: Option<Rc<Picking>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -181,7 +200,7 @@ pub struct Storages {
     internal_free: Option<String>,
     sd_space: String,
     clipboard: Rc<RefCell<Option<Clipboard>>>,
-    pick: Option<Rc<FolderPick>>,
+    pick: Option<Rc<Picking>>,
 }
 
 impl Storages {
@@ -477,7 +496,7 @@ impl Browser {
             .height(theme.widgets.list_item.height)
             .grow(1);
         let row = ui.row([line]).padding_x(24).on_tap(Msg::Open(index as u32));
-        let row = if self.shared.pick.is_some() && entry.kind == Kind::File {
+        let row = if !self.openable(entry) {
             row.when(State::DISABLED, &[Prop::Opacity(102)]).disabled(true)
         } else if checked == Some(true) {
             row.background(colors::SELECTED)
@@ -582,8 +601,37 @@ impl Browser {
         .border_sides(Sides::TOP)
     }
 
+    fn openable(&self, entry: &Entry) -> bool {
+        match self.shared.pick.as_deref() {
+            Some(Picking::Folder(_)) => entry.kind != Kind::File,
+            Some(Picking::File(pick)) => entry.kind != Kind::File || entry.file_type() == pick.file_type,
+            None => true,
+        }
+    }
+
+    fn file_pick_bar<'a>(&'a self, ui: &'a Ui<Msg>, file_type: FileType) -> Element<'a, Msg> {
+        let theme = ui.theme();
+        ui.row([
+            ui.column([ui.text(theme.fonts.body, "Choose a File"), ui.text(theme.fonts.caption, files::type_label(file_type)).foreground(colors::MUTED).ellipsis(Elide::End)]).gap(4).grow(1),
+            ui.row([ui.text(theme.fonts.body, "Cancel")]).style(&TONAL).height(72).padding_x(24).align(Align::Center).on_tap(Msg::CancelPaste).id(id!("cancel-paste")),
+        ])
+        .gap(12)
+        .align(Align::Center)
+        .padding_each(24, 16, 24, 16 + ui.insets().bottom)
+        .border(ui.colors().divider, 1)
+        .border_sides(Sides::TOP)
+    }
+
+    fn finish_file_pick(&self, path: String, cx: &mut Cx<Self>) {
+        let Some(Picking::File(pick)) = self.shared.pick.as_deref() else { return };
+        *pick.result.lock() = Some((self.volume.clone(), path));
+        (pick.done)();
+        cx.nav_of::<Root>().pop();
+    }
+
     fn start_pick(&mut self, cx: &mut Cx<Self>) {
-        let Some(pick) = self.shared.pick.clone() else { return };
+        let Some(rc) = self.shared.pick.clone() else { return };
+        let Picking::Folder(pick) = &*rc else { return };
         if !matches!(self.entries, Some(Ok(_))) {
             return;
         }
@@ -598,7 +646,8 @@ impl Browser {
     }
 
     fn finish_pick(&mut self, cx: &mut Cx<Self>) {
-        let Some(pick) = self.shared.pick.clone() else { return };
+        let Some(rc) = self.shared.pick.clone() else { return };
+        let Picking::Folder(pick) = &*rc else { return };
         let name = files::unused_name(&pick.name, false, |name| self.taken(name));
         *pick.result.lock() = Some((self.volume.clone(), files::join(&self.path, &name)));
         (pick.done)();
@@ -760,6 +809,8 @@ impl Component for Browser {
                         cx.nav().push(Browser::new(self.volume.clone(), self.label, self.root, path, self.shared.clone()));
                     } else if self.shared.pick.is_none() {
                         cx.nav_of::<Root>().push(FilePreviewScreen::new(FileRef { volume: self.volume.clone(), label: self.label, path }));
+                    } else if self.openable(entry) {
+                        self.finish_file_pick(path, cx);
                     }
                 }
             }
@@ -823,6 +874,8 @@ impl Component for Browser {
         let clipboard = self.shared.clipboard.borrow();
         let footer = if self.selection.is_some() {
             self.tools(ui)
+        } else if let Some(Picking::File(pick)) = self.shared.pick.as_deref() {
+            self.file_pick_bar(ui, pick.file_type)
         } else if self.shared.pick.is_some() {
             self.paste_bar(ui, Transfer::Copy, 1, matches!(self.entries, Some(Ok(_))))
         } else if let Some(clip) = clipboard.as_ref() {

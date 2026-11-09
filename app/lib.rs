@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod adb_link;
 mod apk;
+mod apps;
 mod agent;
 mod device_info;
 mod file_ops;

@@ -5,6 +5,7 @@
 
 mod adb_dashboard;
 mod apk_preview;
+mod apps;
 mod connecting;
 mod device_info;
 mod file_dialogs;

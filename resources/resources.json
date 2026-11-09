@@ -255,7 +255,11 @@
         "PENCIL": "icons/pencil.svg",
         "TRASH": "icons/trash.svg",
         "FOLDER_PLUS": "icons/folder-plus.svg",
-        "DOWNLOAD": "icons/download.svg"
+        "DOWNLOAD": "icons/download.svg",
+        "PLAY": "icons/player-play.svg",
+        "STOP": "icons/square.svg",
+        "BAN": "icons/ban.svg",
+        "ERASER": "icons/eraser.svg"
       }
     },
     "icon_40": {
@@ -295,7 +299,9 @@
         "MOVIE": "icons/movie.svg",
         "PHONE": "icons/device-mobile.svg",
         "SD_CARD": "icons/device-sd-card.svg",
-        "STORAGE": "icons/database.svg"
+        "STORAGE": "icons/database.svg",
+        "INSTALL": "icons/package-export.svg",
+        "REFRESH": "icons/refresh.svg"
       }
     },
     "mono_18": {

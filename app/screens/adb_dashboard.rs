@@ -24,6 +24,7 @@ use crate::fonts::{icon, small_icon};
 use crate::preview::{self, Preview};
 use crate::resources::{colors, icons};
 
+use super::apps::AppsScreen;
 use super::device_info::DeviceInfoScreen;
 use super::file_manager::FileManagerScreen;
 use super::message::MessageScreen;
@@ -220,6 +221,7 @@ impl Component for AdbDashboardScreen {
             }
             Msg::Info => cx.nav_of::<Root>().push(DeviceInfoScreen::new(self.conn.clone())),
             Msg::Shell => cx.nav_of::<Root>().push(TerminalScreen::new(self.conn.clone())),
+            Msg::Apps => cx.nav_of::<Root>().push(AppsScreen::new()),
             Msg::FileManager => cx.nav_of::<Root>().push(FileManagerScreen::new(true)),
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
             Msg::Preview => match &self.agent {
