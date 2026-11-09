@@ -30,6 +30,7 @@ use super::file_manager::FileManagerScreen;
 use super::logcat::LogcatScreen;
 use super::message::MessageScreen;
 use super::mirror::{MirrorScreen, keycode};
+use super::screenshot::ScreenshotScreen;
 use super::settings::SettingsScreen;
 use super::terminal::TerminalScreen;
 
@@ -224,6 +225,7 @@ impl Component for AdbDashboardScreen {
             Msg::Shell => cx.nav_of::<Root>().push(TerminalScreen::new(self.conn.clone())),
             Msg::Apps => cx.nav_of::<Root>().push(AppsScreen::new()),
             Msg::Logcat => cx.nav_of::<Root>().push(LogcatScreen::new(self.conn.clone())),
+            Msg::Screenshot => cx.nav_of::<Root>().push(ScreenshotScreen::new(self.conn.clone())),
             Msg::FileManager => cx.nav_of::<Root>().push(FileManagerScreen::new(true)),
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
             Msg::Preview => match &self.agent {

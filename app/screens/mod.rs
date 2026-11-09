@@ -15,6 +15,7 @@ mod home;
 mod logcat;
 mod message;
 pub(crate) mod mirror;
+mod screenshot;
 mod settings;
 mod terminal;
 

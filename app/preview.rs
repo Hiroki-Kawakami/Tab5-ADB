@@ -42,7 +42,7 @@ const DECODE_PRIORITY: u32 = 3;
 /// Away from the UI task's core: it runs below `DECODE_PRIORITY`.
 const DECODE_CORE: u32 = 1;
 
-type Picture = ImageBuf<Caps>;
+pub(crate) type Picture = ImageBuf<Caps>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Props {
@@ -268,7 +268,7 @@ async fn screencap(this: &This<Preview>, spawner: &Spawner, size: (u16, u16)) {
                 continue;
             }
         }
-        match fit_on_worker(shot, size).await {
+        match fit_on_worker(Arc::new(shot), size).await {
             Ok(picture) => {
                 if !present(this, Arc::new(picture)) {
                     return;
@@ -280,7 +280,7 @@ async fn screencap(this: &This<Preview>, spawner: &Spawner, size: (u16, u16)) {
     }
 }
 
-async fn capture(spawner: &Spawner, conn: &Connection, jpeg: bool) -> Result<Vec<u8, Caps>, String> {
+pub(crate) async fn capture(spawner: &Spawner, conn: &Connection, jpeg: bool) -> Result<Vec<u8, Caps>, String> {
     let conn = conn.clone();
     let mut task = devkit::guard(
         spawner.spawn(async move {
@@ -301,7 +301,7 @@ async fn capture(spawner: &Spawner, conn: &Connection, jpeg: bool) -> Result<Vec
     (&mut *task).await
 }
 
-async fn fit_on_worker(shot: Vec<u8, Caps>, size: (u16, u16)) -> Result<Picture, String> {
+pub(crate) async fn fit_on_worker(shot: Arc<Vec<u8, Caps>>, size: (u16, u16)) -> Result<Picture, String> {
     let (tx, rx) = oneshot::channel();
     thread::Builder::new()
         .name("screencap")
