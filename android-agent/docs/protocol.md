@@ -55,16 +55,28 @@ Header (8 bytes)
 ```
 
 - `length` は受信側の `max_message`（HELLO で交換する）以下。超えたら受信側はストリームを閉じる。
+- `type` の上位 2 bit で種類が決まる（制御を参照）。映像・音声ストリームも同じ区分に従う。
 - 未知の `type` は読み捨てる。ただし未知の要求には `ENOTSUP` の REPLY を返す（制御を参照）。
 
 ## 制御ストリーム
 
 | type | 名前 | 向き | id |
 |---|---|---|---|
-| `0x01..0x3F` | 要求 | Tab5→agent | 1..65535 |
-| `0x40` | `REPLY` | agent→Tab5 | 要求の id |
-| `0x41..0x5F` | イベント | agent→Tab5 | 0 |
-| `0x60..0x7F` | 入力 | Tab5→agent | 0 |
+| `0x01..0x7F` | 要求 | Tab5→agent | 1..65535 |
+| `0x80` | `REPLY` | agent→Tab5 | 要求の id |
+| `0x81..0xBF` | イベント | agent→Tab5 | 0 |
+| `0xC0..0xFF` | 入力 | Tab5→agent | 0 |
+
+要求は機能ごとに 16 個ずつの区画に分ける。イベントは同じ機能の区画の値に `0x80` を足した区画を使う。
+
+| 要求 | イベント | 機能 |
+|---|---|---|
+| `0x01..0x0F` | `0x81..0x8F` | セッション |
+| `0x10..0x1F` | `0x90..0x9F` | 表示 |
+| `0x20..0x2F` | `0xA0..0xAF` | アプリ |
+| `0x30..0x3F` | `0xB0..0xBF` | メディア |
+| `0x40..0x4F` | — | 画像 |
+| `0x50..0x7F` | — | 予約 |
 
 ### 要求と REPLY
 
@@ -72,6 +84,8 @@ Header (8 bytes)
 - agent はすべての要求に REPLY をちょうど 1 つ返す。要求は並行に処理してよく、REPLY の順序は
   要求の順序と一致しなくてよい。
 - 応答を待つ時間は Tab5 が要求ごとに決める。待ち終わった後に届いた REPLY は捨てる。
+- 画像を含む result も REPLY で返す。result を付けると Tab5 の制御の `max_message` を超えるとき、
+  agent は result を付けずに `EFAIL` を返す。
 
 ```
 REPLY
@@ -136,7 +150,8 @@ REPLY result
 
 | bit | 名前 | 機能 |
 |---|---|---|
-| 0 | `VIDEO` | 映像ストリーム、`SET_ROTATION`、`ADAPT_DISPLAY`、`TOUCH` |
+| 0 | `VIDEO` | 映像ストリーム、`SET_ROTATION`、`ADAPT_DISPLAY` |
+| 1 | `INPUT` | `TOUCH`、`KEY`、`INPUT_CLEAR` |
 
 ### SET_ROTATION
 
@@ -181,13 +196,33 @@ REPLY result
 時計回りに `rotation × 90°` 回っていることを表す。端末を反時計回りに 90° 傾けて横長に
 使っている状態が 1。
 
+### 文字の画像
+
+アプリ名や曲名など端末上の文字列は、agent が端末のフォントで描いた画像として result に入れる。
+文字の大きさは要求ごとに `u8 text_px`（em の大きさ [px]）で指定する。
+
+```
+TEXT_IMAGE
+  u16 width              画像の幅 [px]。空の文字列は 0
+  u16 height             行の高さ [px]。text_px だけで決まり、文字列によらない
+  u16 ascent             上端からベースラインまで [px]
+  u16 breaks             区切りの数
+  breaks × u16           区切りの x 座標 [px]。昇順
+  ... alpha              width × height バイトの A8。行の間に詰め物は無い。0 = 透明
+```
+
+- 文字列は省略せずに 1 行で描く。幅が 2048 px を超えるなら、2048 px に収まる最後の区切りで切る。
+- 区切りは各書記素クラスタの右端の x 座標。Tab5 はこの位置で切って省略記号・フェード・マーキーを
+  付ける。
+- 色は Tab5 が付ける。
+
 ### 入力一覧
 
 | type | 名前 | 内容 |
 |---|---|---|
-| `0x60` | `TOUCH` | 映像に触れている指 |
-| `0x61` | `KEY` | キーを押した・離した |
-| `0x62` | `INPUT_CLEAR` | 押したままの指とキーをすべて離す |
+| `0xC0` | `TOUCH` | 映像に触れている指 |
+| `0xC1` | `KEY` | キーを押した・離した |
+| `0xC2` | `INPUT_CLEAR` | 押したままの指とキーをすべて離す |
 
 ### TOUCH
 
@@ -256,15 +291,15 @@ INPUT_CLEAR
   `EBUSY` を返し、ストリームを閉じる。
 
 メッセージは機能ごとに定義する。どちらのストリームでも `id` は 0、設定への応答は `REPLY`
-（`0x40`）を使う。
+（`0x80`）を使う。設定は要求、データはイベントの区分の type を使う。
 
 ### 映像ストリーム
 
 | type | 名前 | 向き |
 |---|---|---|
 | `0x01` | `VIDEO_START` | Tab5→agent |
-| `0x40` | `REPLY` | agent→Tab5 |
-| `0x41` | `FRAME` | agent→Tab5 |
+| `0x80` | `REPLY` | agent→Tab5 |
+| `0x81` | `FRAME` | agent→Tab5 |
 
 ```
 VIDEO_START
