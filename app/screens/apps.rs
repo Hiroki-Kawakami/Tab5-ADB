@@ -174,7 +174,7 @@ impl AppName {
             run
         });
         let color = canvas.colors().color(self.props.color);
-        name.draw(canvas, font, ellipsis, color);
+        name.draw(canvas, font, ellipsis, color, false);
     }
 }
 

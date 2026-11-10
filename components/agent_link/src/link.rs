@@ -14,7 +14,7 @@ use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
-use crate::protocol::{self, AppEntry, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, HELLO, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
+use crate::protocol::{self, AppEntry, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, GET_MEDIA, GET_MEDIA_RENDER, HELLO, MEDIA_CONTROL, MediaAction, MediaRender, MediaState, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::video::Video;
 use crate::{Error, Result};
 
@@ -34,6 +34,46 @@ pub struct AgentInfo {
     pub version: [u8; 3],
     pub capabilities: u32,
     pub max_message: u32,
+}
+
+/// The newest event of one type, as new ones come.
+pub struct EventWatch {
+    shared: Arc<Shared>,
+    kind: u8,
+    seen: u64,
+}
+
+impl EventWatch {
+    /// The newest event of its type not taken yet; an error once the link
+    /// closes.
+    pub async fn next(&mut self) -> Result<Vec<u8>> {
+        poll_fn(|cx| {
+            let mut events = self.shared.events.lock();
+            if let Some((_, count, payload)) = events.latest.iter().find(|(k, count, _)| *k == self.kind && *count > self.seen) {
+                self.seen = *count;
+                return Poll::Ready(Ok(payload.clone()));
+            }
+            if self.shared.closed.load(Ordering::Acquire) {
+                return Poll::Ready(Err(self.shared.error()));
+            }
+            if !events.waiters.iter().any(|w| w.will_wake(cx.waker())) {
+                events.waiters.push(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await
+    }
+}
+
+/// What GET_MEDIA_RENDER answered.
+pub struct MediaRenderReply {
+    payload: Vec<u8>,
+}
+
+impl MediaRenderReply {
+    pub fn render(&self) -> Option<MediaRender<'_>> {
+        MediaRender::parse(&self.payload)
+    }
 }
 
 /// What GET_APP_INFO answered.
@@ -64,12 +104,20 @@ struct Status {
     waiters: Vec<Waker>,
 }
 
+struct Events {
+    count: u64,
+    /// The newest of each type: type, its number in `count`, payload.
+    latest: Vec<(u8, u64, Vec<u8>)>,
+    waiters: Vec<Waker>,
+}
+
 struct Shared {
     closed: AtomicBool,
     max_send: AtomicU32,
     outbox: Mutex<Outbox>,
     requests: Mutex<Requests>,
     status: Mutex<Status>,
+    events: Mutex<Events>,
 }
 
 impl Shared {
@@ -88,6 +136,8 @@ impl Shared {
         };
         waiters.into_iter().for_each(Waker::wake);
         drop(core::mem::take(&mut self.requests.lock().waiting));
+        let waiters = core::mem::take(&mut self.events.lock().waiters);
+        waiters.into_iter().for_each(Waker::wake);
         if let Some(waker) = self.outbox.lock().waker.take() {
             waker.wake();
         }
@@ -127,6 +177,20 @@ impl Shared {
         let (tx, rx) = oneshot::channel();
         requests.waiting.push((id, tx));
         Ok((id, rx))
+    }
+
+    fn event(&self, kind: u8, payload: Vec<u8>) {
+        let waiters = {
+            let mut events = self.events.lock();
+            events.count += 1;
+            let count = events.count;
+            match events.latest.iter_mut().find(|(k, _, _)| *k == kind) {
+                Some(slot) => *slot = (kind, count, payload),
+                None => events.latest.push((kind, count, payload)),
+            }
+            core::mem::take(&mut events.waiters)
+        };
+        waiters.into_iter().for_each(Waker::wake);
     }
 
     fn forget(&self, id: u16) {
@@ -172,6 +236,8 @@ async fn read_loop(shared: Arc<Shared>, mut reader: StreamReader, max: u32) {
         }
         if header.kind == REPLY {
             shared.answer(header.id, payload);
+        } else if protocol::is_event(header.kind) {
+            shared.event(header.kind, payload);
         }
     };
     shared.shut(error);
@@ -247,6 +313,7 @@ impl Link {
             outbox: Mutex::new(Outbox { queued: Vec::new(), waker: None }),
             requests: Mutex::new(Requests { last: 0, waiting: Vec::new() }),
             status: Mutex::new(Status { error: None, waiters: Vec::new() }),
+            events: Mutex::new(Events { count: 0, latest: Vec::new(), waiters: Vec::new() }),
         });
         let tasks = Arc::new(Tasks {
             reader: Mutex::new(Some(spawner.spawn(read_loop(shared.clone(), reader, config.max_message[0])))),
@@ -343,6 +410,29 @@ impl Link {
         let payload = self.request(GET_APP_INFO, &args, timeout).await?;
         protocol::app_entries(&payload, packages.len()).ok_or(Error::Protocol)?;
         Ok(AppInfoReply { payload, count: packages.len() })
+    }
+
+    /// Events of type `kind`, starting with the newest that came before.
+    pub fn watch(&self, kind: u8) -> EventWatch {
+        EventWatch { shared: self.shared.clone(), kind, seen: 0 }
+    }
+
+    pub async fn media_state(&self, timeout: Duration) -> Result<MediaState> {
+        let reply = self.request(GET_MEDIA, &[], timeout).await?;
+        MediaState::parse(&reply).ok_or(Error::Protocol)
+    }
+
+    /// The playing track's title and `subtitle` (`protocol::SUBTITLE_*`) drawn
+    /// that large, and its art `art_px` square, none with 0.
+    pub async fn media_render(&self, title_px: u8, subtitle_px: u8, art_px: u16, subtitle: u8, timeout: Duration) -> Result<MediaRenderReply> {
+        let payload = self.request(GET_MEDIA_RENDER, &protocol::get_media_render(title_px, subtitle_px, art_px, subtitle), timeout).await?;
+        MediaRender::parse(&payload).ok_or(Error::Protocol)?;
+        Ok(MediaRenderReply { payload })
+    }
+
+    /// `Error::Status(ESTATE)` without a session, or for a seek it does not take.
+    pub async fn media_control(&self, action: MediaAction, timeout: Duration) -> Result<()> {
+        self.request(MEDIA_CONTROL, &protocol::media_control(action), timeout).await.map(drop)
     }
 
     pub fn is_closed(&self) -> bool {

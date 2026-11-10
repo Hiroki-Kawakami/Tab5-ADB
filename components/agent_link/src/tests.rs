@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, REPLY, TextImage, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
+use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_event, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -120,4 +120,30 @@ fn app_entries_bytes() {
     let second = entries[2].unwrap();
     assert_eq!((second.name.width, second.icon), (0, &[][..]));
     assert_eq!(app_entries(&b[..b.len() - 1], 3), None);
+}
+
+#[test]
+fn media_state() {
+    let b = [1, 3, 0, 0, 4, 3, 2, 1, 0x10, 0x27, 0, 0, 0x20, 0x4e, 0, 0, 0xe8, 0x03, 0, 0];
+    let state = MediaState { state: PlayState::Playing, has_art: true, can_seek: true, token: 0x0102_0304, position_ms: 10_000, duration_ms: 20_000, speed: 1000 };
+    assert_eq!(MediaState::parse(&b), Some(state));
+    assert_eq!(MediaState::parse(&b[..19]), None);
+    assert!(is_event(0xB0) && !is_event(0x80) && !is_event(0xC0));
+}
+
+#[test]
+fn media_render() {
+    assert_eq!(get_media_render(32, 20, 552, 3), [32, 20, 0x28, 0x02, 3, 0, 0, 0]);
+    let mut b = alloc::vec![1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0x55];
+    b.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0]);
+    b.extend_from_slice(&[1, 0, 1, 0, 9, 8, 7, 6]);
+    let render = MediaRender::parse(&b).unwrap();
+    assert_eq!((render.title.alpha, render.subtitle.width, render.art), (&[0x55][..], 0, &[9, 8, 7, 6][..]));
+    assert_eq!(MediaRender::parse(&b[..b.len() - 1]), None);
+}
+
+#[test]
+fn media_control_bytes() {
+    assert_eq!(media_control(MediaAction::Next), [1, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(media_control(MediaAction::Seek(0x0102_0304)), [3, 0, 0, 0, 4, 3, 2, 1]);
 }

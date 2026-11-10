@@ -34,12 +34,12 @@ final class AppInfo {
         this.text = text;
     }
 
-    static AppInfo create() throws Exception {
+    static AppInfo create(TextRender text) throws Exception {
         PackageManager packages = SystemContext.get().getPackageManager();
         if (packages == null) {
             throw new IllegalStateException("no PackageManager");
         }
-        return new AppInfo(packages, TextRender.create());
+        return new AppInfo(packages, text);
     }
 
     void write(ByteArrayOutputStream out, String name, int iconPx, int textPx) {

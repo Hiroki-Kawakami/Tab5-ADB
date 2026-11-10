@@ -18,6 +18,8 @@ mod file_ops;
 mod files;
 mod fonts;
 mod logcat;
+mod marquee;
+mod media;
 mod preview;
 mod raster_text;
 mod screens;

@@ -14,17 +14,23 @@ pub const HELLO: u8 = 0x01;
 pub const SET_ROTATION: u8 = 0x10;
 pub const ADAPT_DISPLAY: u8 = 0x11;
 pub const GET_APP_INFO: u8 = 0x20;
+pub const GET_MEDIA: u8 = 0x30;
+pub const GET_MEDIA_RENDER: u8 = 0x31;
+pub const MEDIA_CONTROL: u8 = 0x32;
 pub const REPLY: u8 = 0x80;
 
 pub const TOUCH: u8 = 0xC0;
 pub const KEY: u8 = 0xC1;
 pub const INPUT_CLEAR: u8 = 0xC2;
 
+pub const MEDIA: u8 = 0xB0;
+
 pub const VIDEO_START: u8 = 0x01;
 pub const FRAME: u8 = 0x81;
 
 pub const CAP_VIDEO: u32 = 1 << 0;
 pub const CAP_INPUT: u32 = 1 << 2;
+pub const CAP_MEDIA: u32 = 1 << 3;
 pub const CAP_APPS: u32 = 1 << 5;
 
 pub const CODEC_JPEG: u8 = 1;
@@ -307,4 +313,107 @@ pub fn app_entries(b: &[u8], count: usize) -> Option<Vec<Option<AppEntry<'_>>>> 
         entries.push(Some(AppEntry { name, icon_width, icon_height, icon }));
     }
     Some(entries)
+}
+
+pub fn is_event(kind: u8) -> bool {
+    (0x81..=0xBF).contains(&kind)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PlayState {
+    #[default]
+    None,
+    Playing,
+    Paused,
+    Buffering,
+    Stopped,
+}
+
+/// MEDIA_STATE: what GET_MEDIA answers and a MEDIA event carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct MediaState {
+    pub state: PlayState,
+    pub has_art: bool,
+    pub can_seek: bool,
+    /// Changes with the track; 0 without a session.
+    pub token: u32,
+    pub position_ms: u32,
+    /// 0 when unknown.
+    pub duration_ms: u32,
+    /// 1000 for normal speed, 0 when not playing.
+    pub speed: u16,
+}
+
+impl MediaState {
+    pub fn parse(b: &[u8]) -> Option<Self> {
+        let b = b.get(..20)?;
+        let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        let state = match b[0] {
+            1 => PlayState::Playing,
+            2 => PlayState::Paused,
+            3 => PlayState::Buffering,
+            4 => PlayState::Stopped,
+            _ => PlayState::None,
+        };
+        Some(Self {
+            state,
+            has_art: b[1] & 1 != 0,
+            can_seek: b[1] & 2 != 0,
+            token: u32_at(4),
+            position_ms: u32_at(8),
+            duration_ms: u32_at(12),
+            speed: u16::from_le_bytes([b[16], b[17]]),
+        })
+    }
+}
+
+pub const SUBTITLE_ARTIST: u8 = 1 << 0;
+pub const SUBTITLE_ALBUM: u8 = 1 << 1;
+pub const SUBTITLE_APP: u8 = 1 << 2;
+
+/// `subtitle` takes `SUBTITLE_*`.
+pub fn get_media_render(title_px: u8, subtitle_px: u8, art_px: u16, subtitle: u8) -> [u8; 8] {
+    let [a0, a1] = art_px.to_le_bytes();
+    [title_px, subtitle_px, a0, a1, subtitle, 0, 0, 0]
+}
+
+/// What GET_MEDIA_RENDER answered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MediaRender<'a> {
+    pub title: TextImage<'a>,
+    pub subtitle: TextImage<'a>,
+    pub art_width: u16,
+    pub art_height: u16,
+    /// B, G, R, A per pixel, not premultiplied; empty without art.
+    pub art: &'a [u8],
+}
+
+impl<'a> MediaRender<'a> {
+    pub fn parse(b: &'a [u8]) -> Option<Self> {
+        let (title, rest) = TextImage::parse(b)?;
+        let (subtitle, rest) = TextImage::parse(rest)?;
+        let size = rest.get(..4)?;
+        let (art_width, art_height) = (u16::from_le_bytes([size[0], size[1]]), u16::from_le_bytes([size[2], size[3]]));
+        let art = rest.get(4..4 + usize::from(art_width) * usize::from(art_height) * 4)?;
+        Some(Self { title, subtitle, art_width, art_height, art })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MediaAction {
+    PlayPause,
+    Next,
+    Previous,
+    Seek(u32),
+}
+
+pub fn media_control(action: MediaAction) -> [u8; 8] {
+    let (code, position) = match action {
+        MediaAction::PlayPause => (0, 0),
+        MediaAction::Next => (1, 0),
+        MediaAction::Previous => (2, 0),
+        MediaAction::Seek(ms) => (3, ms),
+    };
+    let [p0, p1, p2, p3] = position.to_le_bytes();
+    [code, 0, 0, 0, p0, p1, p2, p3]
 }

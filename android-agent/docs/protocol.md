@@ -122,6 +122,15 @@ REPLY
 | `0x10` | `SET_ROTATION` | 端末の画面の向きを固定する・戻す |
 | `0x11` | `ADAPT_DISPLAY` | 端末の解像度を縦横比に合わせる・戻す |
 | `0x20` | `GET_APP_INFO` | アプリの名前とアイコン |
+| `0x30` | `GET_MEDIA` | 再生中のメディアの状態 |
+| `0x31` | `GET_MEDIA_RENDER` | 再生中のメディアの文字とアート |
+| `0x32` | `MEDIA_CONTROL` | 再生中のメディアの操作 |
+
+### イベント一覧
+
+| type | 名前 | 内容 |
+|---|---|---|
+| `0xB0` | `MEDIA` | 再生中のメディアの状態が変わった |
 
 ### HELLO
 
@@ -154,7 +163,7 @@ REPLY result
 | 0 | `VIDEO` | 映像ストリーム、`SET_ROTATION`、`ADAPT_DISPLAY` |
 | 1 | `AUDIO` | 音声ストリーム（予約） |
 | 2 | `INPUT` | `TOUCH`、`KEY`、`INPUT_CLEAR` |
-| 3 | `MEDIA` | 再生中のメディア（予約） |
+| 3 | `MEDIA` | `GET_MEDIA`、`GET_MEDIA_RENDER`、`MEDIA_CONTROL`、`MEDIA` イベント |
 | 4 | `PREVIEW` | スクリーンショット・ファイルの縮小画像（予約） |
 | 5 | `APPS` | `GET_APP_INFO` |
 
@@ -221,6 +230,73 @@ REPLY result
 - 名前はランチャーに出る名前。無ければパッケージ名を描く。
 - アイコンは `icon_px` × `icon_px` に描く。
 - 1 回に載せるパッケージの数は、REPLY が Tab5 の制御の `max_message` に収まるように Tab5 が決める。
+
+### GET_MEDIA
+
+```
+GET_MEDIA
+  なし
+
+REPLY result
+  MEDIA_STATE
+
+MEDIA_STATE
+  u8  state              0 = セッションが無い, 1 = 再生中, 2 = 一時停止, 3 = バッファ中, 4 = 停止
+  u8  flags              bit 0 ART: アートがある
+                         bit 1 SEEK: シークできる
+  u16 reserved
+  u32 token              曲名・アーティスト・アルバム・アプリから作る値。0 = セッションが無い
+  u32 position_ms        この状態になったときの再生位置
+  u32 duration_ms        曲の長さ。0 = 分からない
+  u16 speed              再生速度。1000 = 等速。再生中でなければ 0
+  u16 reserved
+```
+
+- agent はメタデータを持つセッションのうち、再生中・バッファ中・一時停止の順に優先して 1 つ選ぶ。
+- 文字やアートは `token` が変わったときだけ変わる。ただし、曲が変わった後でアートだけが遅れて
+  届くことがあり、そのときは `token` を変えずに `ART` が立つ。
+- Tab5 は `speed` に従って再生位置を進めて表示する。
+
+### MEDIA
+
+`MEDIA_STATE` を運ぶイベント。agent はセッション・状態・曲・アートの有無・シークの可否が
+変わったとき、再生位置が飛んだとき（シークなど）に送る。再生が進むだけでは送らない。
+
+### GET_MEDIA_RENDER
+
+```
+GET_MEDIA_RENDER
+  u8  title_px           曲名の文字の大きさ（「文字の画像」を参照）
+  u8  subtitle_px        2 行目の文字の大きさ
+  u16 art_px             アートの一辺 [px]。0 = アートは要らない
+  u8  subtitle           2 行目に並べるもの。bit 0 = アーティスト, bit 1 = アルバム, bit 2 = アプリの名前
+  u8  reserved[3]
+
+REPLY result
+  TEXT_IMAGE title
+  TEXT_IMAGE subtitle    `subtitle` のうち空でないものを " · " でつないだもの
+  u16 art_width          0 = アートは無い
+  u16 art_height
+  ... art                art_width × art_height 個の u32。0xAARRGGBB、乗算済みでない
+```
+
+- アートは縦横比を保ったまま、短い辺が `art_px` になるように縮め、中央を `art_px` × `art_px` で
+  切り取る。
+- セッションが無ければ、文字は空、アートは無し。
+
+### MEDIA_CONTROL
+
+```
+MEDIA_CONTROL
+  u8  action             0 = 再生・一時停止, 1 = 次, 2 = 前, 3 = シーク
+  u8  reserved[3]
+  u32 position_ms        シークする位置。シークのときだけ使う
+
+REPLY result
+  なし
+```
+
+- セッションが無ければ `ESTATE`。シークできないセッションへのシークも `ESTATE`。
 
 ### 向き
 

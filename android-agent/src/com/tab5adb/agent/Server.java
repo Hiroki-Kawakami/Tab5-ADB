@@ -34,6 +34,10 @@ public final class Server {
     private static final int SET_ROTATION = 0x10;
     private static final int ADAPT_DISPLAY = 0x11;
     private static final int GET_APP_INFO = 0x20;
+    private static final int GET_MEDIA = 0x30;
+    private static final int GET_MEDIA_RENDER = 0x31;
+    private static final int MEDIA_CONTROL = 0x32;
+    private static final int MEDIA = 0xB0;
     private static final int REQUEST_LAST = 0x7F;
     private static final int REPLY = 0x80;
     private static final int TOUCH = 0xC0;
@@ -52,17 +56,21 @@ public final class Server {
 
     private static final int CAP_VIDEO = 1 << 0;
     private static final int CAP_INPUT = 1 << 2;
+    private static final int CAP_MEDIA = 1 << 3;
     private static final int CAP_APPS = 1 << 5;
     private static final int ROTATION_RELEASE = 0xFF;
 
     private static volatile boolean helloDone;
     private static volatile int videoMaxMessage;
     private static AppInfo apps;
+    private static MediaInfo media;
 
     private final OutputStream out;
     private boolean hello;
     private volatile long replyMax = 0xFFFFFFFFL;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final Object events = new Object();
+    private byte[] mediaEvent;
     private Input input;
     private boolean inputFailed;
     private final int[] touchIds = new int[MAX_POINTERS];
@@ -101,10 +109,23 @@ public final class Server {
         watchdog.setDaemon(true);
         watchdog.start();
         Looper.prepareMainLooper();
+        TextRender text = null;
         try {
-            apps = AppInfo.create();
+            text = TextRender.create();
         } catch (Throwable t) {
-            System.out.println("apps: " + t);
+            System.out.println("text: " + t);
+        }
+        if (text != null) {
+            try {
+                apps = AppInfo.create(text);
+            } catch (Throwable t) {
+                System.out.println("apps: " + t);
+            }
+            try {
+                media = MediaInfo.create(text);
+            } catch (Throwable t) {
+                System.out.println("media: " + t);
+            }
         }
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             RotationLock.release();
@@ -176,6 +197,8 @@ public final class Server {
                 onAdaptDisplay(id, payload);
             } else if (kind == GET_APP_INFO && apps != null) {
                 worker.execute(() -> onGetAppInfo(id, payload));
+            } else if ((kind == GET_MEDIA || kind == GET_MEDIA_RENDER || kind == MEDIA_CONTROL) && media != null) {
+                worker.execute(() -> onMedia(kind, id, payload));
             } else if (kind == TOUCH) {
                 onTouch(payload);
             } else if (kind == KEY) {
@@ -200,7 +223,7 @@ public final class Server {
         result.putShort((short) PROTO_VERSION);
         result.put((byte) VERSION_MAJOR).put((byte) VERSION_MINOR).put((byte) VERSION_PATCH);
         result.put((byte) 0).putShort((short) 0);
-        result.putInt(CAP_VIDEO | CAP_INPUT | (apps != null ? CAP_APPS : 0));
+        result.putInt(CAP_VIDEO | CAP_INPUT | (media != null ? CAP_MEDIA : 0) | (apps != null ? CAP_APPS : 0));
         result.putInt(MAX_MESSAGE);
         if (payload.length >= 12) {
             replyMax = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(8) & 0xFFFFFFFFL;
@@ -209,6 +232,10 @@ public final class Server {
         reply(id, OK, result.array());
         hello = true;
         helloDone = true;
+        if (media != null) {
+            startEvents();
+            media.setSink(this::sendMedia);
+        }
         System.out.println("HELLO ok");
         System.out.flush();
     }
@@ -288,6 +315,64 @@ public final class Server {
         }
     }
 
+    private void onMedia(int kind, int id, byte[] payload) {
+        try {
+            ByteBuffer p = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+            if (kind == GET_MEDIA) {
+                reply(id, OK, media.state());
+            } else if (kind == GET_MEDIA_RENDER) {
+                if (payload.length < 5) {
+                    reply(id, EINVAL, new byte[0]);
+                    return;
+                }
+                reply(id, OK, media.render(payload[0] & 0xFF, payload[1] & 0xFF, p.getShort(2) & 0xFFFF, payload[4] & 0xFF));
+            } else {
+                if (payload.length < 8) {
+                    reply(id, EINVAL, new byte[0]);
+                    return;
+                }
+                reply(id, media.control(payload[0] & 0xFF, p.getInt(4) & 0xFFFFFFFFL) ? OK : ESTATE, new byte[0]);
+            }
+        } catch (Throwable t) {
+            System.out.println("media " + kind + ": " + t);
+            try {
+                reply(id, EFAIL, new byte[0]);
+            } catch (IOException e) {
+                System.out.println("media " + kind + ": " + e);
+            }
+        }
+    }
+
+    private void sendMedia(byte[] state) {
+        synchronized (events) {
+            mediaEvent = state;
+            events.notify();
+        }
+    }
+
+    // Events wait here, so a stalled stream keeps only the newest of each type.
+    private void startEvents() {
+        Thread thread = new Thread(() -> {
+            try {
+                while (true) {
+                    byte[] state;
+                    synchronized (events) {
+                        while (mediaEvent == null) {
+                            events.wait();
+                        }
+                        state = mediaEvent;
+                        mediaEvent = null;
+                    }
+                    write(MEDIA, 0, state);
+                }
+            } catch (InterruptedException | IOException e) {
+                System.out.println("events: " + e);
+            }
+        }, "events");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     private void onTouch(byte[] payload) {
         if (payload.length < TOUCH_HEAD) {
             return;
@@ -342,10 +427,16 @@ public final class Server {
             status = EFAIL;
             result = new byte[0];
         }
-        ByteBuffer m = ByteBuffer.allocate(HEADER_BYTES + 4 + result.length).order(ByteOrder.LITTLE_ENDIAN);
-        m.putInt(4 + result.length).put((byte) REPLY).put((byte) 0).putShort((short) id);
-        m.put((byte) status).put((byte) 0).putShort((short) 0);
-        m.put(result);
+        byte[] payload = new byte[4 + result.length];
+        payload[0] = (byte) status;
+        System.arraycopy(result, 0, payload, 4, result.length);
+        write(REPLY, id, payload);
+    }
+
+    private void write(int kind, int id, byte[] payload) throws IOException {
+        ByteBuffer m = ByteBuffer.allocate(HEADER_BYTES + payload.length).order(ByteOrder.LITTLE_ENDIAN);
+        m.putInt(payload.length).put((byte) kind).put((byte) 0).putShort((short) id);
+        m.put(payload);
         synchronized (out) {
             out.write(m.array());
             out.flush();

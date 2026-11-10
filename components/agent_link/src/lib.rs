@@ -17,6 +17,6 @@ mod tests;
 mod video;
 
 pub use error::{Error, Result};
-pub use link::{AgentInfo, AppInfoReply, HelloConfig, Link};
-pub use protocol::{AppEntry, FrameHead, TextImage, Touch, TouchPoint, VideoStart};
+pub use link::{AgentInfo, AppInfoReply, EventWatch, HelloConfig, Link, MediaRenderReply};
+pub use protocol::{AppEntry, FrameHead, MediaAction, MediaRender, MediaState, PlayState, TextImage, Touch, TouchPoint, VideoStart};
 pub use video::{Frame, Jpeg, Video};

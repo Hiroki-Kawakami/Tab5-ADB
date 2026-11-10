@@ -20,7 +20,8 @@
           "log_error_tonal": "#fdecea",
           "log_debug_tonal": "#e3f2fd",
           "log_info_tonal": "#e8f5e9",
-          "log_message": "#f5f6f7"
+          "log_message": "#f5f6f7",
+          "player_track": "#d0d0d0"
         },
         "dark": {
           "card_title": "#cfd8dc",
@@ -39,7 +40,8 @@
           "log_error_tonal": "#3a1f1f",
           "log_debug_tonal": "#1a2a3a",
           "log_info_tonal": "#1f3324",
-          "log_message": "#22262b"
+          "log_message": "#22262b",
+          "player_track": "#3a3f45"
         }
       },
       "fonts": {
@@ -330,6 +332,32 @@
         "TOOL": "icons/tool.svg",
         "MOON": "icons/moon.svg",
         "SUN": "icons/sun.svg"
+      }
+    },
+    "icon_36": {
+      "size": 36,
+      "icon": {
+        "VOLUME_UP": "icons/volume.svg"
+      }
+    },
+    "icon_48": {
+      "size": 48,
+      "icon": {
+        "TRACK_NEXT": "icons/player-track-next-filled.svg",
+        "TRACK_PREVIOUS": "icons/player-track-prev-filled.svg"
+      }
+    },
+    "icon_72": {
+      "size": 72,
+      "icon": {
+        "PLAY_FILLED": "icons/player-play-filled.svg",
+        "PAUSE_FILLED": "icons/player-pause-filled.svg"
+      }
+    },
+    "icon_120": {
+      "size": 120,
+      "icon": {
+        "MUSIC": "icons/music.svg"
       }
     },
     "mono_18": {

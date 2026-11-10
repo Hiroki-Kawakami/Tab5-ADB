@@ -5,6 +5,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::OnceCell;
 use core::ffi::CStr;
 use core::future::{Future, pending, poll_fn};
 use core::pin::pin;
@@ -12,18 +13,22 @@ use core::task::Poll;
 
 use adb::link::{Connection, State as LinkState};
 use agent_link::Link;
-use agent_link::protocol::CAP_INPUT;
-use devkit_gfx::Color;
+use agent_link::protocol::{CAP_INPUT, CAP_MEDIA, SUBTITLE_APP, SUBTITLE_ARTIST};
+use agent_link::PlayState;
+use devkit_gfx::{Color, TextOptions, TextRun};
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, ColorRole, Component, Cx, Drag, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Transition, Ui, id};
+use devkit_ui::{Align, Canvas, ColorRole, Component, Cx, Drag, Elide, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Transition, Ui, id};
+use idf::executor::{self, Sender};
 use idf::log::error;
 
 use crate::adb_link::Route;
-use crate::agent::Agent;
+use crate::agent::{self, Agent};
 use crate::device_info::{self, DeviceInfo};
 use crate::fonts::{icon, small_icon};
+use crate::marquee::{self, Marquee};
+use crate::media::{self, Action, DrawSize, Drawn, Progress, Session, Update};
 use crate::preview::{self, Preview};
-use crate::resources::{colors, icons};
+use crate::resources::{self, colors, icons};
 
 use super::apps::AppsScreen;
 use super::device_info::DeviceInfoScreen;
@@ -31,6 +36,7 @@ use super::file_manager::FileManagerScreen;
 use super::logcat::LogcatScreen;
 use super::message::MessageScreen;
 use super::mirror::{MirrorScreen, keycode};
+use super::now_playing::NowPlayingScreen;
 use super::power_menu::{PowerAction, PowerMenuScreen};
 use super::screenshot::ScreenshotScreen;
 use super::settings::SettingsScreen;
@@ -46,6 +52,7 @@ const PREVIEW_WIDTH_LANDSCAPE: i16 = 288;
 const PREVIEW_HEIGHT_PORTRAIT: i16 = 852;
 const PREVIEW_HEIGHT_LANDSCAPE: i16 = 640;
 const NAV_BAR_SIZE: i16 = 80;
+const ART_SIZE: i16 = 72;
 const NAV_BAR_SIZE_LANDSCAPE: i16 = 72;
 
 const PREVIEW_BG: Color = Color::hex(0x111418);
@@ -71,9 +78,8 @@ pub enum Msg {
     Power(PowerAction),
     Settings,
     Disconnect,
-    Previous,
-    Play,
-    Next,
+    NowPlaying,
+    Media(Action),
 }
 
 const FEATURES: [(char, &str, Msg); 8] = [
@@ -97,13 +103,38 @@ pub struct AdbDashboardScreen {
     video_unavailable: bool,
     /// Keys pressed, so that a held finger sends one press.
     keys: Vec<u16>,
+    progress: Option<Progress>,
+    drawn: Option<Drawn>,
+    session: Option<Session>,
+    session_title: TextRun,
+    marquee: Marquee,
+    ellipsis: OnceCell<TextRun>,
+    poke: Option<Sender<()>>,
+    media_tasks: Option<(Task, Task)>,
 }
 
 impl AdbDashboardScreen {
     /// Without `agent`, only what plain adb can do.
     pub fn new(conn: Connection, route: Route, agent: Option<Agent>) -> Self {
         let model = device_info::model(&conn.banner());
-        Self { conn, route, model, info: None, watch: None, agent, video_unavailable: false, keys: Vec::new() }
+        Self {
+            conn,
+            route,
+            model,
+            info: None,
+            watch: None,
+            agent,
+            video_unavailable: false,
+            keys: Vec::new(),
+            progress: None,
+            drawn: None,
+            session: None,
+            session_title: TextRun::new(),
+            marquee: Marquee::new(),
+            ellipsis: OnceCell::new(),
+            poke: None,
+            media_tasks: None,
+        }
     }
 
     fn key(&mut self, code: u16, down: bool, cx: &mut Cx<Self>) {
@@ -168,6 +199,114 @@ impl AdbDashboardScreen {
     fn preview<'a>(&self, ui: &'a Ui<Msg>, width: i16, height: i16) -> Element<'a, Msg> {
         let props = preview::Props { width: width as u16, height: height as u16, screencap: self.agent.is_none() || self.video_unavailable };
         ui.child_mapped::<Preview>(props, |_| Msg::VideoUnavailable).radius(RADIUS).background(PREVIEW_BG).clip().on_tap(Msg::Preview).id(id!("preview"))
+    }
+
+    fn media_size() -> DrawSize {
+        let fonts = &resources::TOUCH.fonts;
+        DrawSize { title_px: fonts.body.px() as u8, subtitle_px: fonts.caption.px() as u8, art_px: ART_SIZE as u16, subtitle: SUBTITLE_ARTIST | SUBTITLE_APP }
+    }
+
+    fn media_update(&mut self, update: Update, cx: &mut Cx<Self>) {
+        match update {
+            Update::State(progress) => {
+                if progress.state.token == 0 {
+                    self.drawn = None;
+                }
+                self.progress = Some(progress);
+            }
+            Update::Drawn(drawn) => {
+                self.drawn = Some(drawn);
+                self.marquee.restart();
+                cx.redraw(id!("media-title"));
+                cx.redraw(id!("media-subtitle"));
+            }
+        }
+        cx.rebuild();
+    }
+
+    fn media_session(&mut self, session: Option<Session>, cx: &mut Cx<Self>) {
+        if session == self.session {
+            return;
+        }
+        let title = session.as_ref().map_or("", |s| s.title.as_str());
+        if self.session.as_ref().map_or("", |s| s.title.as_str()) != title {
+            self.session_title = TextRun::new();
+            self.session_title.layout(resources::TOUCH.fonts.body, title, &TextOptions::default());
+            self.marquee.restart();
+            cx.redraw(id!("media-title"));
+        }
+        self.session = session;
+        cx.rebuild();
+    }
+
+    fn media_control(&mut self, action: Action, cx: &mut Cx<Self>) {
+        let (conn, poke) = (self.conn.clone(), self.poke.clone());
+        let link = agent::link_with(CAP_MEDIA);
+        cx.spawn(move |_| async move {
+            match link {
+                Some(link) => media::control(&link, &conn, action).await,
+                None => {
+                    media::dispatch(&conn, action).await;
+                    if let Some(poke) = poke {
+                        let _ = poke.try_send(());
+                    }
+                }
+            }
+        });
+    }
+
+    fn playing(&self) -> bool {
+        match (&self.progress, &self.session) {
+            (Some(progress), _) => progress.state.state == PlayState::Playing,
+            (None, Some(session)) => session.state == PlayState::Playing,
+            _ => false,
+        }
+    }
+
+    fn draw_media_title<'a>(&'a self, canvas: &mut Canvas<'a, '_>) {
+        let font = canvas.theme().fonts.body;
+        let color = canvas.colors().color(ColorRole::Text);
+        if let Some(title) = self.drawn.as_ref().and_then(|d| d.title.as_ref()) {
+            self.marquee.draw(canvas, title.width(), false, |canvas, x| title.draw_at(canvas, x, title.top(font), color));
+        } else if self.session.is_some() {
+            let run = &self.session_title;
+            self.marquee.draw(canvas, run.width(), false, |canvas, x| canvas.text(x, 0, run, color));
+        }
+    }
+
+    fn draw_media_subtitle<'a>(&'a self, canvas: &mut Canvas<'a, '_>) {
+        let Some(subtitle) = self.drawn.as_ref().and_then(|d| d.subtitle.as_ref()) else { return };
+        let font = canvas.theme().fonts.caption;
+        let ellipsis = self.ellipsis.get_or_init(|| {
+            let mut run = TextRun::new();
+            run.layout(font, "...", &TextOptions::default());
+            run
+        });
+        subtitle.draw(canvas, font, ellipsis, canvas.colors().color(colors::MUTED), false);
+    }
+
+    fn media<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
+        let theme = ui.theme();
+        let art = match self.drawn.as_ref().and_then(|d| d.art.as_ref()) {
+            Some(art) => ui.row([ui.image(art)]).size(ART_SIZE, ART_SIZE).radius(12).clip(),
+            None => ui.row([ui.icon(icon(icons::MUSIC)).foreground(colors::MUTED)]).size(ART_SIZE, ART_SIZE).radius(12).align(Align::Center).justify(Justify::Center).background(ui.colors().background),
+        };
+        let title = ui.canvas(Self::draw_media_title).height(theme.fonts.body.line_height()).width_fraction(1, 1).id(id!("media-title"));
+        let subtitle = match (&self.drawn, &self.session) {
+            (Some(_), _) => ui.canvas(Self::draw_media_subtitle).height(theme.fonts.caption.line_height()).width_fraction(1, 1).id(id!("media-subtitle")),
+            (None, Some(session)) => ui.text(theme.fonts.caption, &session.artist).foreground(colors::MUTED).ellipsis(Elide::End),
+            _ => ui.empty(),
+        };
+        let texts = ui.column([title, subtitle]).gap(4).grow(1);
+        let play = if self.playing() { icons::PAUSE } else { icons::PLAY };
+        let controls = ui.row([
+            key(ui, icon(icons::PREVIOUS)).radius(32).on_tap(Msg::Media(Action::Previous)),
+            key(ui, icon(play)).radius(32).on_tap(Msg::Media(Action::PlayPause)),
+            key(ui, icon(icons::NEXT)).radius(32).on_tap(Msg::Media(Action::Next)),
+        ])
+        .gap(14)
+        .align(Align::Center);
+        ui.row([art, texts, controls]).style(&TILE).height(112).padding_x(20).gap(16).align(Align::Center).on_tap(Msg::NowPlaying)
     }
 }
 
@@ -261,7 +400,12 @@ impl Component for AdbDashboardScreen {
                 cx.rebuild();
             }
             Msg::Key(code, down) => self.key(code, down, cx),
-            _ => {}
+            Msg::NowPlaying => {
+                if let Some(link) = agent::link_with(CAP_MEDIA) {
+                    cx.nav_of::<Root>().transition(Transition::SlideUp).push(NowPlayingScreen::new(link, self.conn.clone()));
+                }
+            }
+            Msg::Media(action) => self.media_control(action, cx),
         }
     }
 
@@ -271,13 +415,13 @@ impl Component for AdbDashboardScreen {
             let nav = ui.column([nav_bar(ui, true)]).justify(Justify::End);
             let preview = self.preview(ui, PREVIEW_WIDTH_LANDSCAPE, PREVIEW_HEIGHT_LANDSCAPE).width(PREVIEW_WIDTH_LANDSCAPE);
             let rows: Vec<_> = FEATURES.chunks(4).map(|row| ui.row(row.iter().map(|&(glyph, label, msg)| feature_tile(ui, glyph, label, msg)).collect::<Vec<_>>()).gap(TILE_GAP).grow(1)).collect();
-            let main = ui.column([self.header(ui), ui.column(rows).gap(TILE_GAP).grow(1), media(ui)]).gap(GAP).grow(1);
+            let main = ui.column([self.header(ui), ui.column(rows).gap(TILE_GAP).grow(1), self.media(ui)]).gap(GAP).grow(1);
             ui.row([ui.row([nav, preview]).gap(TILE_GAP), main])
         } else {
             let tiles: Vec<_> = FEATURES.iter().map(|&(glyph, label, msg)| feature_row(ui, glyph, label, msg)).collect();
             let left = ui.column([self.preview(ui, PREVIEW_WIDTH_PORTRAIT, PREVIEW_HEIGHT_PORTRAIT).grow(1), nav_bar(ui, false)]).gap(TILE_GAP).width(PREVIEW_WIDTH_PORTRAIT);
             let middle = ui.row([left, ui.column(tiles).gap(TILE_GAP).grow(1)]).gap(GAP).grow(1);
-            ui.column([self.header(ui), middle, media(ui)])
+            ui.column([self.header(ui), middle, self.media(ui)])
         };
         body.gap(GAP)
             .padding_each(24, ui.insets().top + 4, 24, 24)
@@ -293,7 +437,24 @@ impl Screen for AdbDashboardScreen {
         self.watch = Some(cx.spawn(|this| watch(this, conn, link)));
     }
 
+    fn will_appear(&mut self, cx: &mut Cx<Self>) {
+        let follow = match agent::link_with(CAP_MEDIA) {
+            Some(link) => cx.spawn(move |this| media::follow(this, link, Self::media_size(), Self::media_update)),
+            None => {
+                let (poke, poked) = executor::channel(1);
+                self.poke = Some(poke);
+                let conn = self.conn.clone();
+                cx.spawn(move |this| media::poll(this, conn, poked, Self::media_session))
+            }
+        };
+        self.media_tasks = Some((follow, cx.spawn(tick)));
+    }
+
     fn will_disappear(&mut self, _: &mut Cx<Self>) {
+        if let Some((follow, tick)) = self.media_tasks.take() {
+            follow.abort();
+            tick.abort();
+        }
         self.keys.clear();
         if let Some(agent) = self.agent.as_ref().filter(|a| a.link().supports(CAP_INPUT))
             && let Err(err) = agent.link().input_clear()
@@ -375,10 +536,16 @@ fn feature_tile<'a>(ui: &'a Ui<Msg>, glyph: char, label: &'a str, msg: Msg) -> E
         .on_tap(msg)
 }
 
-fn media<'a>(ui: &'a Ui<Msg>) -> Element<'a, Msg> {
-    let theme = ui.theme();
-    let art = ui.row([ui.icon(icon(icons::MUSIC)).foreground(colors::MUTED)]).size(72, 72).radius(12).align(Align::Center).justify(Justify::Center).background(ui.colors().background);
-    let title = ui.column([ui.text(theme.fonts.body, "Track Title"), ui.text(theme.fonts.caption, "Artist \u{2022} App").foreground(colors::MUTED)]).gap(4).grow(1);
-    let controls = ui.row([key(ui, icon(icons::PREVIOUS)).radius(32).on_tap(Msg::Previous), key(ui, icon(icons::PLAY)).radius(32).on_tap(Msg::Play), key(ui, icon(icons::NEXT)).radius(32).on_tap(Msg::Next)]).gap(14).align(Align::Center);
-    ui.row([art, title, controls]).height(112).padding_x(20).gap(16).align(Align::Center).radius(RADIUS).background(ui.colors().surface)
+async fn tick(this: This<AdbDashboardScreen>) {
+    loop {
+        executor::sleep(marquee::FRAME).await;
+        let alive = this.with(|s, cx| {
+            if s.marquee.moving() {
+                cx.redraw(id!("media-title"));
+            }
+        });
+        if alive.is_none() {
+            return;
+        }
+    }
 }

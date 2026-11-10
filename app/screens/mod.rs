@@ -15,6 +15,7 @@ mod home;
 mod logcat;
 mod message;
 pub(crate) mod mirror;
+mod now_playing;
 mod power_menu;
 mod screenshot;
 mod settings;
