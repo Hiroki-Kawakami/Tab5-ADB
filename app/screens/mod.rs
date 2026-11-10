@@ -12,6 +12,7 @@ mod file_dialogs;
 mod file_manager;
 mod file_preview;
 mod home;
+mod image_preview;
 mod logcat;
 mod message;
 pub(crate) mod mirror;

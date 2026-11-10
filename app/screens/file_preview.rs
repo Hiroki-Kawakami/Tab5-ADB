@@ -25,6 +25,7 @@ use crate::resources::{colors, icons};
 use super::apk_preview::{ApkMsg, ApkPreview};
 use super::file_dialogs::{Action, Choice, ProgressDialog};
 use super::file_manager::{FileManagerScreen, FolderPick};
+use super::image_preview::{ImageInfoSheet, ImageMsg, ImagePreview};
 use super::message::MessageScreen;
 
 const TAG: &CStr = c"file_preview";
@@ -39,12 +40,14 @@ const BUSY: &str = "Another file operation is running.";
 /// only the details.
 pub enum Preview {
     Apk(ApkPreview),
+    Image(ImagePreview),
 }
 
 impl Preview {
     fn of(file: &FileRef) -> Option<Self> {
         match files::file_type(file.name()) {
             FileType::Apk => Some(Preview::Apk(ApkPreview::new())),
+            FileType::Image => Some(Preview::Image(ImagePreview::new())),
             _ => None,
         }
     }
@@ -54,12 +57,14 @@ impl Preview {
 pub enum Msg {
     Back,
     OpenMenu,
+    Info,
     Copy,
     Picked,
     Delete,
     DeleteConfirmed,
     Deleted,
     Apk(ApkMsg),
+    Image(ImageMsg),
 }
 
 pub struct FilePreviewScreen {
@@ -83,7 +88,14 @@ impl FilePreviewScreen {
     pub fn apk_mut(&mut self) -> Option<&mut ApkPreview> {
         match &mut self.preview {
             Some(Preview::Apk(apk)) => Some(apk),
-            None => None,
+            _ => None,
+        }
+    }
+
+    pub fn image_mut(&mut self) -> Option<&mut ImagePreview> {
+        match &mut self.preview {
+            Some(Preview::Image(image)) => Some(image),
+            _ => None,
         }
     }
 
@@ -109,11 +121,24 @@ impl FilePreviewScreen {
         }
     }
 
-    fn menu<'a>(_: &'a (), ui: &'a Ui<Msg>) -> Element<'a, Msg> {
-        menu(ui, [
+    fn menu<'a>(info: &'a bool, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
+        let info = info.then(|| menu_item(ui, Some(small_icon(icons::INFO)), "Info", Msg::Info).id(id!("menu-info")));
+        let items = info.into_iter().chain([
             menu_item(ui, Some(small_icon(icons::COPY)), "Copy", Msg::Copy).id(id!("menu-copy")),
             menu_item(ui, Some(small_icon(icons::TRASH)), "Delete", Msg::Delete).foreground(colors::DESTRUCTIVE).id(id!("menu-delete")),
-        ])
+        ]);
+        menu(ui, items.collect::<Vec<_>>())
+    }
+
+    fn show_info(&mut self, cx: &mut Cx<Self>) {
+        let Some(Preview::Image(image)) = &self.preview else { return };
+        let (size, modified) = match &self.stat {
+            Some(Ok((size, mtime))) => (files::format_bytes(*size), files::format_date_time(*mtime)),
+            _ => (String::new(), String::new()),
+        };
+        let rows = vec![("Type", files::type_label(files::file_type(self.file.name())).to_string()), ("Size", size), ("Modified", modified)];
+        let sheet = ImageInfoSheet::new(self.file.name().to_string(), rows, self.location_text(), image.details());
+        cx.nav_of::<Overlay>().push(sheet);
     }
 
     fn delete(&mut self, cx: &mut Cx<Self>) {
@@ -131,12 +156,16 @@ impl FilePreviewScreen {
         cx.nav_of::<Overlay>().push(ProgressDialog::new("Deleting", "Delete failed", op).on_done(done));
     }
 
-    fn location<'a>(&'a self, ui: &'a Ui<Msg>) -> &'a str {
+    fn location_text(&self) -> String {
         let path = match self.file.volume {
             Volume::Sd => self.file.path.strip_prefix(files::SD_ROOT).unwrap_or(&self.file.path),
             Volume::Android(_) => &self.file.path,
         };
-        ui.format(format_args!("{} \u{203a} {path}", self.file.label))
+        alloc::format!("{} \u{203a} {path}", self.file.label)
+    }
+
+    fn location<'a>(&'a self, ui: &'a Ui<Msg>) -> &'a str {
+        ui.store(&self.location_text())
     }
 
     fn info<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
@@ -163,11 +192,11 @@ fn card<'a>(ui: &'a Ui<Msg>, children: Vec<Element<'a, Msg>>) -> Element<'a, Msg
     ui.column(children).padding_x(MARGIN).radius(RADIUS).background(ui.colors().surface)
 }
 
-fn stacked<'a>(ui: &'a Ui<Msg>, label: &'a str, value: &'a str, font: &'static FontChain) -> Element<'a, Msg> {
+pub(super) fn stacked<'a, M: core::marker::Copy>(ui: &'a Ui<M>, label: &'a str, value: &'a str, font: &'static FontChain) -> Element<'a, M> {
     ui.column([ui.text(ui.theme().fonts.caption, label).foreground(colors::MUTED), ui.text(font, value).ellipsis(Elide::Middle)]).gap(4).padding_y(16)
 }
 
-fn inline<'a>(ui: &'a Ui<Msg>, label: &'a str, value: &'a str) -> Element<'a, Msg> {
+pub(super) fn inline<'a, M: core::marker::Copy>(ui: &'a Ui<M>, label: &'a str, value: &'a str) -> Element<'a, M> {
     let theme = ui.theme();
     ui.row([ui.text(theme.fonts.caption, label).foreground(colors::MUTED).grow(1), ui.text(theme.fonts.body, value)]).height(INFO_ROW_HEIGHT).align(Align::Center)
 }
@@ -188,9 +217,11 @@ impl Component for FilePreviewScreen {
             Msg::Back => cx.nav_of::<Root>().pop(),
             Msg::OpenMenu => {
                 if let Some(anchor) = cx.tap_rect() {
-                    cx.popup(Popover::new(anchor, (), Self::menu, cx.handle()).align(PopoverAlign::End));
+                    let info = matches!(self.preview, Some(Preview::Image(_)));
+                    cx.popup(Popover::new(anchor, info, Self::menu, cx.handle()).align(PopoverAlign::End));
                 }
             }
+            Msg::Info => self.show_info(cx),
             Msg::Copy => self.pick_destination(cx),
             Msg::Picked => self.copy_to_picked(cx),
             Msg::Delete => {
@@ -209,6 +240,7 @@ impl Component for FilePreviewScreen {
                 }
             }
             Msg::Apk(msg) => ApkPreview::update(self, msg, cx),
+            Msg::Image(msg) => ImagePreview::update(self, msg, cx),
         }
         cx.rebuild();
     }
@@ -219,6 +251,12 @@ impl Component for FilePreviewScreen {
         let (width, height) = ui.screen_size();
         let preview = match &self.preview {
             Some(Preview::Apk(apk)) => Some(apk.view(ui).padding(MARGIN).radius(RADIUS).background(ui.colors().surface)),
+            Some(Preview::Image(image)) => {
+                return ui
+                    .column([top_bar(ui, Some(Msg::Back), self.file.name(), more), ui.column([image.view(ui)]).grow(1).padding_each(MARGIN, 4, MARGIN, MARGIN + ui.insets().bottom)])
+                    .padding_each(0, ui.insets().top, 0, 0)
+                    .background(ui.colors().background);
+            }
             None => None,
         };
         let body = match preview {

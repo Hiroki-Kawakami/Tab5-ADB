@@ -185,23 +185,18 @@ impl Sync {
     /// Hands `path`'s content to `sink` as it arrives. An error from `sink`
     /// leaves the session unusable, since the device keeps sending.
     pub async fn pull(&mut self, path: &str, mut sink: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
-        self.stream.write(&request(RECV, path.as_bytes())).await?;
-        let mut data = Vec::new();
-        loop {
-            let mut head = [0u8; 8];
-            self.stream.read_exact(&mut head).await?;
-            let len = word(&head, 4) as usize;
-            match &head[..4] {
-                id if id == DONE => return Ok(()),
-                id if id == DATA && len <= DATA_MAX => {
-                    data.resize(len, 0);
-                    self.stream.read_exact(&mut data).await?;
-                    sink(&data)?;
-                }
-                id if id == FAIL => return Err(self.failure(len).await),
-                _ => return Err(Error::Protocol),
-            }
+        let mut recv = self.recv(path).await?;
+        while let Some(data) = recv.next().await? {
+            sink(data)?;
         }
+        Ok(())
+    }
+
+    /// `path`'s content, a piece at a time. Dropped before `next` has returned
+    /// `None`, it leaves the session unusable, since the device keeps sending.
+    pub async fn recv(&mut self, path: &str) -> Result<Recv<'_>> {
+        self.stream.write(&request(RECV, path.as_bytes())).await?;
+        Ok(Recv { sync: self, data: Vec::new(), done: false })
     }
 
     pub async fn close(mut self) -> Result<()> {
@@ -227,6 +222,37 @@ impl Sync {
         match self.stream.read_exact(&mut message).await {
             Ok(()) => Error::Sync(String::from_utf8_lossy(&message).into_owned()),
             Err(err) => err,
+        }
+    }
+}
+
+pub struct Recv<'a> {
+    sync: &'a mut Sync,
+    data: Vec<u8>,
+    done: bool,
+}
+
+impl Recv<'_> {
+    /// The next piece, at most `DATA_MAX` long; `None` past the end.
+    pub async fn next(&mut self) -> Result<Option<&[u8]>> {
+        if self.done {
+            return Ok(None);
+        }
+        let mut head = [0u8; 8];
+        self.sync.stream.read_exact(&mut head).await?;
+        let len = word(&head, 4) as usize;
+        match &head[..4] {
+            id if id == DONE => {
+                self.done = true;
+                Ok(None)
+            }
+            id if id == DATA && len <= DATA_MAX => {
+                self.data.resize(len, 0);
+                self.sync.stream.read_exact(&mut self.data).await?;
+                Ok(Some(&self.data))
+            }
+            id if id == FAIL => Err(self.sync.failure(len).await),
+            _ => Err(Error::Protocol),
         }
     }
 }

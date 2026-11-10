@@ -12,6 +12,7 @@ use core::future::Future;
 use crate::apk;
 use crate::apps::{self, Action};
 use crate::clock;
+use crate::exif;
 use crate::logcat::{Filter, Level, LineSplitter, Log};
 use crate::files::{self, Entry, FileType, Kind};
 use crate::screens::mirror::{Placed, strip_rect};
@@ -412,4 +413,131 @@ fn logcat_lines_split_across_reads() {
     splitter.feed(b"first\nsec", |l| lines.push(l.to_string()));
     splitter.feed(b"ond\r\n\nthird", |l| lines.push(l.to_string()));
     assert_eq!(lines, ["first", "second\r", ""]);
+}
+
+fn tiff(big_endian: bool, entries: &[(u16, u16, u32, &[u8])]) -> Vec<u8> {
+    let u16b = |v: u16| if big_endian { v.to_be_bytes() } else { v.to_le_bytes() };
+    let u32b = |v: u32| if big_endian { v.to_be_bytes() } else { v.to_le_bytes() };
+    let mut out = Vec::new();
+    out.extend_from_slice(if big_endian { b"MM" } else { b"II" });
+    out.extend_from_slice(&u16b(42));
+    out.extend_from_slice(&u32b(8));
+    out.extend_from_slice(&u16b(entries.len() as u16));
+    let mut data_at = 8 + 2 + entries.len() * 12 + 4;
+    let mut data = Vec::new();
+    for &(tag, kind, count, value) in entries {
+        out.extend_from_slice(&u16b(tag));
+        out.extend_from_slice(&u16b(kind));
+        out.extend_from_slice(&u32b(count));
+        if value.len() <= 4 {
+            let mut inline = value.to_vec();
+            inline.resize(4, 0);
+            out.extend_from_slice(&inline);
+        } else {
+            out.extend_from_slice(&u32b(data_at as u32));
+            data.extend_from_slice(value);
+            data_at += value.len();
+        }
+    }
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&data);
+    out
+}
+
+fn jpeg_with(tiff: &[u8]) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    out.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+    out.extend_from_slice(b"Exif\0\0");
+    out.extend_from_slice(tiff);
+    out.extend_from_slice(&[0xFF, 0xDA, 0, 2]);
+    out
+}
+
+#[test]
+fn exif_from_a_jpeg() {
+    let le = |v: u32| v.to_le_bytes();
+    let ratio = |n: u32, d: u32| [le(n), le(d)].concat();
+    let shutter = ratio(1, 120);
+    let aperture = ratio(18, 10);
+    let bias = [(-3i32 as u32).to_le_bytes(), 10u32.to_le_bytes()].concat();
+    let t = tiff(false, &[
+        (0x010F, 2, 8, b"Example\0"),
+        (0x0110, 2, 12, b"Example One\0"),
+        (0x0112, 3, 1, &6u16.to_le_bytes()),
+        (0x9003, 2, 20, b"2026:01:02 03:04:05\0"),
+        (0x829A, 5, 1, &shutter),
+        (0x829D, 5, 1, &aperture),
+        (0x8827, 3, 1, &200u16.to_le_bytes()),
+        (0x9204, 10, 1, &bias),
+        (0x9209, 3, 1, &1u16.to_le_bytes()),
+    ]);
+    let exif = exif::parse(&jpeg_with(&t)).unwrap();
+    assert_eq!(exif.make, "Example");
+    assert_eq!(exif.model, "Example One");
+    assert_eq!(exif.orientation, 6);
+    assert_eq!(exif.taken, "2026:01:02 03:04:05");
+    assert_eq!(exif.shutter, Some((1, 120)));
+    assert_eq!(exif.aperture, Some(1.8));
+    assert_eq!(exif.iso, Some(200));
+    assert_eq!(exif.exposure_bias, Some(-0.3));
+    assert_eq!(exif.flash, Some(1));
+}
+
+#[test]
+fn exif_big_endian_tiff() {
+    let t = tiff(true, &[(0x0112, 3, 1, &8u16.to_be_bytes()), (0x0131, 2, 6, b"Tool\x01\0")]);
+    let exif = exif::parse(&t).unwrap();
+    assert_eq!(exif.orientation, 8);
+    assert_eq!(exif.software, "Tool");
+}
+
+#[test]
+fn exif_cut_short_or_broken() {
+    let t = tiff(false, &[(0x0112, 3, 1, &3u16.to_le_bytes()), (0x010F, 2, 8, b"Example\0")]);
+    let jpeg = jpeg_with(&t);
+    let cut = &jpeg[..jpeg.len() - 12];
+    let exif = exif::parse(cut).unwrap();
+    assert_eq!(exif.orientation, 3);
+    assert_eq!(exif.make, "");
+    let mut bad = tiff(false, &[(0x010F, 2, 8, b"Example\0")]);
+    bad[18..22].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+    assert_eq!(exif::parse(&bad), None);
+    assert_eq!(exif::parse(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 2]), None);
+    assert_eq!(exif::parse(b"not an image"), None);
+}
+
+#[test]
+fn exif_from_a_png_and_a_webp() {
+    let t = tiff(false, &[(0x0112, 3, 1, &2u16.to_le_bytes())]);
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend_from_slice(&13u32.to_be_bytes());
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&[0; 17]);
+    png.extend_from_slice(&(t.len() as u32).to_be_bytes());
+    png.extend_from_slice(b"eXIf");
+    png.extend_from_slice(&t);
+    png.extend_from_slice(&[0; 4]);
+    assert_eq!(exif::parse(&png).unwrap().orientation, 2);
+
+    let mut webp = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+    webp.extend_from_slice(&10u32.to_le_bytes());
+    webp.extend_from_slice(&[0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    webp.extend_from_slice(b"VP8 ");
+    webp.extend_from_slice(&5u32.to_le_bytes());
+    webp.extend_from_slice(&[0; 6]);
+    webp.extend_from_slice(b"EXIF");
+    webp.extend_from_slice(&((t.len() + 6) as u32).to_le_bytes());
+    webp.extend_from_slice(b"Exif\0\0");
+    webp.extend_from_slice(&t);
+    let riff = (webp.len() - 8) as u32;
+    webp[4..8].copy_from_slice(&riff.to_le_bytes());
+    assert_eq!(exif::parse(&webp).unwrap().orientation, 2);
+    assert!(exif::webp_has_exif(&webp[..21]));
+    let mut reads = 0;
+    let exif = exif::webp_exif(&webp[..21], |at, len| {
+        reads += 1;
+        Some(webp[at..(at + len).min(webp.len())].to_vec())
+    });
+    assert_eq!(exif.unwrap().orientation, 2);
+    assert_eq!(reads, 4);
 }

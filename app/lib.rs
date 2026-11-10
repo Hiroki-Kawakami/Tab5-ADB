@@ -14,6 +14,7 @@ mod apps;
 mod agent;
 mod clock;
 mod device_info;
+mod exif;
 mod file_ops;
 mod files;
 mod fonts;
