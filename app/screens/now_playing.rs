@@ -6,8 +6,8 @@
 use core::cell::OnceCell;
 
 use adb::link::Connection;
-use agent_link::protocol::{SUBTITLE_ALBUM, SUBTITLE_ARTIST};
-use agent_link::{Link, PlayState};
+use agent_link::protocol::{CAP_AUDIO, SUBTITLE_ALBUM, SUBTITLE_ARTIST};
+use agent_link::{AudioSource, Link, PlayState};
 use devkit_gfx::{TextOptions, TextRun};
 use devkit_ui::widgets::{slider, slider_value, top_bar};
 use devkit_ui::{Align, Canvas, ColorRole, Component, Cx, Drag, Element, Icon, Justify, Part, Prop, Screen, State, Task, This, Ui, id};
@@ -17,7 +17,9 @@ use idf::time::Instant;
 use crate::fonts::{icon_120, icon_36, icon_48, icon_72};
 use crate::marquee::{self, Marquee};
 use crate::media::{self, Action, DrawSize, Drawn, Progress, Update};
+use crate::phone_audio::PhoneAudio;
 use crate::resources::{self, colors, icons};
+use crate::settings::{self, AudioPlayback};
 
 const ART: i16 = 552;
 const ART_RADIUS: u8 = 24;
@@ -43,6 +45,8 @@ pub enum Msg {
     Control(Action),
     Seek(Drag),
     Volume(Drag),
+    Mute,
+    Cast,
 }
 
 /// The playing track, large, with its controls; needs the agent.
@@ -54,13 +58,19 @@ pub struct NowPlayingScreen {
     marquee: Marquee,
     ellipsis: OnceCell<TextRun>,
     seeking: Option<u8>,
-    volume: u8,
+    volume: Option<u8>,
+    /// A volume step is on its way to the device.
+    volume_busy: bool,
+    /// The step to send once it has arrived.
+    volume_next: Option<u8>,
+    volume_sent: Option<u8>,
     tasks: Option<(Task, Task)>,
+    audio: Option<PhoneAudio>,
 }
 
 impl NowPlayingScreen {
     pub fn new(link: Link, conn: Connection) -> Self {
-        Self { link, conn, progress: None, drawn: None, marquee: Marquee::new(), ellipsis: OnceCell::new(), seeking: None, volume: 160, tasks: None }
+        Self { link, conn, progress: None, drawn: None, marquee: Marquee::new(), ellipsis: OnceCell::new(), seeking: None, volume: None, volume_busy: false, volume_next: None, volume_sent: None, tasks: None, audio: None }
     }
 
     fn size() -> DrawSize {
@@ -84,6 +94,65 @@ impl NowPlayingScreen {
             }
         }
         cx.rebuild();
+    }
+
+    fn play_here(&mut self, on: bool) {
+        self.audio = None;
+        if on && self.link.supports(CAP_AUDIO) {
+            self.audio = PhoneAudio::start(self.link.clone(), AudioSource::Media);
+        }
+    }
+
+    fn cast(&mut self) {
+        let here = settings::now_playing_playback() != AudioPlayback::Tab5;
+        settings::set_now_playing_playback(if here { AudioPlayback::Tab5 } else { AudioPlayback::Android });
+        settings::commit();
+        self.play_here(here);
+    }
+
+    fn set_volume(&mut self, drag: Drag, cx: &mut Cx<Self>) {
+        let Some(progress) = self.progress.as_mut().filter(|p| p.state.volume_max > 0) else { return };
+        let value = slider_value(drag);
+        let step = ((u16::from(value) * u16::from(progress.state.volume_max) + 127) / 255) as u8;
+        let reported = progress.state.volume;
+        progress.state.muted = false;
+        if drag.ended {
+            self.volume = None;
+            progress.state.volume = step;
+        } else {
+            self.volume = Some(value);
+        }
+        if self.volume_sent != Some(step) || reported != step {
+            self.send_volume(step, cx);
+        }
+    }
+
+    fn mute(&mut self, cx: &mut Cx<Self>) {
+        let Some(progress) = self.progress.as_mut() else { return };
+        let mute = !progress.state.muted;
+        progress.state.muted = mute;
+        let link = self.link.clone();
+        cx.spawn(move |_| async move { media::set_mute(&link, mute).await });
+    }
+
+    /// One request at a time; steps that come meanwhile collapse into the last.
+    fn send_volume(&mut self, step: u8, cx: &mut Cx<Self>) {
+        if self.volume_busy {
+            self.volume_next = Some(step);
+            return;
+        }
+        self.volume_busy = true;
+        self.volume_sent = Some(step);
+        let link = self.link.clone();
+        cx.spawn(move |this| async move {
+            media::set_volume(&link, step).await;
+            this.with(|s, cx| {
+                s.volume_busy = false;
+                if let Some(next) = s.volume_next.take().filter(|&next| s.volume_sent != Some(next)) {
+                    s.send_volume(next, cx);
+                }
+            });
+        });
     }
 
     fn seek(&mut self, drag: Drag, cx: &mut Cx<Self>) {
@@ -160,8 +229,22 @@ impl NowPlayingScreen {
             .align(Align::Center)
             .justify(Justify::Center);
         let transport = row(ui, ui.empty(), buttons, ui.empty());
-        let speaker = ui.row([ui.icon(icon_36(icons::VOLUME_UP)).foreground(ColorRole::Text)]).size(ICON_BUTTON, ICON_BUTTON).align(Align::Center).justify(Justify::Center);
-        let volume = row(ui, speaker, player_slider(ui, self.volume, Msg::Volume), ui.empty());
+        let level = match (self.volume, state) {
+            (Some(value), _) => value,
+            (None, Some(s)) if s.volume_max > 0 => (u16::from(s.volume) * 255 / u16::from(s.volume_max)) as u8,
+            _ => 0,
+        };
+        let speaker = match state {
+            Some(s) if s.muted => icons::VOLUME_MUTED,
+            _ if level == 0 => icons::VOLUME_ZERO,
+            _ if level < 128 => icons::VOLUME_DOWN,
+            _ => icons::VOLUME_UP,
+        };
+        let speaker = ui.row([ui.icon(icon_36(speaker)).foreground(ColorRole::Text)]).size(ICON_BUTTON, ICON_BUTTON).radius((ICON_BUTTON / 2) as u8).align(Align::Center).justify(Justify::Center).when(State::PRESSED, &[Prop::Background(colors::PRESSED)]).on_tap(Msg::Mute).id(id!("mute"));
+        let here = settings::now_playing_playback() == AudioPlayback::Tab5;
+        let cast = ui.row([ui.icon(icon_36(icons::CAST)).foreground(if here { ColorRole::Surface } else { ColorRole::Text })]).size(ICON_BUTTON, ICON_BUTTON).radius((ICON_BUTTON / 2) as u8).align(Align::Center).justify(Justify::Center);
+        let cast = if here { cast.background(ColorRole::Text) } else { cast.when(State::PRESSED, &[Prop::Background(colors::PRESSED)]) };
+        let volume = row(ui, speaker, player_slider(ui, level, Msg::Volume).disabled(!state.is_some_and(|s| s.volume_max > 0)), cast.on_tap(Msg::Cast).id(id!("cast")));
         let fonts = &theme.fonts;
         let title = ui.canvas(Self::draw_title).height(TITLE_HEIGHT).width_fraction(1, 1).id(id!("title"));
         let subtitle = ui.canvas(Self::draw_subtitle).height(fonts.body.line_height()).width_fraction(1, 1).id(id!("subtitle"));
@@ -223,7 +306,9 @@ impl Component for NowPlayingScreen {
                 cx.spawn(move |_| async move { media::control(&link, &conn, action).await });
             }
             Msg::Seek(drag) => self.seek(drag, cx),
-            Msg::Volume(drag) => self.volume = slider_value(drag),
+            Msg::Volume(drag) => self.set_volume(drag, cx),
+            Msg::Mute => self.mute(cx),
+            Msg::Cast => self.cast(),
         }
         cx.rebuild();
     }
@@ -249,12 +334,14 @@ impl Component for NowPlayingScreen {
 
 impl Screen for NowPlayingScreen {
     fn will_appear(&mut self, cx: &mut Cx<Self>) {
+        self.play_here(settings::now_playing_playback() == AudioPlayback::Tab5);
         let link = self.link.clone();
         let follow = cx.spawn(move |this| media::follow(this, link, Self::size(), Self::apply));
         self.tasks = Some((follow, cx.spawn(tick)));
     }
 
     fn will_disappear(&mut self, _: &mut Cx<Self>) {
+        self.audio = None;
         if let Some((follow, tick)) = self.tasks.take() {
             follow.abort();
             tick.abort();

@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_event, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
+use crate::protocol::{AudioCodec, AudioFormat, AudioSource, Channel, audio_start, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_event, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -124,8 +124,8 @@ fn app_entries_bytes() {
 
 #[test]
 fn media_state() {
-    let b = [1, 3, 0, 0, 4, 3, 2, 1, 0x10, 0x27, 0, 0, 0x20, 0x4e, 0, 0, 0xe8, 0x03, 0, 0];
-    let state = MediaState { state: PlayState::Playing, has_art: true, can_seek: true, token: 0x0102_0304, position_ms: 10_000, duration_ms: 20_000, speed: 1000 };
+    let b = [1, 7, 0, 0, 4, 3, 2, 1, 0x10, 0x27, 0, 0, 0x20, 0x4e, 0, 0, 0xe8, 0x03, 7, 25];
+    let state = MediaState { state: PlayState::Playing, has_art: true, can_seek: true, muted: true, token: 0x0102_0304, position_ms: 10_000, duration_ms: 20_000, speed: 1000, volume: 7, volume_max: 25 };
     assert_eq!(MediaState::parse(&b), Some(state));
     assert_eq!(MediaState::parse(&b[..19]), None);
     assert!(is_event(0xB0) && !is_event(0x80) && !is_event(0xC0));
@@ -146,4 +146,14 @@ fn media_render() {
 fn media_control_bytes() {
     assert_eq!(media_control(MediaAction::Next), [1, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(media_control(MediaAction::Seek(0x0102_0304)), [3, 0, 0, 0, 4, 3, 2, 1]);
+    assert_eq!(media_control(MediaAction::Volume(9)), [4, 0, 0, 0, 9, 0, 0, 0]);
+    assert_eq!(media_control(MediaAction::Mute(true)), [5, 0, 0, 0, 1, 0, 0, 0]);
+}
+
+#[test]
+fn audio_start_and_format() {
+    assert_eq!(audio_start(AudioCodec::Opus, AudioSource::All), [2, 1, 0, 0]);
+    assert_eq!(audio_start(AudioCodec::Pcm, AudioSource::Media), [1, 0, 0, 0]);
+    assert_eq!(AudioFormat::parse(&[2, 2, 0, 0, 0x80, 0xbb, 0, 0]), Some(AudioFormat { codec: AudioCodec::Opus, channels: 2, rate: 48000 }));
+    assert_eq!(AudioFormat::parse(&[3, 2, 0, 0, 0x80, 0xbb, 0, 0]), None);
 }

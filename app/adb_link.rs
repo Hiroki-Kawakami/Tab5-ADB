@@ -148,6 +148,11 @@ fn begin(route: Route, transport: Box<dyn Transport>) -> Result<Connection, Stri
     Ok(conn)
 }
 
+/// How the open connection goes.
+pub fn route() -> Option<Route> {
+    CONNECTION.lock().as_ref().map(|(route, _)| route.clone())
+}
+
 /// The open connection, whichever route it took.
 pub fn connection() -> Option<Connection> {
     CONNECTION.lock().as_ref().map(|(_, conn)| conn.clone()).filter(|conn| !matches!(conn.state(), State::Closed(_)))

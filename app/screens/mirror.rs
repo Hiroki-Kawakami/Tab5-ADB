@@ -10,8 +10,8 @@ use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use core::time::Duration;
 
-use agent_link::protocol::ROTATION_RELEASE;
-use agent_link::{Frame, FrameHead, Jpeg, Link, Touch, VideoStart};
+use agent_link::protocol::{CAP_AUDIO, ROTATION_RELEASE};
+use agent_link::{AudioSource, Frame, FrameHead, Jpeg, Link, Touch, VideoStart};
 use devkit::Lease;
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
 use devkit_ui::widgets::{divider, vertical_divider};
@@ -28,7 +28,8 @@ use media_engine::{DecodeConfig, Decoder, Transform, Yuv, YuvRange, YuvStandard}
 use crate::adb_link;
 use crate::fonts::icon;
 use crate::resources::{colors, icons};
-use crate::settings::{self, MirrorOrientation};
+use crate::phone_audio::PhoneAudio;
+use crate::settings::{self, AudioPlayback, MirrorOrientation};
 use crate::{STRIP_LANES, SharedSram};
 
 const TAG: &CStr = c"mirror";
@@ -629,6 +630,7 @@ pub struct MirrorScreen {
     swipe: Option<(i16, i16)>,
     /// The surface is in the view; screen moves cannot draw over it.
     live: bool,
+    audio: Option<PhoneAudio>,
 }
 
 impl MirrorScreen {
@@ -662,7 +664,7 @@ impl MirrorScreen {
         });
         let mut passthrough = Passthrough { link: link.clone(), shared: shared.clone(), entered: Vec::new(), last: None, failing: false };
         surface.set_on_touch(move |points, sampled_ms| passthrough.touched(points, sampled_ms));
-        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, keys: Vec::new(), display: DisplayMode::Fit, adapting: false, adapt_refused: false, fills: false, swipe: None, live: false })
+        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, keys: Vec::new(), display: DisplayMode::Fit, adapting: false, adapt_refused: false, fills: false, swipe: None, live: false, audio: None })
     }
 
     fn start(&mut self, cx: &mut Cx<Self>) {
@@ -960,6 +962,9 @@ impl Screen for MirrorScreen {
     fn did_appear(&mut self, cx: &mut Cx<Self>) {
         self.leaving = false;
         self.live = true;
+        if self.audio.is_none() && settings::mirror_playback() == AudioPlayback::Tab5 && self.link.supports(CAP_AUDIO) {
+            self.audio = PhoneAudio::start(self.link.clone(), AudioSource::All);
+        }
         cx.rebuild();
         if !self.switching && self.player.is_none() {
             self.start(cx);
@@ -968,6 +973,7 @@ impl Screen for MirrorScreen {
 
     fn will_disappear(&mut self, cx: &mut Cx<Self>) {
         self.live = false;
+        self.audio = None;
         cx.rebuild();
         self.keys.clear();
         if let Err(err) = self.link.input_clear() {

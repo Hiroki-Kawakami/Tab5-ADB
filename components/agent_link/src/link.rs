@@ -15,6 +15,8 @@ use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
 use crate::protocol::{self, AppEntry, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, GET_MEDIA, GET_MEDIA_RENDER, HELLO, MEDIA_CONTROL, MediaAction, MediaRender, MediaState, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
+use crate::audio::Audio;
+use crate::protocol::{AudioCodec, AudioSource};
 use crate::video::Video;
 use crate::{Error, Result};
 
@@ -389,6 +391,15 @@ impl Link {
             return Err(self.shared.error());
         }
         Video::open(&self.conn, &Channel::Video.service(&self.id), start, self.config.max_message[1], timeout).await
+    }
+
+    /// The device's sound from `source`, which it stops playing itself while
+    /// the stream is open; one at a time, so opening another ends the last.
+    pub async fn open_audio(&self, codec: AudioCodec, source: AudioSource, timeout: Duration) -> Result<Audio> {
+        if self.is_closed() {
+            return Err(self.shared.error());
+        }
+        Audio::open(&self.conn, &Channel::Audio.service(&self.id), codec, source, self.config.max_message[2], timeout).await
     }
 
     /// Holds the device's screen at `rotation`, or gives it back with

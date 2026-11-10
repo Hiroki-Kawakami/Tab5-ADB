@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+mod audio;
 mod error;
 mod link;
 pub mod protocol;
@@ -16,7 +17,8 @@ pub mod protocol;
 mod tests;
 mod video;
 
+pub use audio::{Audio, AudioMessage};
 pub use error::{Error, Result};
 pub use link::{AgentInfo, AppInfoReply, EventWatch, HelloConfig, Link, MediaRenderReply};
-pub use protocol::{AppEntry, FrameHead, MediaAction, MediaRender, MediaState, PlayState, TextImage, Touch, TouchPoint, VideoStart};
+pub use protocol::{AppEntry, AudioCodec, AudioFormat, AudioSource, FrameHead, MediaAction, MediaRender, MediaState, PlayState, TextImage, Touch, TouchPoint, VideoStart};
 pub use video::{Frame, Jpeg, Video};

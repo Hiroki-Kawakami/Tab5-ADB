@@ -16,12 +16,12 @@ const NAMESPACE: &CStr = c"tab5adb";
 pub const MIN_BRIGHTNESS: u8 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SoundPlayback {
+pub enum AudioPlayback {
     Tab5,
     Android,
 }
 
-impl Value for SoundPlayback {
+impl Value for AudioPlayback {
     type Raw = u8;
     type Arg<'a> = Self;
 
@@ -173,7 +173,8 @@ struct Store {
     display: Option<&'static Display>,
     brightness: Setting<u8>,
     color_depth: Setting<ColorDepth>,
-    sound_playback: Setting<SoundPlayback>,
+    mirror_playback: Setting<AudioPlayback>,
+    now_playing_playback: Setting<AudioPlayback>,
     agent_mode: Setting<AgentMode>,
     mirror_orientation: Setting<MirrorOrientation>,
     utc_offset: Setting<i16>,
@@ -184,7 +185,8 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     display: None,
     brightness: Setting::new(c"brightness", 80, |percent| percent.clamp(MIN_BRIGHTNESS, 100)),
     color_depth: Setting::new(c"color_depth", ColorDepth::Bits24, keep),
-    sound_playback: Setting::new(c"playback", SoundPlayback::Tab5, keep),
+    mirror_playback: Setting::new(c"playback", AudioPlayback::Tab5, keep),
+    now_playing_playback: Setting::new(c"np_playback", AudioPlayback::Tab5, keep),
     agent_mode: Setting::new(c"agent_mode", AgentMode::Normal, keep),
     mirror_orientation: Setting::new(c"mirror_orient", MirrorOrientation::Device, keep),
     utc_offset: Setting::new(c"utc_offset", 0, |minutes| minutes.clamp(-14 * 60, 14 * 60)),
@@ -196,7 +198,8 @@ pub fn init() {
         Ok(nvs) => {
             store.brightness.load(&nvs);
             store.color_depth.load(&nvs);
-            store.sound_playback.load(&nvs);
+            store.mirror_playback.load(&nvs);
+            store.now_playing_playback.load(&nvs);
             store.agent_mode.load(&nvs);
             store.mirror_orientation.load(&nvs);
             store.utc_offset.load(&nvs);
@@ -220,7 +223,8 @@ pub fn commit() {
     };
     let mut written = store.brightness.commit(nvs);
     written |= store.color_depth.commit(nvs);
-    written |= store.sound_playback.commit(nvs);
+    written |= store.mirror_playback.commit(nvs);
+    written |= store.now_playing_playback.commit(nvs);
     written |= store.agent_mode.commit(nvs);
     written |= store.mirror_orientation.commit(nvs);
     written |= store.utc_offset.commit(nvs);
@@ -248,12 +252,20 @@ pub fn set_color_depth(depth: ColorDepth) {
     STORE.lock().color_depth.set(depth);
 }
 
-pub fn sound_playback() -> SoundPlayback {
-    STORE.lock().sound_playback.value
+pub fn mirror_playback() -> AudioPlayback {
+    STORE.lock().mirror_playback.value
 }
 
-pub fn set_sound_playback(playback: SoundPlayback) {
-    STORE.lock().sound_playback.set(playback);
+pub fn set_mirror_playback(playback: AudioPlayback) {
+    STORE.lock().mirror_playback.set(playback);
+}
+
+pub fn now_playing_playback() -> AudioPlayback {
+    STORE.lock().now_playing_playback.value
+}
+
+pub fn set_now_playing_playback(playback: AudioPlayback) {
+    STORE.lock().now_playing_playback.set(playback);
 }
 
 pub fn agent_mode() -> AgentMode {

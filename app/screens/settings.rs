@@ -15,7 +15,7 @@ use idf::sync::OnceLock;
 
 use crate::fonts::icon;
 use crate::resources::{colors, icons};
-use crate::settings::{self, AgentMode, ColorDepth, MirrorOrientation, SoundPlayback};
+use crate::settings::{self, AgentMode, AudioPlayback, ColorDepth, MirrorOrientation};
 use crate::{SHARED_SRAM_BYTES, STRIP_LANES, SharedSram};
 
 const TAG: &CStr = c"settings";
@@ -43,14 +43,16 @@ pub enum SettingsMsg {
     RotationLock,
     Volume(u8),
     Equalizer(bool),
-    OpenPlayback,
-    Playback(usize),
+    OpenMirrorPlayback,
+    MirrorPlayback(usize),
+    OpenNowPlayingPlayback,
+    NowPlayingPlayback(usize),
     AgentMode(usize),
     OpenOrientation,
     Orientation(usize),
 }
 
-const PLAYBACKS: [(SoundPlayback, &str); 2] = [(SoundPlayback::Tab5, "M5Stack Tab5"), (SoundPlayback::Android, "Android Device")];
+const PLAYBACKS: [(AudioPlayback, &str); 2] = [(AudioPlayback::Tab5, "M5Stack Tab5"), (AudioPlayback::Android, "Android Device")];
 const PLAYBACK_LABELS: [&str; 2] = [PLAYBACKS[0].1, PLAYBACKS[1].1];
 const COLOR_DEPTHS: [ColorDepth; 2] = [ColorDepth::Bits16, ColorDepth::Bits24];
 const AGENT_MODES: [AgentMode; 2] = [AgentMode::Normal, AgentMode::Limited];
@@ -139,12 +141,18 @@ impl Component for SettingsScreen {
             }
             SettingsMsg::Volume(value) => self.volume = value,
             SettingsMsg::Equalizer(on) => self.equalizer = on,
-            SettingsMsg::OpenPlayback => {
+            SettingsMsg::OpenMirrorPlayback => {
                 if let Some(anchor) = cx.tap_rect() {
-                    cx.popup(DropdownMenu::new(anchor, &PLAYBACK_LABELS, playback_index(), cx.handle(), SettingsMsg::Playback));
+                    cx.popup(DropdownMenu::new(anchor, &PLAYBACK_LABELS, playback_index(settings::mirror_playback()), cx.handle(), SettingsMsg::MirrorPlayback));
                 }
             }
-            SettingsMsg::Playback(index) => settings::set_sound_playback(PLAYBACKS[index].0),
+            SettingsMsg::MirrorPlayback(index) => settings::set_mirror_playback(PLAYBACKS[index].0),
+            SettingsMsg::OpenNowPlayingPlayback => {
+                if let Some(anchor) = cx.tap_rect() {
+                    cx.popup(DropdownMenu::new(anchor, &PLAYBACK_LABELS, playback_index(settings::now_playing_playback()), cx.handle(), SettingsMsg::NowPlayingPlayback));
+                }
+            }
+            SettingsMsg::NowPlayingPlayback(index) => settings::set_now_playing_playback(PLAYBACKS[index].0),
             SettingsMsg::AgentMode(index) => settings::set_agent_mode(AGENT_MODES[index]),
             SettingsMsg::OpenOrientation => {
                 if let Some(anchor) = cx.tap_rect() {
@@ -184,7 +192,6 @@ impl Component for SettingsScreen {
                         [
                             slider_row(ui, "Volume", ui.format(format_args!("{}", percent(self.volume))), self.volume, |d| SettingsMsg::Volume(slider_value(d))).id(id!("volume")),
                             table_row(ui, [table_label(ui, "Equalizer"), switch(ui, self.equalizer, SettingsMsg::Equalizer(!self.equalizer)).id(id!("equalizer"))]),
-                            table_row(ui, [table_label(ui, "Sound Playback"), dropdown(ui, PLAYBACK_LABELS[playback_index()], SettingsMsg::OpenPlayback).id(id!("playback"))]),
                         ],
                     ),
                     table_header(ui, "ANDROID DEVICE"),
@@ -193,7 +200,15 @@ impl Component for SettingsScreen {
                         [agent_mode_row(ui)],
                     ),
                     table_header(ui, "MIRRORING"),
-                    table_section(ui, [table_row(ui, [table_label(ui, "Orientation"), dropdown(ui, ORIENTATION_LABELS[orientation_index()], SettingsMsg::OpenOrientation).id(id!("orientation"))])]),
+                    table_section(
+                        ui,
+                        [
+                            table_row(ui, [table_label(ui, "Orientation"), dropdown(ui, ORIENTATION_LABELS[orientation_index()], SettingsMsg::OpenOrientation).id(id!("orientation"))]),
+                            playback_row(ui, settings::mirror_playback(), SettingsMsg::OpenMirrorPlayback).id(id!("mirror-playback")),
+                        ],
+                    ),
+                    table_header(ui, "NOW PLAYING"),
+                    table_section(ui, [playback_row(ui, settings::now_playing_playback(), SettingsMsg::OpenNowPlayingPlayback).id(id!("now-playing-playback"))]),
                     table_header(ui, "ABOUT"),
                     table_section(
                         ui,
@@ -233,7 +248,10 @@ fn orientation_index() -> usize {
     ORIENTATIONS.iter().position(|&(orientation, _)| orientation == current).unwrap_or(0)
 }
 
-fn playback_index() -> usize {
-    let current = settings::sound_playback();
+fn playback_index(current: AudioPlayback) -> usize {
     PLAYBACKS.iter().position(|&(playback, _)| playback == current).unwrap_or(0)
+}
+
+fn playback_row<'a>(ui: &'a Ui<SettingsMsg>, current: AudioPlayback, open: SettingsMsg) -> Element<'a, SettingsMsg> {
+    table_row(ui, [table_label(ui, "Audio Playback"), dropdown(ui, PLAYBACK_LABELS[playback_index(current)], open)])
 }

@@ -337,7 +337,11 @@
     "icon_36": {
       "size": 36,
       "icon": {
-        "VOLUME_UP": "icons/volume.svg"
+        "VOLUME_UP": "icons/volume.svg",
+        "VOLUME_DOWN": "icons/volume-2.svg",
+        "VOLUME_MUTED": "icons/volume-3.svg",
+        "VOLUME_ZERO": "icons/volume-4.svg",
+        "CAST": "icons/cast.svg"
       }
     },
     "icon_48": {

@@ -7,6 +7,7 @@ package com.tab5adb.agent;
 
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.media.AudioManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -38,6 +39,7 @@ final class MediaInfo {
     private static final int STATE_STOPPED = 4;
     private static final int FLAG_ART = 1;
     private static final int FLAG_SEEK = 2;
+    private static final int FLAG_MUTED = 4;
     private static final int SUBTITLE_ARTIST = 1;
     private static final int SUBTITLE_ALBUM = 2;
     private static final int SUBTITLE_APP = 4;
@@ -45,19 +47,24 @@ final class MediaInfo {
     private static final int ACTION_NEXT = 1;
     private static final int ACTION_PREVIOUS = 2;
     private static final int ACTION_SEEK = 3;
+    private static final int ACTION_VOLUME = 4;
+    private static final int ACTION_MUTE = 5;
     private static final long RESCAN_MS = 1500;
     private static final long JUMP_MS = 1000;
+    private static final long VOLUME_POLL_MS = 100;
     private static final String SEPARATOR = " · ";
 
     private final Context context;
     private final Object sessions;
     private final Method getSessions;
     private final TextRender text;
+    private final AudioManager audio;
     private final Handler handler;
     private volatile MediaController current;
     private MediaController.Callback callback;
     private volatile Sink sink;
     private int sentState = -1;
+    private int sentVolume;
     private int sentFlags;
     private long sentToken;
     private int sentSpeed;
@@ -69,6 +76,7 @@ final class MediaInfo {
         this.sessions = sessions;
         this.getSessions = getSessions;
         this.text = text;
+        this.audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         HandlerThread thread = new HandlerThread("media");
         thread.start();
         handler = new Handler(thread.getLooper());
@@ -93,6 +101,7 @@ final class MediaInfo {
         }
         MediaInfo media = new MediaInfo(SystemContext.get(), sessions, getSessions, text);
         media.handler.post(media::rescan);
+        media.handler.post(media::pollVolume);
         return media;
     }
 
@@ -106,7 +115,7 @@ final class MediaInfo {
     }
 
     byte[] state() {
-        return encode(current);
+        return encode(current, volume());
     }
 
     byte[] render(int titlePx, int subtitlePx, int artPx, int subtitle) {
@@ -154,7 +163,20 @@ final class MediaInfo {
     }
 
     // False when there is no session, or it cannot seek.
-    boolean control(int action, long position) {
+    boolean control(int action, long value) {
+        if (action == ACTION_MUTE) {
+            audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, value != 0 ? AudioManager.ADJUST_MUTE : AudioManager.ADJUST_UNMUTE, 0);
+            handler.post(this::push);
+            return true;
+        }
+        if (action == ACTION_VOLUME) {
+            if (audio.isStreamMute(AudioManager.STREAM_MUSIC)) {
+                audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0);
+            }
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, (int) Math.min(value, audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)), 0);
+            handler.post(this::push);
+            return true;
+        }
         MediaController controller = current;
         if (controller == null) {
             return false;
@@ -179,11 +201,22 @@ final class MediaInfo {
                 if (!canSeek(state)) {
                     return false;
                 }
-                controls.seekTo(position);
+                controls.seekTo(value);
                 return true;
             default:
                 return false;
         }
+    }
+
+    private void pollVolume() {
+        push();
+        handler.postDelayed(this::pollVolume, VOLUME_POLL_MS);
+    }
+
+    // Index, maximum and muted, as encode() lays them out.
+    private int volume() {
+        int muted = audio.isStreamMute(AudioManager.STREAM_MUSIC) ? 1 : 0;
+        return audio.getStreamVolume(AudioManager.STREAM_MUSIC) | audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC) << 8 | muted << 16;
     }
 
     private void rescan() {
@@ -262,33 +295,37 @@ final class MediaInfo {
         long token = token(controller);
         int speed = speed(playback);
         long position = position(playback);
+        int volume = volume();
         long now = SystemClock.elapsedRealtime();
         long expected = sentPosition + (now - sentAt) * sentSpeed / 1000;
-        if (state == sentState && flags == sentFlags && token == sentToken && speed == sentSpeed && Math.abs(position - expected) < JUMP_MS) {
+        if (state == sentState && flags == sentFlags && token == sentToken && speed == sentSpeed && volume == sentVolume && Math.abs(position - expected) < JUMP_MS) {
             return;
         }
         sentState = state;
         sentFlags = flags;
         sentToken = token;
         sentSpeed = speed;
+        sentVolume = volume;
         sentPosition = position;
         sentAt = now;
-        target.send(encode(controller));
+        target.send(encode(controller, volume));
     }
 
-    private static byte[] encode(MediaController controller) {
+    private static byte[] encode(MediaController controller, int volume) {
         PlaybackState playback = controller != null ? controller.getPlaybackState() : null;
         MediaMetadata metadata = controller != null ? controller.getMetadata() : null;
         long duration = metadata != null ? Math.max(0, metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)) : 0;
         byte[] out = new byte[20];
         out[0] = (byte) (controller != null ? state(playback) : STATE_NONE);
-        out[1] = (byte) flags(controller, playback);
+        out[1] = (byte) (flags(controller, playback) | ((volume >> 16 & 1) != 0 ? FLAG_MUTED : 0));
         u32(out, 4, token(controller));
         u32(out, 8, position(playback));
         u32(out, 12, duration);
         int speed = speed(playback);
         out[16] = (byte) speed;
         out[17] = (byte) (speed >> 8);
+        out[18] = (byte) volume;
+        out[19] = (byte) (volume >> 8);
         return out;
     }
 

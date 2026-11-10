@@ -20,6 +20,7 @@ mod fonts;
 mod logcat;
 mod marquee;
 mod media;
+mod phone_audio;
 mod preview;
 mod raster_text;
 mod screens;
@@ -77,6 +78,9 @@ pub fn run() {
     };
     if let Some(sd) = board.sd {
         files::set_sd(sd);
+    }
+    if let Some(audio) = board.audio {
+        phone_audio::set_output(audio);
     }
     adb_link::start(board.power);
     harness_rs::register("adb", screens::adb_command);

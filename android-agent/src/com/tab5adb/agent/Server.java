@@ -55,6 +55,7 @@ public final class Server {
     private static final int EFAIL = 0xFF;
 
     private static final int CAP_VIDEO = 1 << 0;
+    private static final int CAP_AUDIO = 1 << 1;
     private static final int CAP_INPUT = 1 << 2;
     private static final int CAP_MEDIA = 1 << 3;
     private static final int CAP_APPS = 1 << 5;
@@ -91,7 +92,7 @@ public final class Server {
         try {
             control = new LocalServerSocket(name);
             VideoServer.listen(new LocalServerSocket(name + "-video"));
-            refuse(new LocalServerSocket(name + "-audio"));
+            AudioServer.listen(new LocalServerSocket(name + "-audio"));
         } catch (IOException e) {
             System.out.println("listen: " + e);
             System.exit(1);
@@ -109,6 +110,11 @@ public final class Server {
         watchdog.setDaemon(true);
         watchdog.start();
         Looper.prepareMainLooper();
+        try {
+            SystemContext.get();
+        } catch (Throwable t) {
+            System.out.println("context: " + t);
+        }
         TextRender text = null;
         try {
             text = TextRender.create();
@@ -156,21 +162,6 @@ public final class Server {
 
     static int videoMaxMessage() {
         return videoMaxMessage;
-    }
-
-    // No audio is served: every connection is closed.
-    private static void refuse(LocalServerSocket server) {
-        Thread thread = new Thread(() -> {
-            while (true) {
-                try {
-                    server.accept().close();
-                } catch (IOException e) {
-                    return;
-                }
-            }
-        });
-        thread.setDaemon(true);
-        thread.start();
     }
 
     private void serve(DataInputStream in) throws IOException {
@@ -223,7 +214,7 @@ public final class Server {
         result.putShort((short) PROTO_VERSION);
         result.put((byte) VERSION_MAJOR).put((byte) VERSION_MINOR).put((byte) VERSION_PATCH);
         result.put((byte) 0).putShort((short) 0);
-        result.putInt(CAP_VIDEO | CAP_INPUT | (media != null ? CAP_MEDIA : 0) | (apps != null ? CAP_APPS : 0));
+        result.putInt(CAP_VIDEO | (AudioServer.supported() ? CAP_AUDIO : 0) | CAP_INPUT | (media != null ? CAP_MEDIA : 0) | (apps != null ? CAP_APPS : 0));
         result.putInt(MAX_MESSAGE);
         if (payload.length >= 12) {
             replyMax = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(8) & 0xFFFFFFFFL;

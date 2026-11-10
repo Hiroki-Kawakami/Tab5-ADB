@@ -161,7 +161,7 @@ REPLY result
 | bit | 名前 | 機能 |
 |---|---|---|
 | 0 | `VIDEO` | 映像ストリーム、`SET_ROTATION`、`ADAPT_DISPLAY` |
-| 1 | `AUDIO` | 音声ストリーム（予約） |
+| 1 | `AUDIO` | 音声ストリーム |
 | 2 | `INPUT` | `TOUCH`、`KEY`、`INPUT_CLEAR` |
 | 3 | `MEDIA` | `GET_MEDIA`、`GET_MEDIA_RENDER`、`MEDIA_CONTROL`、`MEDIA` イベント |
 | 4 | `PREVIEW` | スクリーンショット・ファイルの縮小画像（予約） |
@@ -244,12 +244,14 @@ MEDIA_STATE
   u8  state              0 = セッションが無い, 1 = 再生中, 2 = 一時停止, 3 = バッファ中, 4 = 停止
   u8  flags              bit 0 ART: アートがある
                          bit 1 SEEK: シークできる
+                         bit 2 MUTED: 端末のメディアの音量がミュートされている
   u16 reserved
   u32 token              曲名・アーティスト・アルバム・アプリから作る値。0 = セッションが無い
   u32 position_ms        この状態になったときの再生位置
   u32 duration_ms        曲の長さ。0 = 分からない
   u16 speed              再生速度。1000 = 等速。再生中でなければ 0
-  u16 reserved
+  u8  volume             端末のメディアの音量の段階
+  u8  volume_max         その最大
 ```
 
 - agent はメタデータを持つセッションのうち、再生中・バッファ中・一時停止の順に優先して 1 つ選ぶ。
@@ -259,7 +261,7 @@ MEDIA_STATE
 
 ### MEDIA
 
-`MEDIA_STATE` を運ぶイベント。agent はセッション・状態・曲・アートの有無・シークの可否が
+`MEDIA_STATE` を運ぶイベント。agent はセッション・状態・曲・アートの有無・シークの可否・音量が
 変わったとき、再生位置が飛んだとき（シークなど）に送る。再生が進むだけでは送らない。
 
 ### GET_MEDIA_RENDER
@@ -288,15 +290,16 @@ REPLY result
 
 ```
 MEDIA_CONTROL
-  u8  action             0 = 再生・一時停止, 1 = 次, 2 = 前, 3 = シーク
+  u8  action             0 = 再生・一時停止, 1 = 次, 2 = 前, 3 = シーク, 4 = 音量, 5 = ミュート
   u8  reserved[3]
-  u32 position_ms        シークする位置。シークのときだけ使う
+  u32 value              シークは位置 [ms]、音量は段階、ミュートは 1 = する・0 = 解除。ほかでは使わない
 
 REPLY result
   なし
 ```
 
-- セッションが無ければ `ESTATE`。シークできないセッションへのシークも `ESTATE`。
+- セッションが無ければ `ESTATE`。シークできないセッションへのシークも `ESTATE`。音量とミュートは
+  セッションが無くても変えられる。音量を変えるとミュートは解除される。
 
 ### 向き
 
@@ -449,3 +452,43 @@ FRAME
 - `FRAME` 1 つが HELLO の映像の `max_message` を超えるなら、agent はその帯の品質を下げて
   符号化し直す。
 
+
+### 音声ストリーム
+
+| type | 名前 | 向き |
+|---|---|---|
+| `0x01` | `AUDIO_START` | Tab5→agent |
+| `0x80` | `REPLY` | agent→Tab5 |
+| `0x81` | `AUDIO` | agent→Tab5 |
+| `0x82` | `VOLUME` | agent→Tab5 |
+
+```
+AUDIO_START
+  u8  codec              1 = PCM（S16LE）, 2 = Opus
+  u8  source             0 = メディアの再生だけ, 1 = 通話以外のすべての再生
+  u8  reserved[2]
+
+REPLY result
+  u8  codec              codec と同じ
+  u8  channels           2
+  u16 reserved
+  u32 rate               48000
+
+AUDIO
+  ... data               PCM はインターリーブした約 10 ms 分。Opus は 1 パケット（20 ms）
+
+VOLUME
+  u8  volume             端末のメディアの音量の段階
+  u8  volume_max         その最大
+```
+
+- agent は端末で再生される音を、端末の音量をかける前の大きさで取り込んで送る。取り込んでいる間、
+  その音は端末から鳴らない。
+- `source` = 0 は用途がメディアの再生だけ、1 はメディア・ゲーム・通知・システム音・案内・
+  アシスタント・アラーム・着信音などの再生を取り込む。通話は取り込まない。再生するアプリが
+  取り込みを許していない音は取れない。
+- `VOLUME` は応答の直後に 1 つ送り、以降は変わるたびに送る。ミュート中は `volume` = 0。Tab5 は
+  鳴らす音量をこれで決める。
+- Android 12 より前の端末、Opus を作れない端末で Opus を求められたときは `ENOTSUP`。Opus を
+  求められて PCM で答えることはしない。
+- Opus のパケットは 48 kHz・ステレオ・20 ms で、OpusHead は送らない。

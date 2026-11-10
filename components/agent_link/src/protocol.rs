@@ -28,7 +28,12 @@ pub const MEDIA: u8 = 0xB0;
 pub const VIDEO_START: u8 = 0x01;
 pub const FRAME: u8 = 0x81;
 
+pub const AUDIO_START: u8 = 0x01;
+pub const AUDIO: u8 = 0x81;
+pub const VOLUME: u8 = 0x82;
+
 pub const CAP_VIDEO: u32 = 1 << 0;
+pub const CAP_AUDIO: u32 = 1 << 1;
 pub const CAP_INPUT: u32 = 1 << 2;
 pub const CAP_MEDIA: u32 = 1 << 3;
 pub const CAP_APPS: u32 = 1 << 5;
@@ -335,6 +340,8 @@ pub struct MediaState {
     pub state: PlayState,
     pub has_art: bool,
     pub can_seek: bool,
+    /// The device's media volume is muted.
+    pub muted: bool,
     /// Changes with the track; 0 without a session.
     pub token: u32,
     pub position_ms: u32,
@@ -342,6 +349,9 @@ pub struct MediaState {
     pub duration_ms: u32,
     /// 1000 for normal speed, 0 when not playing.
     pub speed: u16,
+    /// The device's media volume step, of `volume_max`.
+    pub volume: u8,
+    pub volume_max: u8,
 }
 
 impl MediaState {
@@ -359,10 +369,13 @@ impl MediaState {
             state,
             has_art: b[1] & 1 != 0,
             can_seek: b[1] & 2 != 0,
+            muted: b[1] & 4 != 0,
             token: u32_at(4),
             position_ms: u32_at(8),
             duration_ms: u32_at(12),
             speed: u16::from_le_bytes([b[16], b[17]]),
+            volume: b[18],
+            volume_max: b[19],
         })
     }
 }
@@ -405,6 +418,9 @@ pub enum MediaAction {
     Next,
     Previous,
     Seek(u32),
+    /// A step of the device's media volume.
+    Volume(u8),
+    Mute(bool),
 }
 
 pub fn media_control(action: MediaAction) -> [u8; 8] {
@@ -413,7 +429,49 @@ pub fn media_control(action: MediaAction) -> [u8; 8] {
         MediaAction::Next => (1, 0),
         MediaAction::Previous => (2, 0),
         MediaAction::Seek(ms) => (3, ms),
+        MediaAction::Volume(step) => (4, u32::from(step)),
+        MediaAction::Mute(mute) => (5, u32::from(mute)),
     };
     let [p0, p1, p2, p3] = position.to_le_bytes();
     [code, 0, 0, 0, p0, p1, p2, p3]
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AudioCodec {
+    /// Interleaved S16LE.
+    Pcm = 1,
+    Opus = 2,
+}
+
+/// What an audio stream takes from the device.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AudioSource {
+    Media = 0,
+    /// Every playback but calls.
+    All = 1,
+}
+
+pub fn audio_start(codec: AudioCodec, source: AudioSource) -> [u8; 4] {
+    [codec as u8, source as u8, 0, 0]
+}
+
+/// What the reply to AUDIO_START says the stream carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AudioFormat {
+    pub codec: AudioCodec,
+    pub channels: u8,
+    pub rate: u32,
+}
+
+impl AudioFormat {
+    /// From a REPLY result.
+    pub fn parse(b: &[u8]) -> Option<Self> {
+        let b = b.get(..8)?;
+        let codec = match b[0] {
+            1 => AudioCodec::Pcm,
+            2 => AudioCodec::Opus,
+            _ => return None,
+        };
+        Some(Self { codec, channels: b[1], rate: u32::from_le_bytes([b[4], b[5], b[6], b[7]]) })
+    }
 }

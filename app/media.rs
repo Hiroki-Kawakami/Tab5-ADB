@@ -153,6 +153,18 @@ pub async fn control(link: &Link, conn: &Connection, action: Action) {
     }
 }
 
+pub async fn set_mute(link: &Link, mute: bool) {
+    if let Err(err) = link.media_control(MediaAction::Mute(mute), TIMEOUT).await {
+        error!(TAG, "mute: {err}");
+    }
+}
+
+pub async fn set_volume(link: &Link, step: u8) {
+    if let Err(err) = link.media_control(MediaAction::Volume(step), TIMEOUT).await {
+        error!(TAG, "volume: {err}");
+    }
+}
+
 pub async fn seek(link: &Link, position_ms: u32) {
     if let Err(err) = link.media_control(MediaAction::Seek(position_ms), TIMEOUT).await {
         error!(TAG, "seek: {err}");
