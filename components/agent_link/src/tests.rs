@@ -11,7 +11,7 @@ use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloRe
 fn header_round_trip() {
     let mut out = Vec::new();
     message(&mut out, REPLY, 0x1234, b"abc");
-    assert_eq!(out, [3, 0, 0, 0, 0x40, 0, 0x34, 0x12, b'a', b'b', b'c']);
+    assert_eq!(out, [3, 0, 0, 0, 0x80, 0, 0x34, 0x12, b'a', b'b', b'c']);
     let head: [u8; 8] = out[..8].try_into().unwrap();
     assert_eq!(Header::parse(&head), Header { length: 3, kind: REPLY, id: 0x1234 });
 }

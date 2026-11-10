@@ -28,11 +28,11 @@ public final class Server {
     private static final int HELLO = 0x01;
     private static final int SET_ROTATION = 0x10;
     private static final int ADAPT_DISPLAY = 0x11;
-    private static final int REQUEST_LAST = 0x3F;
-    private static final int REPLY = 0x40;
-    private static final int TOUCH = 0x60;
-    private static final int KEY = 0x61;
-    private static final int INPUT_CLEAR = 0x62;
+    private static final int REQUEST_LAST = 0x7F;
+    private static final int REPLY = 0x80;
+    private static final int TOUCH = 0xC0;
+    private static final int KEY = 0xC1;
+    private static final int INPUT_CLEAR = 0xC2;
     private static final int KEY_BYTES = 4;
     private static final int TOUCH_HEAD = 12;
     private static final int TOUCH_POINT = 6;
@@ -45,7 +45,8 @@ public final class Server {
     private static final int EFAIL = 0xFF;
 
     private static final int CAP_VIDEO = 1 << 0;
-    private static final int CAPABILITIES = CAP_VIDEO;
+    private static final int CAP_INPUT = 1 << 2;
+    private static final int CAPABILITIES = CAP_VIDEO | CAP_INPUT;
     private static final int ROTATION_RELEASE = 0xFF;
 
     private static volatile boolean helloDone;
@@ -53,6 +54,7 @@ public final class Server {
 
     private final OutputStream out;
     private boolean hello;
+    private long replyMax = 0xFFFFFFFFL;
     private Input input;
     private boolean inputFailed;
     private final int[] touchIds = new int[MAX_POINTERS];
@@ -184,6 +186,9 @@ public final class Server {
         result.put((byte) 0).putShort((short) 0);
         result.putInt(CAPABILITIES);
         result.putInt(MAX_MESSAGE);
+        if (payload.length >= 12) {
+            replyMax = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(8) & 0xFFFFFFFFL;
+        }
         videoMaxMessage = payload.length >= 16 ? ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(12) : 0;
         reply(id, OK, result.array());
         hello = true;
@@ -286,6 +291,11 @@ public final class Server {
     }
 
     private void reply(int id, int status, byte[] result) throws IOException {
+        if (4 + result.length > replyMax) {
+            System.out.println("reply of " + (4 + result.length) + " bytes");
+            status = EFAIL;
+            result = new byte[0];
+        }
         ByteBuffer m = ByteBuffer.allocate(HEADER_BYTES + 4 + result.length).order(ByteOrder.LITTLE_ENDIAN);
         m.putInt(4 + result.length).put((byte) REPLY).put((byte) 0).putShort((short) id);
         m.put((byte) status).put((byte) 0).putShort((short) 0);

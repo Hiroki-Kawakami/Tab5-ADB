@@ -13,16 +13,17 @@ pub const HEADER_BYTES: usize = 8;
 pub const HELLO: u8 = 0x01;
 pub const SET_ROTATION: u8 = 0x10;
 pub const ADAPT_DISPLAY: u8 = 0x11;
-pub const REPLY: u8 = 0x40;
+pub const REPLY: u8 = 0x80;
 
-pub const TOUCH: u8 = 0x60;
-pub const KEY: u8 = 0x61;
-pub const INPUT_CLEAR: u8 = 0x62;
+pub const TOUCH: u8 = 0xC0;
+pub const KEY: u8 = 0xC1;
+pub const INPUT_CLEAR: u8 = 0xC2;
 
 pub const VIDEO_START: u8 = 0x01;
-pub const FRAME: u8 = 0x41;
+pub const FRAME: u8 = 0x81;
 
 pub const CAP_VIDEO: u32 = 1 << 0;
+pub const CAP_INPUT: u32 = 1 << 2;
 
 pub const CODEC_JPEG: u8 = 1;
 /// `SET_ROTATION` to give the device's own rotation back.

@@ -75,7 +75,7 @@ Header (8 bytes)
 | `0x10..0x1F` | `0x90..0x9F` | 表示 |
 | `0x20..0x2F` | `0xA0..0xAF` | アプリ |
 | `0x30..0x3F` | `0xB0..0xBF` | メディア |
-| `0x40..0x4F` | — | 画像 |
+| `0x40..0x4F` | — | プレビュー |
 | `0x50..0x7F` | — | 予約 |
 
 ### 要求と REPLY
@@ -151,7 +151,11 @@ REPLY result
 | bit | 名前 | 機能 |
 |---|---|---|
 | 0 | `VIDEO` | 映像ストリーム、`SET_ROTATION`、`ADAPT_DISPLAY` |
-| 1 | `INPUT` | `TOUCH`、`KEY`、`INPUT_CLEAR` |
+| 1 | `AUDIO` | 音声ストリーム（予約） |
+| 2 | `INPUT` | `TOUCH`、`KEY`、`INPUT_CLEAR` |
+| 3 | `MEDIA` | 再生中のメディア（予約） |
+| 4 | `PREVIEW` | スクリーンショット・ファイルの縮小画像（予約） |
+| 5 | `APPS` | アプリ名・アイコン（予約） |
 
 ### SET_ROTATION
 

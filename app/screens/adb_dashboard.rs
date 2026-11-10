@@ -12,6 +12,7 @@ use core::task::Poll;
 
 use adb::link::{Connection, State as LinkState};
 use agent_link::Link;
+use agent_link::protocol::CAP_INPUT;
 use devkit_gfx::Color;
 use devkit_ui::widgets::{divider, vertical_divider};
 use devkit_ui::{Align, ColorRole, Component, Cx, Drag, Element, Icon, Justify, Overlay, Prop, Root, Screen, State, StateStyle, Task, This, Transition, Ui, id};
@@ -114,7 +115,7 @@ impl AdbDashboardScreen {
         } else {
             self.keys.retain(|&k| k != code);
         }
-        if let Some(agent) = &self.agent {
+        if let Some(agent) = self.agent.as_ref().filter(|a| a.link().supports(CAP_INPUT)) {
             if let Err(err) = agent.link().key(code, down) {
                 error!(TAG, "key {code}: {err}");
             }
@@ -294,7 +295,7 @@ impl Screen for AdbDashboardScreen {
 
     fn will_disappear(&mut self, _: &mut Cx<Self>) {
         self.keys.clear();
-        if let Some(agent) = &self.agent
+        if let Some(agent) = self.agent.as_ref().filter(|a| a.link().supports(CAP_INPUT))
             && let Err(err) = agent.link().input_clear()
         {
             error!(TAG, "input clear: {err}");

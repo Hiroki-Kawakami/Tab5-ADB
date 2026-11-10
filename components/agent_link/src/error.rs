@@ -15,6 +15,8 @@ pub enum Error {
     Timeout,
     /// Larger than the agent takes.
     TooLarge,
+    /// Not among the capabilities both ends gave in HELLO.
+    Unsupported,
     /// `Link::close`, or the agent closed the link.
     Closed,
     NoMemory,
@@ -28,6 +30,7 @@ impl fmt::Display for Error {
             Error::Status(s) => write!(f, "status {s:#04x}"),
             Error::Timeout => f.write_str("timed out"),
             Error::TooLarge => f.write_str("message too large"),
+            Error::Unsupported => f.write_str("not supported"),
             Error::Closed => f.write_str("link closed"),
             Error::NoMemory => f.write_str("out of memory"),
         }

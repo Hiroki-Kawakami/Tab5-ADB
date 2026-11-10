@@ -21,8 +21,8 @@ import java.nio.ByteOrder;
 final class VideoServer {
     private static final int HEADER_BYTES = 8;
     private static final int VIDEO_START = 0x01;
-    private static final int REPLY = 0x40;
-    private static final int FRAME = 0x41;
+    private static final int REPLY = 0x80;
+    private static final int FRAME = 0x81;
     private static final int FRAME_HEAD = 12;
     private static final int FLAG_LAST = 0x01;
     private static final int STRIP_ALIGN = 16;

@@ -14,7 +14,7 @@ use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
-use crate::protocol::{self, Channel, HEADER_BYTES, ADAPT_DISPLAY, HELLO, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
+use crate::protocol::{self, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, HELLO, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::video::Video;
 use crate::{Error, Result};
 
@@ -255,6 +255,11 @@ impl Link {
         &self.info
     }
 
+    /// Both ends gave every bit of `capabilities` in HELLO.
+    pub fn supports(&self, capabilities: u32) -> bool {
+        self.info.capabilities & self.config.capabilities & capabilities == capabilities
+    }
+
     /// The result of a request answered `OK`; any other status is
     /// `Error::Status`. Requests run concurrently.
     pub async fn request(&self, kind: u8, args: &[u8], timeout: Duration) -> Result<Vec<u8>> {
@@ -277,6 +282,9 @@ impl Link {
 
     /// Queues an input message; it goes out with whatever else is queued.
     pub fn input(&self, kind: u8, payload: &[u8]) -> Result<()> {
+        if !self.supports(CAP_INPUT) {
+            return Err(Error::Unsupported);
+        }
         self.shared.queue(kind, 0, payload)
     }
 
