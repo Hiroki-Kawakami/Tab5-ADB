@@ -20,7 +20,7 @@ use idf::executor::{self, Sender, Spawner, oneshot};
 use idf::heap::Caps;
 use idf::log::{error, info};
 use idf::thread;
-use media_engine::{DecodeConfig, Decoder, Header, Yuv, YuvRange, YuvStandard};
+use media_engine::{DecodeConfig, Decoder, Header, Slot, Srm, Yuv, YuvRange, YuvStandard};
 
 use crate::{adb_link, agent};
 
@@ -320,3 +320,46 @@ fn fit(shot: &[u8], (width, height): (u16, u16)) -> Result<Picture, String> {
     let resize = ResizeOptions { target_width: width, target_height: height, fit: Fit::Contain, format: Some(FORMAT), caps: None };
     devkit_image::resize_decoder(&mut decoder, &resize, Orientation::None).map_err(|e| format!("resize: {e}"))
 }
+
+/// Contain-fit, never enlarged, rounded as `resize_decoder` rounds.
+pub(crate) fn fit_size((sw, sh): (u16, u16), (aw, ah): (u16, u16)) -> (u16, u16) {
+    if sw <= aw && sh <= ah {
+        return (sw, sh);
+    }
+    let (sw, sh, aw, ah) = (u32::from(sw), u32::from(sh), u32::from(aw), u32::from(ah));
+    if aw * sh <= ah * sw { (aw as u16, ((sh * aw + sw / 2) / sw).max(1) as u16) } else { (((sw * ah + sh / 2) / sh).max(1) as u16, ah as u16) }
+}
+
+/// The 2D engine scales in sixteenths: the stand-in may fall short of `size`.
+pub(crate) async fn rescale(picture: &Picture, (width, height): (u16, u16)) -> Result<Picture, String> {
+    let (pw, ph) = (u32::from(picture.width()), u32::from(picture.height()));
+    let sixteenths = (u32::from(width) * 16 / pw).min(u32::from(height) * 16 / ph).max(1);
+    let (w, h) = ((pw * sixteenths / 16).max(1) as u16, (ph * sixteenths / 16).max(1) as u16);
+    let ppa = media_engine::ppa().map_err(|err| format!("ppa: {err}"))?;
+    let mut out = ImageBuf::new_in(FORMAT, w, h, usize::from(w), 64, Caps::SPIRAM).map_err(|_| format!("alloc {w}x{h}"))?;
+    {
+        let mut target = Target::new(out.pixels_mut(), FORMAT, Size::new(w, h), usize::from(w)).ok_or("target")?;
+        let mut op = Srm::new(picture.image());
+        op.scale_x = sixteenths as f32 / 16.0;
+        op.scale_y = op.scale_x;
+        let mut slot = Slot::new();
+        ppa.srm(&op, &mut target, &mut slot).map_err(|err| format!("srm: {err}"))?.await.map_err(|err| format!("srm: {err}"))?;
+    }
+    Ok(out)
+}
+
+/// A baseline JPEG through the codec, whole into a new picture.
+pub(crate) async fn decode_jpeg(jpeg: &[u8]) -> Result<Picture, String> {
+    let yuv = Yuv { range: YuvRange::Full, standard: YuvStandard::Bt601 };
+    let mut decoder = Decoder::new(&DecodeConfig { format: FORMAT, yuv }).map_err(|e| format!("decoder: {e}"))?;
+    let header = Header::parse(jpeg).map_err(|e| format!("header: {e}"))?;
+    let (w, h) = (header.padded_width, header.padded_height);
+    let mut picture = ImageBuf::new_in(FORMAT, w, h, usize::from(w), 64, Caps::SPIRAM).map_err(|_| format!("alloc {w}x{h}"))?;
+    {
+        let mut target = Target::new(picture.pixels_mut(), FORMAT, Size::new(w, h), usize::from(w)).ok_or("target")?;
+        decoder.decode(jpeg, &mut target).map_err(|e| format!("decode: {e}"))?.await.map_err(|e| format!("decode: {e}"))?;
+    }
+    picture.reshape(FORMAT, header.width, header.height, usize::from(w));
+    Ok(picture)
+}
+

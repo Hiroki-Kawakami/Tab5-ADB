@@ -22,7 +22,7 @@ import java.util.concurrent.Executors;
 
 public final class Server {
     private static final int VERSION_MAJOR = 0;
-    private static final int VERSION_MINOR = 2;
+    private static final int VERSION_MINOR = 3;
     private static final int VERSION_PATCH = 0;
 
     private static final int PROTO_VERSION = 1;
@@ -37,6 +37,11 @@ public final class Server {
     private static final int GET_MEDIA = 0x30;
     private static final int GET_MEDIA_RENDER = 0x31;
     private static final int MEDIA_CONTROL = 0x32;
+    private static final int SCREENSHOT = 0x40;
+    private static final int SCREENSHOT_RENDER = 0x41;
+    private static final int SCREENSHOT_SAVE = 0x42;
+    private static final int SCREENSHOT_RELEASE = 0x43;
+    private static final int RENDER_FILE = 0x44;
     private static final int MEDIA = 0xB0;
     private static final int REQUEST_LAST = 0x7F;
     private static final int REPLY = 0x80;
@@ -58,6 +63,7 @@ public final class Server {
     private static final int CAP_AUDIO = 1 << 1;
     private static final int CAP_INPUT = 1 << 2;
     private static final int CAP_MEDIA = 1 << 3;
+    private static final int CAP_PREVIEW = 1 << 4;
     private static final int CAP_APPS = 1 << 5;
     private static final int ROTATION_RELEASE = 0xFF;
 
@@ -65,11 +71,13 @@ public final class Server {
     private static volatile int videoMaxMessage;
     private static AppInfo apps;
     private static MediaInfo media;
+    private static Preview preview;
 
     private final OutputStream out;
     private boolean hello;
     private volatile long replyMax = 0xFFFFFFFFL;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService previews = Executors.newSingleThreadExecutor();
     private final Object events = new Object();
     private byte[] mediaEvent;
     private Input input;
@@ -133,9 +141,11 @@ public final class Server {
                 System.out.println("media: " + t);
             }
         }
+        preview = new Preview(args[0]);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             RotationLock.release();
             DisplaySize.release();
+            preview.release();
         }));
         System.out.println("listening");
         System.out.flush();
@@ -190,6 +200,8 @@ public final class Server {
                 worker.execute(() -> onGetAppInfo(id, payload));
             } else if ((kind == GET_MEDIA || kind == GET_MEDIA_RENDER || kind == MEDIA_CONTROL) && media != null) {
                 worker.execute(() -> onMedia(kind, id, payload));
+            } else if (kind >= SCREENSHOT && kind <= RENDER_FILE) {
+                previews.execute(() -> onPreview(kind, id, payload));
             } else if (kind == TOUCH) {
                 onTouch(payload);
             } else if (kind == KEY) {
@@ -214,7 +226,7 @@ public final class Server {
         result.putShort((short) PROTO_VERSION);
         result.put((byte) VERSION_MAJOR).put((byte) VERSION_MINOR).put((byte) VERSION_PATCH);
         result.put((byte) 0).putShort((short) 0);
-        result.putInt(CAP_VIDEO | (AudioServer.supported() ? CAP_AUDIO : 0) | CAP_INPUT | (media != null ? CAP_MEDIA : 0) | (apps != null ? CAP_APPS : 0));
+        result.putInt(CAP_VIDEO | (AudioServer.supported() ? CAP_AUDIO : 0) | CAP_INPUT | (media != null ? CAP_MEDIA : 0) | CAP_PREVIEW | (apps != null ? CAP_APPS : 0));
         result.putInt(MAX_MESSAGE);
         if (payload.length >= 12) {
             replyMax = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(8) & 0xFFFFFFFFL;
@@ -330,6 +342,47 @@ public final class Server {
                 reply(id, EFAIL, new byte[0]);
             } catch (IOException e) {
                 System.out.println("media " + kind + ": " + e);
+            }
+        }
+    }
+
+    private void onPreview(int kind, int id, byte[] payload) {
+        try {
+            ByteBuffer p = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+            long max = replyMax - 4;
+            byte[] result;
+            if (kind == SCREENSHOT_SAVE) {
+                result = preview.save();
+            } else if (kind == SCREENSHOT_RELEASE) {
+                preview.release();
+                result = new byte[0];
+            } else if (payload.length < (kind == RENDER_FILE ? 9 : 5)) {
+                reply(id, EINVAL, new byte[0]);
+                return;
+            } else {
+                int boxWidth = p.getShort(0) & 0xFFFF;
+                int boxHeight = p.getShort(2) & 0xFFFF;
+                int quality = payload[4] & 0xFF;
+                if (kind == SCREENSHOT) {
+                    result = preview.screenshot(boxWidth, boxHeight, quality, max);
+                } else if (kind == SCREENSHOT_RENDER) {
+                    result = preview.renderShot(boxWidth, boxHeight, quality, max);
+                } else {
+                    String path = new String(payload, 8, payload.length - 8, StandardCharsets.UTF_8);
+                    result = preview.renderFile(path, boxWidth, boxHeight, quality, payload[5] & 0xFF, max);
+                    if (result == null) {
+                        reply(id, ENOTSUP, new byte[0]);
+                        return;
+                    }
+                }
+            }
+            reply(id, result != null ? OK : ESTATE, result != null ? result : new byte[0]);
+        } catch (Throwable t) {
+            System.out.println("preview " + kind + ": " + t);
+            try {
+                reply(id, EFAIL, new byte[0]);
+            } catch (IOException e) {
+                System.out.println("preview " + kind + ": " + e);
             }
         }
     }

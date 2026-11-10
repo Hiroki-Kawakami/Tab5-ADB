@@ -123,17 +123,7 @@ impl Tiff<'_> {
         if e.kind != 2 {
             return String::new();
         }
-        let mut out = String::new();
-        for &c in &self.data[e.at..e.at + e.bytes.min(MAX_ASCII)] {
-            if c == 0 {
-                break;
-            }
-            if (0x20..=0x7e).contains(&c) {
-                out.push(char::from(c));
-            }
-        }
-        out.truncate(out.trim_end().len());
-        out
+        printable(&self.data[e.at..e.at + e.bytes])
     }
 
     /// The Exif SubIFD's offset, 0 when there is none.
@@ -167,6 +157,21 @@ impl Tiff<'_> {
         }
         sub
     }
+}
+
+/// The ASCII a text tag holds, up to its NUL: the rest cannot be drawn.
+pub fn printable(text: &[u8]) -> String {
+    let mut out = String::new();
+    for &c in &text[..text.len().min(MAX_ASCII)] {
+        if c == 0 {
+            break;
+        }
+        if (0x20..=0x7e).contains(&c) {
+            out.push(char::from(c));
+        }
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 fn parse_tiff(data: &[u8]) -> Option<Exif> {

@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{AudioCodec, AudioFormat, AudioSource, Channel, audio_start, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_event, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
+use crate::protocol::{Attr, AttrValue, Rendered, render_file, saved, screenshot, AudioCodec, AudioFormat, AudioSource, Channel, audio_start, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_event, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -157,3 +157,30 @@ fn audio_start_and_format() {
     assert_eq!(AudioFormat::parse(&[2, 2, 0, 0, 0x80, 0xbb, 0, 0]), Some(AudioFormat { codec: AudioCodec::Opus, channels: 2, rate: 48000 }));
     assert_eq!(AudioFormat::parse(&[3, 2, 0, 0, 0x80, 0xbb, 0, 0]), None);
 }
+
+#[test]
+fn preview_requests() {
+    assert_eq!(screenshot(672, 1075, 0), [0xa0, 0x02, 0x33, 0x04, 0, 0, 0, 0]);
+    assert_eq!(render_file(16, 8, 85, 3, "/a"), [16, 0, 8, 0, 85, 3, 0, 0, b'/', b'a']);
+    assert_eq!(saved(&[5, 0, 0, 0, b'/', b'p']), Some((5, alloc::string::String::from("/p"))));
+}
+
+#[test]
+fn rendered() {
+    let mut b = alloc::vec![8, 0, 4, 0, 2, 0, 0, 0, 0xff, 0xd8];
+    b.extend_from_slice(&[4, 0]);
+    b.extend_from_slice(&[1, 0, 0, 0, 4, 0, 0xa0, 0x0f, 0, 0]);
+    b.extend_from_slice(&[0x0a, 0x01, 3, 0, 8, 0, 0xfd, 0xff, 0xff, 0xff, 10, 0, 0, 0]);
+    b.extend_from_slice(&[0x00, 0x01, 4, 0, 2, 0, b'E', b'x']);
+    b.extend_from_slice(&[0x99, 0x09, 9, 0, 1, 0, 7]);
+    let r = Rendered::parse(&b).unwrap();
+    assert_eq!((r.width, r.height, r.jpeg), (8, 4, &[0xff, 0xd8][..]));
+    assert_eq!(r.attrs, alloc::vec![
+        Attr { key: 1, value: AttrValue::U32(4000) },
+        Attr { key: 0x010a, value: AttrValue::SignedRatio(-3, 10) },
+        Attr { key: 0x0100, value: AttrValue::Text("Ex") },
+    ]);
+    assert_eq!(r.attr(0x0100), Some(AttrValue::Text("Ex")));
+    assert_eq!(Rendered::parse(&b[..b.len() - 1]), None);
+}
+

@@ -125,6 +125,11 @@ REPLY
 | `0x30` | `GET_MEDIA` | 再生中のメディアの状態 |
 | `0x31` | `GET_MEDIA_RENDER` | 再生中のメディアの文字とアート |
 | `0x32` | `MEDIA_CONTROL` | 再生中のメディアの操作 |
+| `0x40` | `SCREENSHOT` | 端末の画面を撮って保持し、縮小画像を返す |
+| `0x41` | `SCREENSHOT_RENDER` | 保持しているスクリーンショットの縮小画像 |
+| `0x42` | `SCREENSHOT_SAVE` | 保持しているスクリーンショットを PNG のファイルに書く |
+| `0x43` | `SCREENSHOT_RELEASE` | 保持しているスクリーンショットを捨てる |
+| `0x44` | `RENDER_FILE` | 端末上のファイルの縮小画像と属性 |
 
 ### イベント一覧
 
@@ -164,7 +169,7 @@ REPLY result
 | 1 | `AUDIO` | 音声ストリーム |
 | 2 | `INPUT` | `TOUCH`、`KEY`、`INPUT_CLEAR` |
 | 3 | `MEDIA` | `GET_MEDIA`、`GET_MEDIA_RENDER`、`MEDIA_CONTROL`、`MEDIA` イベント |
-| 4 | `PREVIEW` | スクリーンショット・ファイルの縮小画像（予約） |
+| 4 | `PREVIEW` | `SCREENSHOT`、`SCREENSHOT_RENDER`、`SCREENSHOT_SAVE`、`SCREENSHOT_RELEASE`、`RENDER_FILE` |
 | 5 | `APPS` | `GET_APP_INFO` |
 
 ### SET_ROTATION
@@ -300,6 +305,123 @@ REPLY result
 
 - セッションが無ければ `ESTATE`。シークできないセッションへのシークも `ESTATE`。音量とミュートは
   セッションが無くても変えられる。音量を変えるとミュートは解除される。
+
+### 縮小画像と属性
+
+プレビューの要求は、縮小した画像と属性の集まりを `RENDERED` で返す。
+
+```
+RENDERED
+  u16 image_width        0 = 画像は無い
+  u16 image_height
+  u32 jpeg_length
+  ... jpeg               baseline、YUV 4:2:0
+  u16 attr_count
+  attr_count × ATTR
+
+ATTR
+  u16 key
+  u8  type               0 = u32, 1 = i32, 2 = 分数 (u32 分子, u32 分母), 3 = 符号付き分数 (i32, i32),
+                         4 = UTF-8 文字列
+  u8  reserved
+  u16 length             value のバイト数
+  ... value
+```
+
+- 画像は正立させ、縦横比を保って枠に収まる最大の大きさにする。元より大きくはしない。幅と高さは
+  それぞれ 4 の倍数に切り下げる（映像ストリームと同じ）。
+- REPLY が Tab5 の制御の `max_message` を超えるなら、agent は画像の品質を下げて符号化し直す。
+- Tab5 は知らない `key` を読み飛ばす。agent は値の無い属性を入れない。
+- 分数の分母は 0 にしない。
+
+| key | type | 属性 |
+|---|---|---|
+| `0x0001` | u32 | 幅 [px]。正立させた大きさ |
+| `0x0002` | u32 | 高さ [px] |
+| `0x0003` | 文字列 | MIME タイプ |
+| `0x0100` | 文字列 | EXIF Make |
+| `0x0101` | 文字列 | EXIF Model |
+| `0x0102` | 文字列 | EXIF LensModel |
+| `0x0103` | 文字列 | EXIF Software |
+| `0x0104` | 文字列 | 撮影日時。EXIF の書式 `YYYY:MM:DD HH:MM:SS` |
+| `0x0105` | u32 | ISO 感度 |
+| `0x0106` | 分数 | 露出時間 [s] |
+| `0x0107` | 分数 | F 値 |
+| `0x0108` | 分数 | 焦点距離 [mm] |
+| `0x0109` | u32 | 35mm 換算の焦点距離 [mm] |
+| `0x010A` | 符号付き分数 | 露出補正 [EV] |
+| `0x010B` | u32 | EXIF Flash |
+
+key の上位 8 bit は属性の区分: `0x00` 共通、`0x01` EXIF。
+
+### SCREENSHOT
+
+```
+SCREENSHOT
+  u16 box_width          画像を収める枠 [px]
+  u16 box_height
+  u8  quality            JPEG 品質 1..100。0 = 80
+  u8  reserved[3]
+
+REPLY result
+  RENDERED               属性は幅と高さ
+```
+
+- agent は端末の画面を撮り、次の `SCREENSHOT` か `SCREENSHOT_RELEASE` まで、またはプロセスが
+  終わるまで元の画素を保持する。撮る前に、保持していたものと `SCREENSHOT_SAVE` のファイルを捨てる。
+- 保持するスクリーンショットは 1 枚だけ。
+
+### SCREENSHOT_RENDER
+
+`SCREENSHOT` と同じ引数と result で、撮り直さずに保持しているものを枠に合わせて返す。保持して
+いなければ `ESTATE`。
+
+### SCREENSHOT_SAVE
+
+```
+SCREENSHOT_SAVE
+  なし
+
+REPLY result
+  u32 size               ファイルのバイト数
+  ... path               ファイルのパス（UTF-8）
+```
+
+- agent は保持しているスクリーンショットを PNG で `/data/local/tmp/` の下のファイルに書く。
+  Tab5 はそれを sync で受け取る。保持していなければ `ESTATE`。
+- ファイルは、スクリーンショットを捨てるときに agent が消す。
+
+### SCREENSHOT_RELEASE
+
+```
+SCREENSHOT_RELEASE
+  なし
+
+REPLY result
+  なし
+```
+
+保持しているスクリーンショットと `SCREENSHOT_SAVE` のファイルを捨てる。保持していなくても `OK`。
+
+### RENDER_FILE
+
+```
+RENDER_FILE
+  u16 box_width          画像を収める枠 [px]
+  u16 box_height
+  u8  quality            JPEG 品質 1..100。0 = 80
+  u8  flags              bit 0 IMAGE: 画像が要る
+                         bit 1 ATTRS: 属性が要る
+  u16 reserved
+  ... path               ファイルのパス（UTF-8）
+
+REPLY result
+  RENDERED
+```
+
+- ファイルの種類は agent が中身から決める。扱えない種類なら `ENOTSUP`、読めなければ `EFAIL`。
+- 画像ファイルは EXIF の向きに従って正立させる。属性は幅、高さ、MIME タイプと EXIF。
+- `IMAGE` が無ければ画像は無し、`ATTRS` が無ければ属性は 0 個。
 
 ### 向き
 

@@ -10,10 +10,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
 
 use adb::link::Connection;
 use adb::services::sync::{DATA_MAX, Sync};
-use devkit_gfx::{ImageBuf, ImageFormat, ImageSource, Size, Target};
+use agent_link::protocol::{ATTR_EXIF_BIAS, ATTR_EXIF_EXPOSURE, ATTR_EXIF_FLASH, ATTR_EXIF_FOCAL, ATTR_EXIF_FOCAL_35MM, ATTR_EXIF_F_NUMBER, ATTR_EXIF_ISO, ATTR_EXIF_LENS, ATTR_EXIF_MAKE, ATTR_EXIF_MODEL, ATTR_EXIF_SOFTWARE, ATTR_EXIF_TAKEN, ATTR_HEIGHT, ATTR_WIDTH, CAP_PREVIEW, RENDER_ATTRS, RENDER_IMAGE};
+use agent_link::{AttrValue, Link, Rendered};
+use devkit_gfx::{ImageFormat, ImageSource};
 use devkit_image::{DecodeOptions, Decoder, Error, Fit, FileStream, Format, Orientation, ResizeOptions, Stream};
 use devkit_ui::widgets::{divider, icon_button, progress_indicator, table_header};
 use devkit_ui::{Align, Canvas, Component, Corners, Cx, Edge, Elide, Element, Justify, Overlay, Presence, Screen, Task, This, Ui, id};
@@ -21,13 +24,12 @@ use idf::executor::{self, JoinHandle, Receiver, Sender, Spawner, oneshot};
 use idf::heap::Caps;
 use idf::log::error;
 use idf::thread;
-use media_engine::{Slot, Srm};
 
-use crate::adb_link;
+use crate::{adb_link, agent};
 use crate::exif::{self, Exif};
 use crate::files::{self, FileRef, Volume};
 use crate::fonts::icon;
-use crate::preview::Picture;
+use crate::preview::{self, Picture};
 use crate::resources::{colors, icons};
 
 use super::file_preview::{FilePreviewScreen, Msg, inline, stacked};
@@ -50,6 +52,8 @@ const UNSUPPORTED: &str = "This image format is not supported.";
 const UNREADABLE: &str = "The image could not be read.";
 const UNDECODABLE: &str = "The image could not be decoded.";
 const NO_MEMORY: &str = "Not enough memory to show this image.";
+const AGENT_QUALITY: u8 = 85;
+const AGENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy)]
 pub enum ImageMsg {
@@ -87,7 +91,8 @@ pub struct ImagePreview {
 
 struct Decoded {
     picture: Picture,
-    details: Details,
+    /// `None` from a render that kept the details shown.
+    details: Option<Details>,
 }
 
 impl ImagePreview {
@@ -115,9 +120,9 @@ impl ImagePreview {
             return;
         };
         let picture = picture.clone();
-        let size = fit((details.width, details.height), area);
+        let size = preview::fit_size((details.width, details.height), area);
         self.rescaling = Some(cx.spawn(move |this: This<FilePreviewScreen>| async move {
-            let result = rescale(&picture, size).await;
+            let result = preview::rescale(&picture, size).await;
             drop(picture);
             this.with(|s, cx| {
                 let Some(image) = s.image_mut() else { return };
@@ -151,15 +156,18 @@ impl ImagePreview {
                 image.stand_in(area, cx);
                 let stop = Arc::new(AtomicBool::new(false));
                 let flag = stop.clone();
+                let attrs = image.details.is_none();
                 let task = cx.spawn(move |this: This<FilePreviewScreen>| async move {
-                    let result = decode_on_worker(file, area, flag).await;
+                    let result = load(file, area, flag, attrs).await;
                     this.with(|s, cx| {
                         let Some(image) = s.image_mut() else { return };
                         image.loading = None;
                         match result {
                             Ok(decoded) => {
                                 image.state = shown(decoded.picture);
-                                image.details = Some(decoded.details);
+                                if let Some(details) = decoded.details {
+                                    image.details = Some(details);
+                                }
                             }
                             Err(text) => image.state = State::Failed(text),
                         }
@@ -182,33 +190,6 @@ impl ImagePreview {
     }
 }
 
-/// Contain-fit, never enlarged, rounded as `resize_decoder` rounds.
-fn fit((sw, sh): (u16, u16), (aw, ah): (u16, u16)) -> (u16, u16) {
-    if sw <= aw && sh <= ah {
-        return (sw, sh);
-    }
-    let (sw, sh, aw, ah) = (u32::from(sw), u32::from(sh), u32::from(aw), u32::from(ah));
-    if aw * sh <= ah * sw { (aw as u16, ((sh * aw + sw / 2) / sw).max(1) as u16) } else { (((sw * ah + sh / 2) / sh).max(1) as u16, ah as u16) }
-}
-
-/// The 2D engine scales in sixteenths: the stand-in may fall short of `size`.
-async fn rescale(picture: &Picture, (width, height): (u16, u16)) -> Result<Picture, String> {
-    let (pw, ph) = (u32::from(picture.width()), u32::from(picture.height()));
-    let sixteenths = (u32::from(width) * 16 / pw).min(u32::from(height) * 16 / ph).max(1);
-    let (w, h) = ((pw * sixteenths / 16).max(1) as u16, (ph * sixteenths / 16).max(1) as u16);
-    let ppa = media_engine::ppa().map_err(|err| format!("ppa: {err}"))?;
-    let mut out = ImageBuf::new_in(FORMAT, w, h, usize::from(w), 64, Caps::SPIRAM).map_err(|_| format!("alloc {w}x{h}"))?;
-    {
-        let mut target = Target::new(out.pixels_mut(), FORMAT, Size::new(w, h), usize::from(w)).ok_or("target")?;
-        let mut op = Srm::new(picture.image());
-        op.scale_x = sixteenths as f32 / 16.0;
-        op.scale_y = op.scale_x;
-        let mut slot = Slot::new();
-        ppa.srm(&op, &mut target, &mut slot).map_err(|err| format!("srm: {err}"))?.await.map_err(|err| format!("srm: {err}"))?;
-    }
-    Ok(out)
-}
-
 impl Drop for ImagePreview {
     fn drop(&mut self) {
         self.stop();
@@ -217,7 +198,77 @@ impl Drop for ImagePreview {
 
 fn draw_nothing<'a>(_: &'a FilePreviewScreen, _: &mut Canvas<'a, '_>) {}
 
-async fn decode_on_worker(file: FileRef, area: (u16, u16), stop: Arc<AtomicBool>) -> Result<Decoded, &'static str> {
+/// An Android file through the agent where it is up, which reads it on the
+/// device; the Tab5 decodes it itself otherwise, or where that fails.
+async fn load(file: FileRef, area: (u16, u16), stop: Arc<AtomicBool>, attrs: bool) -> Result<Decoded, &'static str> {
+    if matches!(file.volume, Volume::Android(_))
+        && let Some(link) = agent::link_with(CAP_PREVIEW)
+    {
+        match render_on_agent(&link, &file.path, area, attrs).await {
+            Ok(decoded) => return Ok(decoded),
+            Err(err) => error!(TAG, "agent render {}: {err}", file.path),
+        }
+    }
+    decode_on_worker(file, area, stop).await.map(|(picture, details)| Decoded { picture, details: Some(details) })
+}
+
+async fn render_on_agent(link: &Link, path: &str, (width, height): (u16, u16), attrs: bool) -> Result<Decoded, String> {
+    let flags = RENDER_IMAGE | if attrs { RENDER_ATTRS } else { 0 };
+    let reply = link.render_file(path, width, height, AGENT_QUALITY, flags, AGENT_TIMEOUT).await.map_err(|err| format!("{err}"))?;
+    let rendered = reply.rendered();
+    if rendered.width == 0 || rendered.jpeg.is_empty() {
+        return Err(String::from("no image"));
+    }
+    let picture = preview::decode_jpeg(rendered.jpeg).await?;
+    Ok(Decoded { picture, details: attrs.then(|| details_of(&rendered)) })
+}
+
+fn details_of(rendered: &Rendered) -> Details {
+    let size = |key| match rendered.attr(key) {
+        Some(AttrValue::U32(v)) => v.min(u32::from(u16::MAX)) as u16,
+        _ => 0,
+    };
+    let mut exif = Exif::default();
+    for attr in &rendered.attrs {
+        let ratio = || match attr.value {
+            AttrValue::Ratio(num, den) if den != 0 => Some((f64::from(num) / f64::from(den)) as f32),
+            AttrValue::SignedRatio(num, den) if den != 0 => Some((f64::from(num) / f64::from(den)) as f32),
+            _ => None,
+        };
+        let count = || match attr.value {
+            AttrValue::U32(v) => Some(v),
+            _ => None,
+        };
+        let text = || match attr.value {
+            AttrValue::Text(text) => exif::printable(text.as_bytes()),
+            _ => String::new(),
+        };
+        match attr.key {
+            ATTR_EXIF_MAKE => exif.make = text(),
+            ATTR_EXIF_MODEL => exif.model = text(),
+            ATTR_EXIF_LENS => exif.lens = text(),
+            ATTR_EXIF_SOFTWARE => exif.software = text(),
+            ATTR_EXIF_TAKEN => exif.taken = text(),
+            ATTR_EXIF_ISO => exif.iso = count(),
+            ATTR_EXIF_EXPOSURE => {
+                if let AttrValue::Ratio(num, den) = attr.value
+                    && den != 0
+                {
+                    exif.shutter = Some((num, den));
+                }
+            }
+            ATTR_EXIF_F_NUMBER => exif.aperture = ratio(),
+            ATTR_EXIF_FOCAL => exif.focal_mm = ratio(),
+            ATTR_EXIF_FOCAL_35MM => exif.focal35_mm = count().map(|v| v as u16),
+            ATTR_EXIF_BIAS => exif.exposure_bias = ratio(),
+            ATTR_EXIF_FLASH => exif.flash = count().map(|v| v as u16),
+            _ => {}
+        }
+    }
+    Details { width: size(ATTR_WIDTH), height: size(ATTR_HEIGHT), exif: (!exif.is_empty()).then_some(exif) }
+}
+
+async fn decode_on_worker(file: FileRef, area: (u16, u16), stop: Arc<AtomicBool>) -> Result<(Picture, Details), &'static str> {
     let (tx, rx) = oneshot::channel();
     thread::Builder::new()
         .name("image")
@@ -233,7 +284,7 @@ async fn decode_on_worker(file: FileRef, area: (u16, u16), stop: Arc<AtomicBool>
     rx.await.map_err(|_| UNDECODABLE)?
 }
 
-fn decode_file(file: &FileRef, area: (u16, u16), stop: &Arc<AtomicBool>) -> Result<Decoded, &'static str> {
+fn decode_file(file: &FileRef, area: (u16, u16), stop: &Arc<AtomicBool>) -> Result<(Picture, Details), &'static str> {
     match &file.volume {
         Volume::Sd => {
             let path = files::c_path(&file.path).map_err(|_| UNREADABLE)?;
@@ -503,7 +554,7 @@ fn failure(stage: &str, err: Error) -> &'static str {
     }
 }
 
-fn decode(mut src: impl Source, (width, height): (u16, u16)) -> Result<Decoded, &'static str> {
+fn decode(mut src: impl Source, (width, height): (u16, u16)) -> Result<(Picture, Details), &'static str> {
     let Some(format) = devkit_image::sniff(src.head()) else { return Err(UNSUPPORTED) };
     if matches!(format, Format::Tiff | Format::Webp) {
         src.allow_seek();
@@ -524,7 +575,7 @@ fn decode(mut src: impl Source, (width, height): (u16, u16)) -> Result<Decoded, 
     let fits = sw <= width && sh <= height;
     let resize = ResizeOptions { target_width: if fits { 0 } else { width }, target_height: if fits { 0 } else { height }, fit: Fit::Contain, format: Some(FORMAT), caps: None };
     let picture = devkit_image::resize_decoder(&mut decoder, &resize, orientation).map_err(|err| failure("decode", err))?;
-    Ok(Decoded { picture, details: Details { width: sw, height: sh, exif } })
+    Ok((picture, Details { width: sw, height: sh, exif }))
 }
 
 #[derive(Clone, Copy)]

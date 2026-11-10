@@ -14,7 +14,7 @@ use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
-use crate::protocol::{self, AppEntry, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, GET_MEDIA, GET_MEDIA_RENDER, HELLO, MEDIA_CONTROL, MediaAction, MediaRender, MediaState, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
+use crate::protocol::{self, AppEntry, Rendered, RENDER_FILE, SCREENSHOT, SCREENSHOT_RELEASE, SCREENSHOT_RENDER, SCREENSHOT_SAVE, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, GET_MEDIA, GET_MEDIA_RENDER, HELLO, MEDIA_CONTROL, MediaAction, MediaRender, MediaState, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::audio::Audio;
 use crate::protocol::{AudioCodec, AudioSource};
 use crate::video::Video;
@@ -75,6 +75,17 @@ pub struct MediaRenderReply {
 impl MediaRenderReply {
     pub fn render(&self) -> Option<MediaRender<'_>> {
         MediaRender::parse(&self.payload)
+    }
+}
+
+/// A RENDERED result.
+pub struct RenderedReply {
+    payload: Vec<u8>,
+}
+
+impl RenderedReply {
+    pub fn rendered(&self) -> Rendered<'_> {
+        Rendered::parse(&self.payload).unwrap_or(Rendered { width: 0, height: 0, jpeg: &[], attrs: Vec::new() })
     }
 }
 
@@ -444,6 +455,42 @@ impl Link {
     /// `Error::Status(ESTATE)` without a session, or for a seek it does not take.
     pub async fn media_control(&self, action: MediaAction, timeout: Duration) -> Result<()> {
         self.request(MEDIA_CONTROL, &protocol::media_control(action), timeout).await.map(drop)
+    }
+
+    async fn rendered(&self, kind: u8, args: &[u8], timeout: Duration) -> Result<RenderedReply> {
+        let payload = self.request(kind, args, timeout).await?;
+        Rendered::parse(&payload).ok_or(Error::Protocol)?;
+        Ok(RenderedReply { payload })
+    }
+
+    /// Takes the device's screen, which the agent keeps for the requests
+    /// below, and answers it fitted into the box.
+    pub async fn screenshot(&self, box_width: u16, box_height: u16, quality: u8, timeout: Duration) -> Result<RenderedReply> {
+        self.rendered(SCREENSHOT, &protocol::screenshot(box_width, box_height, quality), timeout).await
+    }
+
+    /// The screenshot kept, fitted into another box; `Error::Status(ESTATE)`
+    /// without one.
+    pub async fn screenshot_render(&self, box_width: u16, box_height: u16, quality: u8, timeout: Duration) -> Result<RenderedReply> {
+        self.rendered(SCREENSHOT_RENDER, &protocol::screenshot(box_width, box_height, quality), timeout).await
+    }
+
+    /// The size and the device path of a PNG of the screenshot kept, which
+    /// lasts as long as the screenshot.
+    pub async fn screenshot_save(&self, timeout: Duration) -> Result<(u64, alloc::string::String)> {
+        let payload = self.request(SCREENSHOT_SAVE, &[], timeout).await?;
+        protocol::saved(&payload).ok_or(Error::Protocol)
+    }
+
+    pub async fn screenshot_release(&self, timeout: Duration) -> Result<()> {
+        self.request(SCREENSHOT_RELEASE, &[], timeout).await.map(drop)
+    }
+
+    /// The device file at `path` fitted into the box, and its attributes;
+    /// `flags` takes `protocol::RENDER_*`. `Error::Status(ENOTSUP)` for a
+    /// kind of file the agent does not render.
+    pub async fn render_file(&self, path: &str, box_width: u16, box_height: u16, quality: u8, flags: u8, timeout: Duration) -> Result<RenderedReply> {
+        self.rendered(RENDER_FILE, &protocol::render_file(box_width, box_height, quality, flags, path), timeout).await
     }
 
     pub fn is_closed(&self) -> bool {

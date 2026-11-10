@@ -17,6 +17,11 @@ pub const GET_APP_INFO: u8 = 0x20;
 pub const GET_MEDIA: u8 = 0x30;
 pub const GET_MEDIA_RENDER: u8 = 0x31;
 pub const MEDIA_CONTROL: u8 = 0x32;
+pub const SCREENSHOT: u8 = 0x40;
+pub const SCREENSHOT_RENDER: u8 = 0x41;
+pub const SCREENSHOT_SAVE: u8 = 0x42;
+pub const SCREENSHOT_RELEASE: u8 = 0x43;
+pub const RENDER_FILE: u8 = 0x44;
 pub const REPLY: u8 = 0x80;
 
 pub const TOUCH: u8 = 0xC0;
@@ -36,6 +41,7 @@ pub const CAP_VIDEO: u32 = 1 << 0;
 pub const CAP_AUDIO: u32 = 1 << 1;
 pub const CAP_INPUT: u32 = 1 << 2;
 pub const CAP_MEDIA: u32 = 1 << 3;
+pub const CAP_PREVIEW: u32 = 1 << 4;
 pub const CAP_APPS: u32 = 1 << 5;
 
 pub const CODEC_JPEG: u8 = 1;
@@ -475,3 +481,108 @@ impl AudioFormat {
         Some(Self { codec, channels: b[1], rate: u32::from_le_bytes([b[4], b[5], b[6], b[7]]) })
     }
 }
+
+pub const RENDER_IMAGE: u8 = 1 << 0;
+pub const RENDER_ATTRS: u8 = 1 << 1;
+
+pub const ATTR_WIDTH: u16 = 0x0001;
+pub const ATTR_HEIGHT: u16 = 0x0002;
+pub const ATTR_MIME: u16 = 0x0003;
+pub const ATTR_EXIF_MAKE: u16 = 0x0100;
+pub const ATTR_EXIF_MODEL: u16 = 0x0101;
+pub const ATTR_EXIF_LENS: u16 = 0x0102;
+pub const ATTR_EXIF_SOFTWARE: u16 = 0x0103;
+pub const ATTR_EXIF_TAKEN: u16 = 0x0104;
+pub const ATTR_EXIF_ISO: u16 = 0x0105;
+pub const ATTR_EXIF_EXPOSURE: u16 = 0x0106;
+pub const ATTR_EXIF_F_NUMBER: u16 = 0x0107;
+pub const ATTR_EXIF_FOCAL: u16 = 0x0108;
+pub const ATTR_EXIF_FOCAL_35MM: u16 = 0x0109;
+pub const ATTR_EXIF_BIAS: u16 = 0x010A;
+pub const ATTR_EXIF_FLASH: u16 = 0x010B;
+
+/// SCREENSHOT and SCREENSHOT_RENDER.
+pub fn screenshot(box_width: u16, box_height: u16, quality: u8) -> [u8; 8] {
+    let [w0, w1] = box_width.to_le_bytes();
+    let [h0, h1] = box_height.to_le_bytes();
+    [w0, w1, h0, h1, quality, 0, 0, 0]
+}
+
+/// `flags` takes `RENDER_*`.
+pub fn render_file(box_width: u16, box_height: u16, quality: u8, flags: u8, path: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + path.len());
+    out.extend_from_slice(&box_width.to_le_bytes());
+    out.extend_from_slice(&box_height.to_le_bytes());
+    out.extend_from_slice(&[quality, flags, 0, 0]);
+    out.extend_from_slice(path.as_bytes());
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AttrValue<'a> {
+    U32(u32),
+    I32(i32),
+    Ratio(u32, u32),
+    SignedRatio(i32, i32),
+    Text(&'a str),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Attr<'a> {
+    pub key: u16,
+    pub value: AttrValue<'a>,
+}
+
+/// A RENDERED result: a JPEG and attributes.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Rendered<'a> {
+    /// 0 without an image.
+    pub width: u16,
+    pub height: u16,
+    pub jpeg: &'a [u8],
+    /// Those of a type this end knows; the rest are skipped.
+    pub attrs: Vec<Attr<'a>>,
+}
+
+impl<'a> Rendered<'a> {
+    pub fn parse(b: &'a [u8]) -> Option<Self> {
+        let head = b.get(..8)?;
+        let width = u16::from_le_bytes([head[0], head[1]]);
+        let height = u16::from_le_bytes([head[2], head[3]]);
+        let length = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        let jpeg = b.get(8..8usize.checked_add(length)?)?;
+        let mut rest = &b[8 + length..];
+        let count = u16::from_le_bytes([*rest.first()?, *rest.get(1)?]);
+        rest = &rest[2..];
+        let mut attrs = Vec::new();
+        for _ in 0..count {
+            let head = rest.get(..6)?;
+            let key = u16::from_le_bytes([head[0], head[1]]);
+            let length = usize::from(u16::from_le_bytes([head[4], head[5]]));
+            let value = rest.get(6..6 + length)?;
+            rest = &rest[6 + length..];
+            let word = |at: usize| value.get(at..at + 4).map(|v| [v[0], v[1], v[2], v[3]]);
+            let value = match head[2] {
+                0 => AttrValue::U32(u32::from_le_bytes(word(0)?)),
+                1 => AttrValue::I32(i32::from_le_bytes(word(0)?)),
+                2 => AttrValue::Ratio(u32::from_le_bytes(word(0)?), u32::from_le_bytes(word(4)?)),
+                3 => AttrValue::SignedRatio(i32::from_le_bytes(word(0)?), i32::from_le_bytes(word(4)?)),
+                4 => AttrValue::Text(core::str::from_utf8(value).ok()?),
+                _ => continue,
+            };
+            attrs.push(Attr { key, value });
+        }
+        Some(Self { width, height, jpeg, attrs })
+    }
+
+    pub fn attr(&self, key: u16) -> Option<AttrValue<'a>> {
+        self.attrs.iter().find(|a| a.key == key).map(|a| a.value)
+    }
+}
+
+/// What SCREENSHOT_SAVE answered.
+pub fn saved(b: &[u8]) -> Option<(u64, String)> {
+    let size = u32::from_le_bytes(b.get(..4)?.try_into().ok()?);
+    Some((u64::from(size), String::from(core::str::from_utf8(&b[4..]).ok()?)))
+}
+

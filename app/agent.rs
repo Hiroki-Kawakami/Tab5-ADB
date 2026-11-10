@@ -17,7 +17,7 @@ use core::time::Duration;
 
 use adb::link::{Connection, Stream};
 use adb::services::{self, sync::Sync};
-use agent_link::protocol::{CAP_APPS, CAP_AUDIO, CAP_INPUT, CAP_MEDIA, CAP_VIDEO};
+use agent_link::protocol::{CAP_APPS, CAP_AUDIO, CAP_INPUT, CAP_MEDIA, CAP_PREVIEW, CAP_VIDEO};
 use agent_link::{HelloConfig, Link};
 use devkit_crypto::hash::{Hash, Sha256};
 use idf::executor::{self, Spawner};
@@ -35,7 +35,7 @@ const PUSH_STALL: Duration = Duration::from_secs(5);
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Opening the control stream, then HELLO's own 3 s.
 const LINK_TIMEOUT: Duration = Duration::from_secs(8);
-const HELLO: HelloConfig = HelloConfig { capabilities: CAP_VIDEO | CAP_AUDIO | CAP_INPUT | CAP_MEDIA | CAP_APPS, max_message: [2 * 1024 * 1024, 512 * 1024, 64 * 1024] };
+const HELLO: HelloConfig = HelloConfig { capabilities: CAP_VIDEO | CAP_AUDIO | CAP_INPUT | CAP_MEDIA | CAP_PREVIEW | CAP_APPS, max_message: [2 * 1024 * 1024, 512 * 1024, 64 * 1024] };
 
 static JAR_PATH: OnceLock<String> = OnceLock::new();
 static CURRENT: Mutex<Current> = Mutex::new(Current { generation: 0, link: None });
