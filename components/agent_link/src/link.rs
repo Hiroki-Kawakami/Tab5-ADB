@@ -14,7 +14,7 @@ use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
 
-use crate::protocol::{self, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, HELLO, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
+use crate::protocol::{self, AppEntry, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, HELLO, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::video::Video;
 use crate::{Error, Result};
 
@@ -34,6 +34,19 @@ pub struct AgentInfo {
     pub version: [u8; 3],
     pub capabilities: u32,
     pub max_message: u32,
+}
+
+/// What GET_APP_INFO answered.
+pub struct AppInfoReply {
+    payload: Vec<u8>,
+    count: usize,
+}
+
+impl AppInfoReply {
+    /// One for each package asked, in order; `None` where the device has none.
+    pub fn entries(&self) -> Vec<Option<AppEntry<'_>>> {
+        protocol::app_entries(&self.payload, self.count).unwrap_or_default()
+    }
 }
 
 struct Outbox {
@@ -321,6 +334,15 @@ impl Link {
     /// with 0×0. `Error::Status(ESTATE)` when the user set one already.
     pub async fn adapt_display(&self, width: u16, height: u16, timeout: Duration) -> Result<()> {
         self.request(ADAPT_DISPLAY, &protocol::adapt_display(width, height), timeout).await.map(drop)
+    }
+
+    /// The name of each of `packages` drawn `text_px` large, and its icon
+    /// `icon_px` square, none with 0.
+    pub async fn app_info(&self, icon_px: u16, text_px: u8, packages: &[&str], timeout: Duration) -> Result<AppInfoReply> {
+        let args = protocol::get_app_info(icon_px, text_px, packages).ok_or(Error::TooLarge)?;
+        let payload = self.request(GET_APP_INFO, &args, timeout).await?;
+        protocol::app_entries(&payload, packages.len()).ok_or(Error::Protocol)?;
+        Ok(AppInfoReply { payload, count: packages.len() })
     }
 
     pub fn is_closed(&self) -> bool {

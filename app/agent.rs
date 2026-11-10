@@ -17,7 +17,7 @@ use core::time::Duration;
 
 use adb::link::{Connection, Stream};
 use adb::services::{self, sync::Sync};
-use agent_link::protocol::{CAP_INPUT, CAP_VIDEO};
+use agent_link::protocol::{CAP_APPS, CAP_INPUT, CAP_VIDEO};
 use agent_link::{HelloConfig, Link};
 use devkit_crypto::hash::{Hash, Sha256};
 use idf::executor::{self, Spawner};
@@ -35,7 +35,7 @@ const PUSH_STALL: Duration = Duration::from_secs(5);
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Opening the control stream, then HELLO's own 3 s.
 const LINK_TIMEOUT: Duration = Duration::from_secs(8);
-const HELLO: HelloConfig = HelloConfig { capabilities: CAP_VIDEO | CAP_INPUT, max_message: [2 * 1024 * 1024, 512 * 1024, 64 * 1024] };
+const HELLO: HelloConfig = HelloConfig { capabilities: CAP_VIDEO | CAP_INPUT | CAP_APPS, max_message: [2 * 1024 * 1024, 512 * 1024, 64 * 1024] };
 
 static JAR_PATH: OnceLock<String> = OnceLock::new();
 static CURRENT: Mutex<Current> = Mutex::new(Current { generation: 0, link: None });
@@ -86,6 +86,11 @@ impl Drop for Agent {
 /// The agent's link once it is up and still open.
 pub fn link() -> Option<Link> {
     CURRENT.lock().link.clone().filter(|link| !link.is_closed())
+}
+
+/// The same, when both ends gave `capabilities` in HELLO.
+pub fn link_with(capabilities: u32) -> Option<Link> {
+    link().filter(|link| link.supports(capabilities))
 }
 
 fn jar_path() -> &'static str {
@@ -165,6 +170,9 @@ async fn wait_listening(shell: &mut Stream) -> Result<(), String> {
         }
         output.extend_from_slice(&chunk[..n]);
         if output.split(|&b| b == b'\n').any(|line| line.trim_ascii() == b"listening") {
+            for line in output.split(|&b| b == b'\n').map(<[u8]>::trim_ascii).filter(|line| !line.is_empty() && *line != b"listening") {
+                info!(TAG, "agent: {}", String::from_utf8_lossy(line));
+            }
             return Ok(());
         }
     }

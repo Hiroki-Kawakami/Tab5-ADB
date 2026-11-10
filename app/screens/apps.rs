@@ -4,24 +4,30 @@
  */
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::OnceCell;
 use core::ffi::CStr;
 
 use adb::link::Connection;
+use agent_link::Link;
+use agent_link::protocol::CAP_APPS;
+use devkit_gfx::{ImageSource, TextOptions, TextRun};
 use devkit_ui::widgets::{divider, icon_button, menu, menu_divider, menu_item, progress_indicator, segmented, top_bar};
-use devkit_ui::{Align, Child, CollectionLayout, ColorRole, Component, Cx, Elide, Element, Handle, Justify, Overlay, Part, Popover, PopoverAlign, Prop, Root, Screen, Sides, SplitRole, State, StateStyle, Task, This, Ui, id};
+use devkit_ui::{Align, Canvas, Child, CollectionLayout, ColorRole, Component, Cx, Elide, Element, Handle, Justify, Overlay, Part, Popover, PopoverAlign, Prop, Root, Screen, ScrollPosition, Sides, SplitRole, State, StateStyle, Task, This, Ui, id};
 use idf::log::error;
 use idf::sync::Mutex;
 
-use crate::adb_link;
+use crate::app_info::{self, Size};
 use crate::apps::{self, Action, App, Details};
+use crate::{adb_link, agent};
 use crate::file_ops::{self, Endpoint};
 use crate::files::{self, FileType, Volume};
 use crate::fonts::{icon, small_icon};
-use crate::resources::{colors, icons};
+use crate::resources::{self, colors, icons};
 
 use super::file_dialogs::{self, Choice, ProgressDialog};
 use super::file_manager::{FileManagerScreen, FilePick};
@@ -44,6 +50,9 @@ const GAP: i16 = 20;
 const RADIUS: u8 = 24;
 const FADED: u8 = 102;
 const BUSY: &str = "Another file operation is running.";
+const BATCH: usize = 12;
+const OVERSCAN: usize = 2;
+const FIRST_ROWS: usize = 16;
 
 static TAB_TRACK: StateStyle = StateStyle {
     font: None,
@@ -92,6 +101,111 @@ fn app_icon<'a, M: Copy>(ui: &'a Ui<M>, size: i16, radius: u8) -> Element<'a, M>
     ui.row([ui.icon(icon(icons::ANDROID)).foreground(colors::ANDROID)]).size(size, size).radius(radius).align(Align::Center).justify(Justify::Center).background(colors::ANDROID_BADGE).shrink(0)
 }
 
+fn row_size() -> Size {
+    Size { icon_px: ROW_ICON_SIZE as u16, text_px: resources::TOUCH.fonts.body.px() as u8 }
+}
+
+fn badge_size(size: i16) -> Size {
+    Size { icon_px: size as u16, text_px: resources::TOUCH.fonts.title.px() as u8 }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct IconProps {
+    id: u32,
+    size: i16,
+    radius: u8,
+}
+
+/// An app's icon from the agent.
+struct AppIcon {
+    icon: Option<Arc<dyn ImageSource>>,
+    props: IconProps,
+}
+
+impl Child for AppIcon {
+    fn create(props: &IconProps) -> Self {
+        Self { icon: app_info::icon_of(props.id), props: *props }
+    }
+
+    fn set_props(&mut self, props: &IconProps) {
+        if props.id != self.props.id {
+            self.icon = app_info::icon_of(props.id);
+        }
+        self.props = *props;
+    }
+}
+
+impl Component for AppIcon {
+    type Msg = ();
+    type Props = IconProps;
+
+    fn update(&mut self, _: (), _: &mut Cx<Self>) {}
+
+    fn view<'a>(&'a self, ui: &'a Ui<()>) -> Element<'a, ()> {
+        let IconProps { size, radius, .. } = self.props;
+        match &self.icon {
+            Some(icon) => ui.row([ui.image(icon)]).size(size, size).radius(radius).clip().shrink(0),
+            None => app_icon(ui, size, radius),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct NameProps {
+    id: u32,
+    color: ColorRole,
+    title: bool,
+}
+
+/// An app's name as the agent drew it, one line of the body or title font.
+struct AppName {
+    name: Option<Arc<app_info::Name>>,
+    props: NameProps,
+    ellipsis: OnceCell<TextRun>,
+}
+
+impl AppName {
+    fn draw<'a>(&'a self, canvas: &mut Canvas<'a, '_>) {
+        let Some(name) = &self.name else { return };
+        let font = if self.props.title { canvas.theme().fonts.title } else { canvas.theme().fonts.body };
+        let ellipsis = self.ellipsis.get_or_init(|| {
+            let mut run = TextRun::new();
+            run.layout(font, "...", &TextOptions::default());
+            run
+        });
+        let color = canvas.colors().color(self.props.color);
+        name.draw(canvas, font, ellipsis, color);
+    }
+}
+
+impl Child for AppName {
+    fn create(props: &NameProps) -> Self {
+        Self { name: app_info::name(props.id), props: *props, ellipsis: OnceCell::new() }
+    }
+
+    fn set_props(&mut self, props: &NameProps) {
+        if props.id != self.props.id {
+            self.name = app_info::name(props.id);
+        }
+        if props.title != self.props.title {
+            self.ellipsis = OnceCell::new();
+        }
+        self.props = *props;
+    }
+}
+
+impl Component for AppName {
+    type Msg = ();
+    type Props = NameProps;
+
+    fn update(&mut self, _: (), _: &mut Cx<Self>) {}
+
+    fn view<'a>(&'a self, ui: &'a Ui<()>) -> Element<'a, ()> {
+        let font = if self.props.title { ui.theme().fonts.title } else { ui.theme().fonts.body };
+        ui.canvas(Self::draw).height(font.line_height()).width_fraction(1, 1)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Group {
     User,
@@ -108,6 +222,7 @@ pub enum ListMsg {
     Install,
     Picked,
     InstallConfirmed,
+    Scrolled(ScrollPosition),
 }
 
 pub struct AppList {
@@ -122,6 +237,9 @@ pub struct AppList {
     load: Option<Task>,
     picked: Option<Arc<Mutex<Option<(Volume, String)>>>>,
     install: Option<(Volume, String)>,
+    visible: (usize, usize),
+    fetch: Option<Task>,
+    failed: BTreeSet<String>,
 }
 
 impl AppList {
@@ -146,7 +264,50 @@ impl AppList {
             self.loaded = false;
             self.error = None;
         }
+        self.failed.clear();
         self.load = Some(cx.spawn(|this| load_list(this, conn)));
+    }
+
+    fn scrolled(&mut self, position: ScrollPosition, cx: &mut Cx<Self>) {
+        let first = (position.offset.max(0) / i32::from(SPLIT_ROW_HEIGHT)) as usize;
+        let last = ((position.offset.max(0) + i32::from(position.viewport)) / i32::from(SPLIT_ROW_HEIGHT)) as usize + 1;
+        if (first, last) != self.visible {
+            self.visible = (first, last);
+            self.fetch_names(cx);
+        }
+    }
+
+    /// Asks the agent for the names and icons of the rows on screen it has not
+    /// given yet, one request at a time.
+    fn fetch_names(&mut self, cx: &mut Cx<Self>) {
+        if self.fetch.is_some() {
+            return;
+        }
+        let Some(link) = agent::link_with(CAP_APPS) else { return };
+        let apps = self.apps();
+        let end = (self.visible.1 + OVERSCAN).min(apps.len());
+        let start = self.visible.0.saturating_sub(OVERSCAN).min(end);
+        let size = row_size();
+        let packages: Vec<String> = apps[start..end].iter().filter(|app| !self.failed.contains(&app.package) && app_info::find(&app.package, size).is_none()).take(BATCH).map(|app| app.package.clone()).collect();
+        if packages.is_empty() {
+            return;
+        }
+        self.fetch = Some(cx.spawn(move |this| async move {
+            let names: Vec<&str> = packages.iter().map(String::as_str).collect();
+            let result = app_info::fetch(&link, &names, size).await;
+            if let Err(err) = &result {
+                error!(TAG, "app info: {err}");
+            }
+            this.with(|s, cx| {
+                s.fetch = None;
+                if result.is_err() {
+                    s.failed.extend(packages);
+                }
+                s.revision += 1;
+                cx.rebuild();
+                s.fetch_names(cx);
+            });
+        }));
     }
 
     fn pick_apk(&mut self, cx: &mut Cx<Self>) {
@@ -217,8 +378,20 @@ impl AppList {
             ui.empty()
         };
         let chevron = if split { ui.empty() } else { ui.icon(theme.icons.chevron).foreground(colors::MUTED) };
-        let name = ui.text(theme.fonts.body, &app.package).ellipsis(Elide::End).grow(1);
-        let (tile, name) = if app.disabled { (app_icon(ui, ROW_ICON_SIZE, ROW_ICON_RADIUS).opacity(FADED), name.foreground(colors::MUTED)) } else { (app_icon(ui, ROW_ICON_SIZE, ROW_ICON_RADIUS), name) };
+        let found = app_info::find(&app.package, row_size());
+        let tile = match found.filter(|f| f.icon) {
+            Some(f) => ui.child::<AppIcon>(IconProps { id: f.id, size: ROW_ICON_SIZE, radius: ROW_ICON_RADIUS }),
+            None => app_icon(ui, ROW_ICON_SIZE, ROW_ICON_RADIUS),
+        };
+        let tile = if app.disabled { tile.opacity(FADED) } else { tile };
+        let color = if app.disabled { colors::MUTED } else { ColorRole::Text };
+        let name = match found.filter(|f| f.name) {
+            Some(f) => {
+                let package = ui.text(theme.fonts.caption, &app.package).foreground(colors::MUTED).ellipsis(Elide::End);
+                ui.column([ui.child::<AppName>(NameProps { id: f.id, color, title: false }), package]).gap(4).grow(1)
+            }
+            None => ui.text(theme.fonts.body, &app.package).ellipsis(Elide::End).foreground(color).grow(1),
+        };
         let line = ui.row([tile, name, badge, chevron]).gap(20).align(Align::Center).border(ui.colors().divider, 1).border_sides(Sides::BOTTOM).grow(1);
         let row = ui.row([line]).padding_x(MARGIN).on_tap(ListMsg::Open(index as u32));
         if selected { row.background(colors::SELECTED) } else { row.when(State::PRESSED, &[Prop::Background(colors::PRESSED)]) }
@@ -238,7 +411,7 @@ impl AppList {
             return message("No apps.");
         }
         let row_height = if ui.split_role() == SplitRole::None { ROW_HEIGHT } else { SPLIT_ROW_HEIGHT };
-        let list = ui.collection(apps.len(), CollectionLayout::List { row_height }, Self::row).revision(self.revision);
+        let list = ui.collection(apps.len(), CollectionLayout::List { row_height }, Self::row).revision(self.revision).on_scroll(ListMsg::Scrolled);
         match self.group {
             Group::User => list.id(id!("user-apps")),
             Group::System => list.id(id!("system-apps")),
@@ -264,6 +437,7 @@ async fn load_list(this: This<AppList>, conn: Connection) {
         s.load = None;
         s.revision += 1;
         cx.rebuild();
+        s.fetch_names(cx);
     });
 }
 
@@ -276,6 +450,7 @@ impl Component for AppList {
             ListMsg::Tab(group) => {
                 self.group = group;
                 self.revision += 1;
+                self.fetch_names(cx);
             }
             ListMsg::Open(index) => {
                 if let (Some(app), Some(conn)) = (self.apps().get(index as usize).cloned(), self.conn.clone()) {
@@ -289,6 +464,7 @@ impl Component for AppList {
             ListMsg::Install => self.pick_apk(cx),
             ListMsg::Picked => self.confirm_install(cx),
             ListMsg::InstallConfirmed => self.install(cx),
+            ListMsg::Scrolled(position) => return self.scrolled(position, cx),
         }
         cx.rebuild();
     }
@@ -306,6 +482,7 @@ impl Screen for AppList {
 
 impl Child for AppList {
     fn create(_: &()) -> Self {
+        app_info::clear();
         Self {
             conn: adb_link::connection(),
             user: Vec::new(),
@@ -318,6 +495,9 @@ impl Child for AppList {
             load: None,
             picked: None,
             install: None,
+            visible: (0, FIRST_ROWS),
+            fetch: None,
+            failed: BTreeSet::new(),
         }
     }
 
@@ -411,7 +591,18 @@ impl AppDetail {
     fn head<'a>(&'a self, ui: &'a Ui<DetailMsg>) -> Element<'a, DetailMsg> {
         let theme = ui.theme();
         let size = if ui.split_role() == SplitRole::Detail { SPLIT_BADGE_SIZE } else { BADGE_SIZE };
-        let title = ui.text(theme.fonts.title, &self.app.package).wrap().grow(1);
+        let found = app_info::find(&self.app.package, badge_size(size));
+        let tile = match found.filter(|f| f.icon) {
+            Some(f) => ui.child::<AppIcon>(IconProps { id: f.id, size, radius: BADGE_RADIUS }),
+            None => app_icon(ui, size, BADGE_RADIUS),
+        };
+        let title = match found.filter(|f| f.name) {
+            Some(f) => {
+                let package = ui.text(theme.fonts.caption, &self.app.package).foreground(colors::MUTED).wrap();
+                ui.column([ui.child::<AppName>(NameProps { id: f.id, color: ColorRole::Text, title: true }), package]).gap(4).grow(1)
+            }
+            None => ui.text(theme.fonts.title, &self.app.package).wrap().grow(1),
+        };
         let action = |glyph: char, label: &'a str, style: &'static StateStyle, msg: DetailMsg| {
             ui.row([ui.icon(small_icon(glyph)), ui.text(theme.fonts.body, label)]).style(style).height(ACTION_HEIGHT).width(0).grow(1).gap(12).align(Align::Center).justify(Justify::Center).on_tap(msg)
         };
@@ -419,7 +610,7 @@ impl AppDetail {
             action(icons::PLAY, "Launch", theme.widgets.button.primary, DetailMsg::Run(Action::Launch)).disabled(self.app.disabled || self.running).id(id!("launch")),
             action(icons::STOP, "Force Stop", &TONAL, DetailMsg::Run(Action::ForceStop)).disabled(self.running).id(id!("force-stop")),
         ]);
-        ui.column([ui.row([app_icon(ui, size, BADGE_RADIUS), title]).gap(MARGIN).align(Align::Center), actions.gap(16)]).gap(GAP).padding(MARGIN).radius(RADIUS).background(ui.colors().surface)
+        ui.column([ui.row([tile, title]).gap(MARGIN).align(Align::Center), actions.gap(16)]).gap(GAP).padding(MARGIN).radius(RADIUS).background(ui.colors().surface)
     }
 
     fn info<'a>(&'a self, ui: &'a Ui<DetailMsg>) -> Element<'a, DetailMsg> {
@@ -470,6 +661,16 @@ async fn load_details(this: This<AppDetail>, conn: Connection, package: String) 
     });
 }
 
+async fn fetch_badge(this: This<AppDetail>, link: Link, package: String) {
+    for size in [BADGE_SIZE, SPLIT_BADGE_SIZE] {
+        if let Err(err) = app_info::fetch(&link, &[package.as_str()], badge_size(size)).await {
+            error!(TAG, "app info {package}: {err}");
+            return;
+        }
+    }
+    this.with(|_, cx| cx.rebuild());
+}
+
 impl Component for AppDetail {
     type Msg = DetailMsg;
 
@@ -500,5 +701,9 @@ impl Screen for AppDetail {
     fn on_load(&mut self, cx: &mut Cx<Self>) {
         let (conn, package) = (self.conn.clone(), self.app.package.clone());
         cx.spawn(|this| load_details(this, conn, package));
+        if let Some(link) = agent::link_with(CAP_APPS) {
+            let package = self.app.package.clone();
+            cx.spawn(|this| fetch_badge(this, link, package));
+        }
     }
 }

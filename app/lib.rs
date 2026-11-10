@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod adb_link;
 mod apk;
+mod app_info;
 mod apps;
 mod agent;
 mod clock;
@@ -18,6 +19,7 @@ mod files;
 mod fonts;
 mod logcat;
 mod preview;
+mod raster_text;
 mod screens;
 mod settings;
 mod status_bar;

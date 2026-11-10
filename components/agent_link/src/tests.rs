@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, REPLY, Touch, TouchPoint, VideoStart, adapt_display, key, message, reply};
+use crate::protocol::{Channel, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, REPLY, TextImage, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -87,4 +87,37 @@ fn key_bytes() {
 fn adapt_display_bytes() {
     assert_eq!(adapt_display(720, 1280), [0xd0, 0x02, 0x00, 0x05]);
     assert_eq!(adapt_display(0, 0), [0; 4]);
+}
+
+#[test]
+fn get_app_info_bytes() {
+    assert_eq!(get_app_info(64, 28, &["a.b", "c"]), Some(alloc::vec![64, 0, 28, 2, 3, b'a', b'.', b'b', 1, b'c']));
+    assert_eq!(get_app_info(64, 28, &[]), None);
+}
+
+#[test]
+fn text_image() {
+    let b = [3, 0, 2, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 2, 3, 4, 5, 6, 0xee];
+    let (image, rest) = TextImage::parse(&b).unwrap();
+    assert_eq!((image.width, image.height, image.ascent), (3, 2, 1));
+    assert_eq!(image.breaks().collect::<Vec<_>>(), [1, 3]);
+    assert_eq!(image.alpha, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(rest, [0xee]);
+    assert_eq!(TextImage::parse(&b[..17]), None);
+    let empty = [0, 0, 20, 0, 16, 0, 0, 0];
+    assert_eq!(TextImage::parse(&empty).unwrap().0.alpha, &[] as &[u8]);
+}
+
+#[test]
+fn app_entries_bytes() {
+    let mut b = alloc::vec![0, 0, 0, 0];
+    b.extend_from_slice(&[1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0x7f, 1, 0, 1, 0, 9, 8, 7, 6]);
+    b.extend_from_slice(&[1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+    let entries = app_entries(&b, 3).unwrap();
+    assert_eq!(entries[0], None);
+    let first = entries[1].unwrap();
+    assert_eq!((first.name.alpha, first.icon_width, first.icon_height, first.icon), (&[0x7f][..], 1, 1, &[9, 8, 7, 6][..]));
+    let second = entries[2].unwrap();
+    assert_eq!((second.name.width, second.icon), (0, &[][..]));
+    assert_eq!(app_entries(&b[..b.len() - 1], 3), None);
 }

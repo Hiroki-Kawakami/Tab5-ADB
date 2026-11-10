@@ -121,6 +121,7 @@ REPLY
 | `0x01` | `HELLO` | セッションの確立 |
 | `0x10` | `SET_ROTATION` | 端末の画面の向きを固定する・戻す |
 | `0x11` | `ADAPT_DISPLAY` | 端末の解像度を縦横比に合わせる・戻す |
+| `0x20` | `GET_APP_INFO` | アプリの名前とアイコン |
 
 ### HELLO
 
@@ -155,7 +156,7 @@ REPLY result
 | 2 | `INPUT` | `TOUCH`、`KEY`、`INPUT_CLEAR` |
 | 3 | `MEDIA` | 再生中のメディア（予約） |
 | 4 | `PREVIEW` | スクリーンショット・ファイルの縮小画像（予約） |
-| 5 | `APPS` | アプリ名・アイコン（予約） |
+| 5 | `APPS` | `GET_APP_INFO` |
 
 ### SET_ROTATION
 
@@ -193,6 +194,33 @@ REPLY result
 - 解像度を変えている間に別の比を受けたら、その比に合わせ直す。
 - ユーザーが既に解像度を変えている（`wm size` の上書きがある）端末では、変えずに `ESTATE` を返す。
 - 解像度を変えていないときの 0×0 は何もせず `OK`。
+
+### GET_APP_INFO
+
+```
+GET_APP_INFO
+  u16 icon_px            アイコンの一辺 [px]。0 = アイコンは要らない
+  u8  text_px            名前の文字の大きさ（「文字の画像」を参照）
+  u8  count              1..255
+  count × {
+    u8  length           パッケージ名のバイト数
+    ... package          パッケージ名（UTF-8）
+  }
+
+REPLY result
+  count × {              要求と同じ順
+    u8  found            0 = そのパッケージは無い。以降を持たない
+    u8  reserved[3]
+    TEXT_IMAGE name      アプリの名前
+    u16 icon_width       0 = アイコンは無い
+    u16 icon_height
+    ... icon             icon_width × icon_height 個の u32。0xAARRGGBB、乗算済みでない
+  }
+```
+
+- 名前はランチャーに出る名前。無ければパッケージ名を描く。
+- アイコンは `icon_px` × `icon_px` に描く。
+- 1 回に載せるパッケージの数は、REPLY が Tab5 の制御の `max_message` に収まるように Tab5 が決める。
 
 ### 向き
 

@@ -13,6 +13,7 @@ pub const HEADER_BYTES: usize = 8;
 pub const HELLO: u8 = 0x01;
 pub const SET_ROTATION: u8 = 0x10;
 pub const ADAPT_DISPLAY: u8 = 0x11;
+pub const GET_APP_INFO: u8 = 0x20;
 pub const REPLY: u8 = 0x80;
 
 pub const TOUCH: u8 = 0xC0;
@@ -24,6 +25,7 @@ pub const FRAME: u8 = 0x81;
 
 pub const CAP_VIDEO: u32 = 1 << 0;
 pub const CAP_INPUT: u32 = 1 << 2;
+pub const CAP_APPS: u32 = 1 << 5;
 
 pub const CODEC_JPEG: u8 = 1;
 /// `SET_ROTATION` to give the device's own rotation back.
@@ -230,4 +232,79 @@ impl FrameHead {
         let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
         Self { width: u16_at(0), height: u16_at(2), y: u16_at(4), rows: u16_at(6), rotation: b[8] & 3, last: b[9] & FLAG_LAST != 0 }
     }
+}
+
+/// One line of text the agent drew, as TEXT_IMAGE.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TextImage<'a> {
+    pub width: u16,
+    /// The line's, whatever the text.
+    pub height: u16,
+    /// From the top to the baseline.
+    pub ascent: u16,
+    breaks: &'a [u8],
+    /// `width` × `height`, no row padding.
+    pub alpha: &'a [u8],
+}
+
+impl<'a> TextImage<'a> {
+    /// The image and what follows it.
+    pub fn parse(b: &'a [u8]) -> Option<(Self, &'a [u8])> {
+        let u16_at = |i: usize| b.get(i..i + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));
+        let (width, height, ascent, count) = (u16_at(0)?, u16_at(2)?, u16_at(4)?, usize::from(u16_at(6)?));
+        let breaks = b.get(8..8 + 2 * count)?;
+        let at = 8 + 2 * count;
+        let size = if width == 0 { 0 } else { usize::from(width) * usize::from(height) };
+        let alpha = b.get(at..at + size)?;
+        Some((Self { width, height, ascent, breaks, alpha }, &b[at + size..]))
+    }
+
+    /// The right edges of the characters, ascending.
+    pub fn breaks(&self) -> impl Iterator<Item = u16> + 'a {
+        self.breaks.chunks_exact(2).map(|s| u16::from_le_bytes([s[0], s[1]]))
+    }
+}
+
+/// One package of a GET_APP_INFO reply.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AppEntry<'a> {
+    pub name: TextImage<'a>,
+    pub icon_width: u16,
+    pub icon_height: u16,
+    /// B, G, R, A per pixel, not premultiplied; empty without an icon.
+    pub icon: &'a [u8],
+}
+
+pub fn get_app_info(icon_px: u16, text_px: u8, packages: &[&str]) -> Option<Vec<u8>> {
+    let count = u8::try_from(packages.len()).ok().filter(|&n| n > 0)?;
+    let mut out = Vec::new();
+    out.extend_from_slice(&icon_px.to_le_bytes());
+    out.extend_from_slice(&[text_px, count]);
+    for package in packages {
+        out.push(u8::try_from(package.len()).ok()?);
+        out.extend_from_slice(package.as_bytes());
+    }
+    Some(out)
+}
+
+/// `None` for each package the device does not have.
+pub fn app_entries(b: &[u8], count: usize) -> Option<Vec<Option<AppEntry<'_>>>> {
+    let mut entries = Vec::with_capacity(count);
+    let mut rest = b;
+    for _ in 0..count {
+        let found = *rest.first()?;
+        rest = rest.get(4..)?;
+        if found == 0 {
+            entries.push(None);
+            continue;
+        }
+        let (name, after) = TextImage::parse(rest)?;
+        let size = after.get(..4)?;
+        let (icon_width, icon_height) = (u16::from_le_bytes([size[0], size[1]]), u16::from_le_bytes([size[2], size[3]]));
+        let bytes = usize::from(icon_width) * usize::from(icon_height) * 4;
+        let icon = after.get(4..4 + bytes)?;
+        rest = &after[4 + bytes..];
+        entries.push(Some(AppEntry { name, icon_width, icon_height, icon }));
+    }
+    Some(entries)
 }

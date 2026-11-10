@@ -7,13 +7,18 @@ package com.tab5adb.agent;
 
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
+import android.os.Looper;
 
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class Server {
     private static final int VERSION_MAJOR = 0;
@@ -28,6 +33,7 @@ public final class Server {
     private static final int HELLO = 0x01;
     private static final int SET_ROTATION = 0x10;
     private static final int ADAPT_DISPLAY = 0x11;
+    private static final int GET_APP_INFO = 0x20;
     private static final int REQUEST_LAST = 0x7F;
     private static final int REPLY = 0x80;
     private static final int TOUCH = 0xC0;
@@ -46,15 +52,17 @@ public final class Server {
 
     private static final int CAP_VIDEO = 1 << 0;
     private static final int CAP_INPUT = 1 << 2;
-    private static final int CAPABILITIES = CAP_VIDEO | CAP_INPUT;
+    private static final int CAP_APPS = 1 << 5;
     private static final int ROTATION_RELEASE = 0xFF;
 
     private static volatile boolean helloDone;
     private static volatile int videoMaxMessage;
+    private static AppInfo apps;
 
     private final OutputStream out;
     private boolean hello;
-    private long replyMax = 0xFFFFFFFFL;
+    private volatile long replyMax = 0xFFFFFFFFL;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private Input input;
     private boolean inputFailed;
     private final int[] touchIds = new int[MAX_POINTERS];
@@ -92,6 +100,12 @@ public final class Server {
         });
         watchdog.setDaemon(true);
         watchdog.start();
+        Looper.prepareMainLooper();
+        try {
+            apps = AppInfo.create();
+        } catch (Throwable t) {
+            System.out.println("apps: " + t);
+        }
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             RotationLock.release();
             DisplaySize.release();
@@ -160,6 +174,8 @@ public final class Server {
                 onSetRotation(id, payload);
             } else if (kind == ADAPT_DISPLAY) {
                 onAdaptDisplay(id, payload);
+            } else if (kind == GET_APP_INFO && apps != null) {
+                worker.execute(() -> onGetAppInfo(id, payload));
             } else if (kind == TOUCH) {
                 onTouch(payload);
             } else if (kind == KEY) {
@@ -184,7 +200,7 @@ public final class Server {
         result.putShort((short) PROTO_VERSION);
         result.put((byte) VERSION_MAJOR).put((byte) VERSION_MINOR).put((byte) VERSION_PATCH);
         result.put((byte) 0).putShort((short) 0);
-        result.putInt(CAPABILITIES);
+        result.putInt(CAP_VIDEO | CAP_INPUT | (apps != null ? CAP_APPS : 0));
         result.putInt(MAX_MESSAGE);
         if (payload.length >= 12) {
             replyMax = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(8) & 0xFFFFFFFFL;
@@ -239,6 +255,36 @@ public final class Server {
         } catch (Throwable t) {
             System.out.println("adapt display: " + t);
             reply(id, EFAIL, new byte[0]);
+        }
+    }
+
+    private void onGetAppInfo(int id, byte[] payload) {
+        try {
+            if (payload.length < 4 || (payload[3] & 0xFF) == 0) {
+                reply(id, EINVAL, new byte[0]);
+                return;
+            }
+            int iconPx = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getShort(0) & 0xFFFF;
+            int textPx = payload[2] & 0xFF;
+            int count = payload[3] & 0xFF;
+            String[] names = new String[count];
+            int at = 4;
+            for (int i = 0; i < count; i++) {
+                int length = at < payload.length ? payload[at] & 0xFF : -1;
+                if (length < 0 || at + 1 + length > payload.length) {
+                    reply(id, EINVAL, new byte[0]);
+                    return;
+                }
+                names[i] = new String(payload, at + 1, length, StandardCharsets.UTF_8);
+                at += 1 + length;
+            }
+            ByteArrayOutputStream result = new ByteArrayOutputStream();
+            for (String name : names) {
+                apps.write(result, name, iconPx, textPx);
+            }
+            reply(id, OK, result.toByteArray());
+        } catch (IOException e) {
+            System.out.println("app info: " + e);
         }
     }
 
