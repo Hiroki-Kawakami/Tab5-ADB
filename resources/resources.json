@@ -74,6 +74,8 @@
           "PgDn": { "label": "PgDn", "custom": 2, "width": 1.5, "role": "KeyRole.Special", "repeat": true },
           "Ins": { "label": "Ins", "custom": 3, "width": 1.5, "role": "KeyRole.Special" },
           "Del": { "label": "Del", "action": "TextInput.Delete", "width": 1.5, "role": "KeyRole.Special", "repeat": true },
+          "Close": { "icon": "close", "custom": 1, "role": "KeyRole.Special" },
+          "OK": { "icon": "check", "action": "TextInput.Enter", "role": "KeyRole.Primary" },
           "^a": { "label": "a", "insert": "\u0001" },
           "^b": { "label": "b", "insert": "\u0002" },
           "^c": { "label": "c", "insert": "\u0003" },
@@ -220,6 +222,38 @@
               ]
             }
           ]
+        },
+        "pair_address": {
+          "height": 360,
+          "max_height": 0.33,
+          "layers": [
+            {
+              "id": "main",
+              "columns": 5,
+              "layout": [
+                [1, "1", "2", "3"],
+                [1, "4", "5", "6", "BS"],
+                ["Left", "7", "8", "9", "Right"],
+                ["Close", ":", "0", ".", "OK"]
+              ]
+            }
+          ]
+        },
+        "pair_code": {
+          "height": 360,
+          "max_height": 0.33,
+          "layers": [
+            {
+              "id": "main",
+              "columns": 5,
+              "layout": [
+                [1, "1", "2", "3"],
+                [1, "4", "5", "6", "BS"],
+                ["Left", "7", "8", "9", "Right"],
+                ["Close", 1, "0", 1, "OK"]
+              ]
+            }
+          ]
         }
       }
     }
@@ -293,6 +327,7 @@
     "icon_40": {
       "size": 40,
       "icon": {
+        "LINK": "icons/link.svg",
         "SETTINGS": "icons/settings.svg",
         "FOLDER": "icons/folder.svg",
         "GITHUB": "icons/brand-github.svg",

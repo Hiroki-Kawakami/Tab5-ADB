@@ -9,6 +9,8 @@ use core::ffi::CStr;
 
 use devkit_crypto::hash::HashAlg;
 use devkit_crypto::rsa::PrivateKey;
+use devkit_crypto::tls;
+use devkit_crypto::x509::{CertificateBuilder, Name, Signer};
 use idf::nvs::{Key, Nvs};
 
 use crate::link::base64;
@@ -71,6 +73,14 @@ impl Identity {
             return Err(Error::Protocol);
         }
         Ok(self.key.sign_pkcs1v15_prehashed(HashAlg::Sha1, token)?)
+    }
+
+    /// A self-signed certificate for the key, valid whatever the clock says.
+    pub(crate) fn tls_identity(&self) -> Result<tls::Identity> {
+        let subject = Name::new().country("US").organization("Android").common_name("Adb");
+        let cert = CertificateBuilder::new(subject).ca(true).self_signed(Signer::Rsa(&self.key))?;
+        let key = PrivateKey::from_pkcs1_der(&self.key.to_pkcs1_der()?)?;
+        Ok(tls::Identity { chain: alloc::vec![cert], key: tls::PrivateKey::Rsa(key) })
     }
 
     /// The AUTH RSAPUBLICKEY payload.

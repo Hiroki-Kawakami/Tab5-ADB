@@ -16,11 +16,11 @@ use core::time::Duration;
 use adb::link::transport::Transport;
 use adb::link::{Connection, Identity, State};
 use devkit_net::wifi_manager;
-use idf::executor::{self, Spawner};
+use idf::executor::{self, Spawner, oneshot};
 use idf::log::{error, info};
 use idf::sync::{Mutex, OnceLock};
 use usb_host_rs::{Device, Event};
-use idf::thread::Builder;
+use idf::thread::{self, Builder};
 
 use crate::{clock, wifi};
 
@@ -28,6 +28,8 @@ const TAG: &CStr = c"adb_link";
 const KEY_NAMESPACE: &CStr = c"adb";
 const DEFAULT_HOST_ID: &str = "00000000";
 const IPV4_TIMEOUT: Duration = Duration::from_secs(10);
+const PAIR_TIMEOUT: Duration = Duration::from_secs(30);
+const PAIR_STACK: usize = 24 * 1024;
 static SPAWNER: OnceLock<Spawner> = OnceLock::new();
 static HOST_ID: OnceLock<String> = OnceLock::new();
 static IDENTITY: OnceLock<Arc<Identity>> = OnceLock::new();
@@ -71,13 +73,18 @@ pub fn host_id() -> &'static str {
     })
 }
 
+/// The name devices show for this Tab5's key.
+pub fn host_name() -> String {
+    format!("Tab5-ADB@{}", host_id())
+}
+
 /// The executor the connection's tasks run on.
 pub fn spawner() -> Option<&'static Spawner> {
     SPAWNER.get()
 }
 
 async fn follow() {
-    match Identity::load_or_create(KEY_NAMESPACE, &format!("Tab5-ADB@{}", host_id())) {
+    match Identity::load_or_create(KEY_NAMESPACE, &host_name()) {
         Ok(identity) => drop(IDENTITY.set(Arc::new(identity))),
         Err(err) => {
             error!(TAG, "identity: {err}");
@@ -189,4 +196,40 @@ async fn join_network() -> Result<(), String> {
     let sta = devkit_net::wifi().ok_or("No Wi-Fi radio.")?.sta();
     executor::timeout(IPV4_TIMEOUT, sta.wait_ipv4_async()).await.map_err(|_| "No IP address from the Wi-Fi network.")?;
     Ok(())
+}
+
+/// Pairs with the device whose Wireless debugging pairing dialog shows `addr`
+/// and `code`; returns its GUID, or why it failed in words for the user.
+pub async fn pair(addr: String, code: String) -> Result<String, String> {
+    let identity = IDENTITY.get().ok_or("The ADB key is not ready.")?.clone();
+    join_network().await?;
+    let (tx, rx) = oneshot::channel();
+    thread::Builder::new()
+        .name("adb_pair")
+        .stack_size(PAIR_STACK)
+        .spawn(move || {
+            let result = executor::block_on(executor::timeout(PAIR_TIMEOUT, adb::link::pair::pair(&addr, &code, &identity)));
+            drop(tx.send(result));
+        })
+        .map_err(|err| {
+            error!(TAG, "pair thread: {err}");
+            String::from("Pairing could not start.")
+        })?;
+    let result = rx.await.map_err(|_| String::from("Pairing could not finish."))?;
+    let err = match result {
+        Ok(Ok(guid)) => return Ok(guid),
+        Ok(Err(err)) => err,
+        Err(_) => {
+            error!(TAG, "pair: timed out");
+            return Err("Pairing timed out. Open a new pairing-code dialog on Android and try again.".into());
+        }
+    };
+    error!(TAG, "pair: {err}");
+    Err(match err {
+        adb::Error::Net(_) => "Could not reach the pairing address. Check that both devices are on the same Wi-Fi network.".into(),
+        adb::Error::Crypto(_) => "The secure pairing connection could not be established.".into(),
+        adb::Error::PairingCode => "The pairing code was rejected. Generate a new code and try again.".into(),
+        adb::Error::Protocol | adb::Error::Disconnected => "Android rejected the pairing exchange. Generate a new code and try again.".into(),
+        err => format!("Pairing failed: {err}"),
+    })
 }

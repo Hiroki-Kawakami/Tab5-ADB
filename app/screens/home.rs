@@ -20,6 +20,7 @@ use crate::{adb_link, wifi};
 use super::connecting::ConnectingScreen;
 use super::file_manager::FileManagerScreen;
 use super::message::MessageScreen;
+use super::pair_device::PairDeviceScreen;
 use super::settings::SettingsScreen;
 
 const GAP: i16 = 20;
@@ -148,6 +149,7 @@ impl Component for HomeScreen {
         match msg {
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
             Msg::Files => cx.nav_of::<Root>().push(FileManagerScreen::new(false)),
+            Msg::Pair => cx.nav_of::<Root>().push(PairDeviceScreen::new()),
             Msg::UsbConnect => match adb_link::connect() {
                 Ok(conn) => cx.nav_of::<Overlay>().push(ConnectingScreen::usb(conn)),
                 Err(err) => cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err)),

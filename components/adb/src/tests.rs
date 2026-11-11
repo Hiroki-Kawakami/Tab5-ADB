@@ -7,6 +7,8 @@ use crate::link::base64;
 use crate::link::connection::banner_has_feature;
 use crate::link::identity::{n0inv, r_squared};
 use crate::link::packet::{A_CNXN, A_VERSION, Header, Packet};
+use crate::link::pair::Cipher;
+use crate::link::spake2::{Role, Spake2};
 use crate::services::shell::{packet, window_size};
 use crate::services::sync::stat_v2;
 
@@ -76,4 +78,90 @@ fn stat_v2_reply() {
     assert!(!stat_v2(&reply).unwrap().exists());
     reply[..4].copy_from_slice(b"STAT");
     assert!(stat_v2(&reply).is_err());
+}
+
+fn hex(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+}
+
+fn oracle(args: &[&str], stdin: bool) -> std::process::Child {
+    let path = std::env::var("ADB_SPAKE2_ORACLE").expect("run test/run.sh, which builds the BoringSSL oracle");
+    let mut command = std::process::Command::new(path);
+    command.args(args).stdout(std::process::Stdio::piped());
+    if stdin {
+        command.stdin(std::process::Stdio::piped());
+    }
+    command.spawn().unwrap()
+}
+
+/// Our side as `role` against BoringSSL as the other; both keys, or `None`
+/// where a side failed.
+fn spake2_against_boringssl(role: Role, ours: &[u8], theirs: &[u8], random: &[u8; 64]) -> (Option<[u8; 64]>, Option<Vec<u8>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let peer = if role == Role::Alice { "bob" } else { "alice" };
+    let mut child = oracle(&["spake2", peer, &hex(theirs)], true);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let their_msg: [u8; 32] = unhex(line.trim()).try_into().unwrap();
+    let spake2 = Spake2::new(role, ours, random);
+    writeln!(child.stdin.take().unwrap(), "{}", hex(spake2.message())).unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    assert!(child.wait().unwrap().success());
+    let line = line.trim();
+    (spake2.finish(&their_msg), (line != "FAIL").then(|| unhex(line)))
+}
+
+fn password(code: &[u8]) -> Vec<u8> {
+    let mut password = code.to_vec();
+    password.extend((0..64).map(|i| (i * 37 + 11) as u8));
+    password
+}
+
+#[test]
+fn spake2_matches_boringssl() {
+    for (i, role) in [Role::Alice, Role::Bob].into_iter().enumerate() {
+        for round in 0..4u8 {
+            let random: [u8; 64] = core::array::from_fn(|j| (j as u8).wrapping_mul(29).wrapping_add(round * 7 + i as u8));
+            let password = password(b"123456");
+            let (ours, theirs) = spake2_against_boringssl(role, &password, &password, &random);
+            assert_eq!(ours.map(|k| k.to_vec()), theirs, "{role:?} round {round}");
+        }
+    }
+}
+
+#[test]
+fn spake2_wrong_code_differs() {
+    let (ours, theirs) = spake2_against_boringssl(Role::Alice, &password(b"123456"), &password(b"123457"), &[3; 64]);
+    assert_ne!(ours.map(|k| k.to_vec()), theirs);
+}
+
+#[test]
+fn pairing_records_match_boringssl() {
+    let material: Vec<u8> = (0..64).map(|i| (i * 13 + 5) as u8).collect();
+    let plain: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
+    let output = |args: &[&str]| {
+        let out = oracle(args, false).wait_with_output().unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let mut sealing = Cipher::new(&material).unwrap();
+    let mut opening = Cipher::new(&material).unwrap();
+    for sequence in 0..2 {
+        let mut record = plain.clone();
+        record.resize(plain.len() + 16, 0);
+        sealing.seal(&mut record).unwrap();
+        assert_eq!(hex(&record), output(&["seal", &hex(&material), &sequence.to_string(), &hex(&plain)]));
+        assert_eq!(hex(&plain), output(&["open", &hex(&material), &sequence.to_string(), &hex(&record)]));
+        assert_eq!(opening.open(&mut record).unwrap(), &plain[..]);
+    }
+    let mut record = plain.clone();
+    record.resize(plain.len() + 16, 0);
+    Cipher::new(&material).unwrap().seal(&mut record).unwrap();
+    record[0] ^= 1;
+    assert!(Cipher::new(&material).unwrap().open(&mut record).is_err());
 }

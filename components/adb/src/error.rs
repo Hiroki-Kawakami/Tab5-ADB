@@ -19,6 +19,9 @@ pub enum Error {
     Closed,
     /// The device broke the protocol.
     Protocol,
+    /// The device could not read what pairing sent: the code was not the one
+    /// it shows.
+    PairingCode,
     /// The sync service answered FAIL with this message.
     Sync(String),
     Usb(usb_host_rs::Error),
@@ -37,6 +40,7 @@ impl fmt::Display for Error {
             Error::Rejected => f.write_str("service rejected"),
             Error::Closed => f.write_str("stream closed"),
             Error::Protocol => f.write_str("protocol error"),
+            Error::PairingCode => f.write_str("wrong pairing code"),
             Error::Sync(message) => write!(f, "sync: {message}"),
             Error::Usb(e) => write!(f, "usb: {e}"),
             Error::Net(e) => write!(f, "net: {e}"),
