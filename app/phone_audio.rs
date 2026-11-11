@@ -33,6 +33,10 @@ const PACKETS: usize = 32;
 const UNITY_VOLUME: u16 = 100;
 const OPUS_FRAMES: usize = 5760;
 const STACK: usize = 16 * 1024;
+/// Above the UI's strip lanes, which take both cores at 10 while drawing.
+const DECODE_PRIORITY: u32 = 12;
+const PLAY_PRIORITY: u32 = 15;
+const CORE: u32 = 1;
 
 static OUTPUT: OnceLock<&'static Audio> = OnceLock::new();
 
@@ -70,8 +74,8 @@ impl PhoneAudio {
         let config = FifoConfig { channels: CHANNELS, capacity: BUFFER_FRAMES, prefill: PREFILL_FRAMES, underrun: Underrun::Silence, overrun: Overrun::DropOldest, caps: Caps::SPIRAM };
         let (writer, reader) = fifo::new::<i16>(&config).inspect_err(|err| error!(TAG, "fifo: {err:?}")).ok()?;
         let (packets, received) = sync::channel(PACKETS);
-        let decode = Builder::new().name("phone-decode").stack_size(STACK).spawn(move || decode(codec, received, writer)).inspect_err(|err| error!(TAG, "decode: {err}")).ok()?;
-        let play = match Builder::new().name("phone-play").stack_size(STACK).spawn(move || play(output, reader)) {
+        let decode = Builder::new().name("phone-decode").stack_size(STACK).priority(DECODE_PRIORITY).core(Some(CORE)).spawn(move || decode(codec, received, writer)).inspect_err(|err| error!(TAG, "decode: {err}")).ok()?;
+        let play = match Builder::new().name("phone-play").stack_size(STACK).priority(PLAY_PRIORITY).core(Some(CORE)).spawn(move || play(output, reader)) {
             Ok(play) => play,
             Err(err) => {
                 error!(TAG, "play: {err}");
