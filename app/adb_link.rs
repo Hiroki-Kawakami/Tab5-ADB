@@ -15,7 +15,7 @@ use core::time::Duration;
 
 use adb::link::transport::Transport;
 use adb::link::{Connection, Identity, State};
-use devkit_net::wifi_manager;
+use devkit_net::{PowerSave, wifi_manager};
 use idf::executor::{self, Spawner, oneshot};
 use idf::log::{error, info};
 use idf::sync::{Mutex, OnceLock};
@@ -201,10 +201,31 @@ pub async fn connect_tcp(addr: &str) -> Result<Connection, String> {
         drop(spawner.spawn(async move {
             if recorded.online().await.is_ok() {
                 tcp_history::add(&addr);
+                keep_radio_awake(recorded).await;
             }
         }));
     }
     Ok(conn)
+}
+
+/// Modem sleep throttles the link, so the radio stays awake until `conn`
+/// closes, or longer when another TCP connection is online by then.
+async fn keep_radio_awake(conn: Connection) {
+    set_power_save(PowerSave::None).await;
+    while !matches!(conn.state(), State::Closed(_)) {
+        conn.state_changed().await;
+    }
+    let tcp_online = matches!(route(), Some(Route::Tcp(_))) && connection().is_some_and(|c| c.state() == State::Online);
+    if !tcp_online {
+        set_power_save(PowerSave::default()).await;
+    }
+}
+
+async fn set_power_save(mode: PowerSave) {
+    let Some(radio) = devkit_net::wifi() else { return };
+    if let Err(err) = radio.set_power_save(mode).await {
+        error!(TAG, "power save {mode:?}: {err:?}");
+    }
 }
 
 /// Why `err` closed a connection, in words for the user.
