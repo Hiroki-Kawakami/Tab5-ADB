@@ -21,6 +21,7 @@ mod power_menu;
 mod screenshot;
 mod settings;
 mod terminal;
+mod wifi;
 
 pub use home::{HomeScreen, adb_command};
 pub use settings::{set_input, set_rotation};

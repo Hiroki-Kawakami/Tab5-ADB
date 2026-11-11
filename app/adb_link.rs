@@ -11,21 +11,23 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::ffi::CStr;
+use core::time::Duration;
 
 use adb::link::transport::Transport;
 use adb::link::{Connection, Identity, State};
-use devkit_net::{StaConfig, WifiState};
-use idf::executor::Spawner;
+use devkit_net::wifi_manager;
+use idf::executor::{self, Spawner};
 use idf::log::{error, info};
 use idf::sync::{Mutex, OnceLock};
 use usb_host_rs::{Device, Event};
 use idf::thread::Builder;
 
-use crate::clock;
+use crate::{clock, wifi};
 
 const TAG: &CStr = c"adb_link";
 const KEY_NAMESPACE: &CStr = c"adb";
 const DEFAULT_HOST_ID: &str = "00000000";
+const IPV4_TIMEOUT: Duration = Duration::from_secs(10);
 static SPAWNER: OnceLock<Spawner> = OnceLock::new();
 static HOST_ID: OnceLock<String> = OnceLock::new();
 static IDENTITY: OnceLock<Arc<Identity>> = OnceLock::new();
@@ -181,20 +183,10 @@ pub async fn connect_tcp(addr: &str) -> Result<Connection, String> {
 }
 
 async fn join_network() -> Result<(), String> {
-    match devkit_net::start(devkit_net::Config::default()) {
-        Ok(()) | Err(devkit_net::Error::AlreadyStarted) => {}
-        Err(err) => return Err(format!("network: {err}")),
+    if !matches!(wifi::state(), wifi_manager::State::Connected { .. }) {
+        return Err("Wi-Fi is not connected.".into());
     }
-    let wifi = devkit_net::wifi().ok_or("No Wi-Fi radio.")?;
-    if matches!(wifi.state(), WifiState::Connected { .. }) {
-        return Ok(());
-    }
-    wifi.start().await.map_err(|e| format!("Wi-Fi: {e:?}"))?;
-    let networks = wifi.scan().await.map_err(|e| format!("Wi-Fi scan: {e:?}"))?;
-    let network = networks.first().ok_or("No Wi-Fi network.")?;
-    let ssid = String::from_utf8_lossy(&network.ssid).into_owned();
-    wifi.connect(&StaConfig::new(&ssid, "")).await.map_err(|e| format!("Wi-Fi {ssid}: {e:?}"))?;
-    info!(TAG, "joined {ssid}");
-    wifi.sta().wait_ipv4_async().await;
+    let sta = devkit_net::wifi().ok_or("No Wi-Fi radio.")?.sta();
+    executor::timeout(IPV4_TIMEOUT, sta.wait_ipv4_async()).await.map_err(|_| "No IP address from the Wi-Fi network.")?;
     Ok(())
 }

@@ -7,6 +7,7 @@ use core::ffi::CStr;
 
 use bsp_rs::display;
 use devkit::Lease;
+use devkit_net::wifi_manager::State as WifiState;
 use devkit_ui::widgets::{DropdownMenu, dropdown, segmented, slider, slider_value, switch, table, table_chevron, table_header, table_label, table_row, table_section, table_value, top_bar};
 use devkit_ui::{Align, AutoRotation, ColorMode, Component, Cx, Drag, Element, Input, RenderMode, Screen, Strips, Ui, id};
 use idf::heap::Caps;
@@ -16,7 +17,10 @@ use idf::sync::OnceLock;
 use crate::fonts::icon;
 use crate::resources::{colors, icons};
 use crate::settings::{self, AgentMode, AudioPlayback, ColorDepth, MirrorOrientation};
+use crate::wifi;
 use crate::{SHARED_SRAM_BYTES, STRIP_LANES, SharedSram};
+
+use super::wifi::WifiScreen;
 
 const TAG: &CStr = c"settings";
 
@@ -35,6 +39,7 @@ pub fn set_rotation(rotation: AutoRotation) {
 pub enum SettingsMsg {
     Back,
     Open,
+    Wifi,
     Brightness(u8),
     ColorDepth(usize),
     ColorDepthApplied(ColorDepth),
@@ -122,6 +127,7 @@ impl Component for SettingsScreen {
         match msg {
             SettingsMsg::Back => cx.nav().pop(),
             SettingsMsg::Open => {}
+            SettingsMsg::Wifi => cx.nav().push(WifiScreen::new()),
             SettingsMsg::Brightness(value) => settings::set_brightness((u32::from(value) * 100 / 255) as u8),
             SettingsMsg::ColorDepth(index) => self.switch_color_depth(COLOR_DEPTHS[index], cx),
             SettingsMsg::ColorDepthApplied(depth) => self.restore_strips(depth, cx),
@@ -175,7 +181,7 @@ impl Component for SettingsScreen {
             table(
                 ui,
                 [
-                    table_section(ui, [table_row(ui, [ui.icon(icon(icons::WIFI)), table_label(ui, "Wi-Fi"), table_value(ui, "example-ap"), table_chevron(ui)]).on_tap(SettingsMsg::Open).id(id!("wifi"))]),
+                    table_section(ui, [wifi_row(ui)]),
                     table_header(ui, "DISPLAY"),
                     table_section(
                         ui,
@@ -250,6 +256,18 @@ fn orientation_index() -> usize {
 
 fn playback_index(current: AudioPlayback) -> usize {
     PLAYBACKS.iter().position(|&(playback, _)| playback == current).unwrap_or(0)
+}
+
+fn wifi_row<'a>(ui: &'a Ui<SettingsMsg>) -> Element<'a, SettingsMsg> {
+    let value = match wifi::state() {
+        WifiState::Connected { ssid, .. } => ui.store(&wifi::ssid(&ssid)),
+        WifiState::Disabled => "Off",
+        _ => "Not connected",
+    };
+    table_row(ui, [ui.icon(icon(icons::WIFI)), table_label(ui, "Wi-Fi"), table_value(ui, value), table_chevron(ui)])
+        .on_tap(SettingsMsg::Wifi)
+        .id(id!("wifi"))
+        .task(|this| wifi::follow(this, |_: &mut SettingsScreen| {}))
 }
 
 fn playback_row<'a>(ui: &'a Ui<SettingsMsg>, current: AudioPlayback, open: SettingsMsg) -> Element<'a, SettingsMsg> {

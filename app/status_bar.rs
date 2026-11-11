@@ -7,18 +7,21 @@ use core::ffi::CStr;
 use core::time::Duration;
 
 use bsp_rs::power::Power;
+use devkit_gfx::Color;
+use devkit_net::wifi_manager::State;
 use devkit_ui::{Align, Bars, Component, Cx, Element, This, Ui, id};
 use idf::executor;
 use idf::log::error;
 
-use crate::clock;
 use crate::fonts::small_icon;
 use crate::resources::icons;
+use crate::{clock, wifi};
 
 const TAG: &CStr = c"status_bar";
 
 pub const STATUS_BAR_HEIGHT: i16 = 52;
 const UNSET_CLOCK_POLL_SECS: u64 = 5;
+const FAINT_OPACITY: u8 = 80;
 
 pub struct StatusBar {
     power: &'static Power,
@@ -76,7 +79,7 @@ impl Component for StatusBar {
         };
         ui.row([
             ui.text(caption, time).foreground(color).id(id!("clock")).grow(1),
-            ui.icon(small_icon(icons::WIFI)).foreground(color),
+            wifi_icon(ui, color).task(|this| wifi::follow(this, |_: &mut StatusBar| {})),
             battery,
         ])
         .height(STATUS_BAR_HEIGHT)
@@ -84,5 +87,16 @@ impl Component for StatusBar {
         .gap(14)
         .align(Align::Center)
         .task(move |this| poll(this, power))
+    }
+}
+
+fn wifi_icon<'a>(ui: &'a Ui<()>, color: Color) -> Element<'a, ()> {
+    let faint = ui.icon(small_icon(icons::WIFI)).foreground(color.with_opacity(FAINT_OPACITY));
+    match wifi::state() {
+        State::Disabled => ui.icon(small_icon(icons::WIFI_OFF)).foreground(color),
+        State::Connected { rssi, .. } => {
+            ui.column([faint, ui.icon(small_icon(wifi::strength_glyph(rssi))).foreground(color).absolute(Some(0), Some(0), None, None)])
+        }
+        _ => faint,
     }
 }

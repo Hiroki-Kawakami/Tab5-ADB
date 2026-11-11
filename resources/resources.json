@@ -259,6 +259,11 @@
       "size": 28,
       "icon": {
         "WIFI": "icons/wifi.svg",
+        "WIFI_0": "icons/wifi-0.svg",
+        "WIFI_1": "icons/wifi-1.svg",
+        "WIFI_2": "icons/wifi-2.svg",
+        "WIFI_OFF": "icons/wifi-off.svg",
+        "LOCK": "icons/lock.svg",
         "BATTERY": "icons/battery-3.svg",
         "LINK": "icons/link.svg",
         "HISTORY": "icons/history.svg",

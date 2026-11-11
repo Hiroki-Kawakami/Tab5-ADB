@@ -8,13 +8,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use devkit_gfx::{Color, FontChain};
+use devkit_net::wifi_manager::State as WifiState;
 use devkit_ui::widgets::text_field;
 use devkit_ui::{Align, ColorRole, Component, Cx, Element, Handle, Icon, Justify, Overlay, Prop, Root, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Transition, Ui};
 use idf::sync::Mutex;
 
-use crate::adb_link;
 use crate::fonts::{HERO, icon, small_icon};
 use crate::resources::{colors, icons};
+use crate::{adb_link, wifi};
 
 use super::connecting::ConnectingScreen;
 use super::file_manager::FileManagerScreen;
@@ -68,7 +69,6 @@ pub fn adb_command(args: &[&str]) -> Result<Option<String>, String> {
 
 pub struct HomeScreen {
     address: TextBuffer,
-    ssid: Option<String>,
     recent: Vec<String>,
 }
 
@@ -76,7 +76,6 @@ impl HomeScreen {
     pub fn new() -> Self {
         Self {
             address: TextBuffer::new(),
-            ssid: Some(String::from("YOUR_SSID")),
             recent: vec![String::from("192.168.x.x:36645"), String::from("192.168.x.x:5555")],
         }
     }
@@ -112,12 +111,13 @@ impl HomeScreen {
     fn wireless<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
         let theme = ui.theme();
         let caption = theme.fonts.caption;
-        let status = match &self.ssid {
-            Some(ssid) => ui
-                .row([ui.column([]).size(8, 8).radius(4).background(colors::ONLINE), ui.text(caption, ui.format(format_args!("Connected to {ssid}"))).foreground(colors::ONLINE)])
+        let status = match wifi::state() {
+            WifiState::Connected { .. } => ui
+                .row([ui.column([]).size(8, 8).radius(4).background(colors::ONLINE), ui.text(caption, "Wi-Fi Connected").foreground(colors::ONLINE)])
                 .gap(10)
                 .align(Align::Center),
-            None => ui.text(caption, "Not connected").foreground(colors::MUTED),
+            WifiState::Disabled => ui.text(caption, "Wi-Fi Off").foreground(colors::MUTED),
+            _ => ui.text(caption, "Wi-Fi not connected").foreground(colors::MUTED),
         };
         let pair = ui
             .row([ui.icon(small_icon(icons::LINK)), ui.text(caption, "Pair Device")])
@@ -137,7 +137,7 @@ impl HomeScreen {
             .align(Align::Center);
         let rows: Vec<_> = self.recent.iter().map(|address| recent_row(ui, address, Msg::Recent)).collect();
         let recent = ui.column([ui.text(caption, "RECENT").foreground(colors::MUTED).padding_each(0, 8, 0, 4), ui.column(rows)]);
-        card(ui, ui.column([header, input, recent]).gap(20)).grow(1)
+        card(ui, ui.column([header, input, recent]).gap(20)).grow(1).task(|this| wifi::follow(this, |_: &mut HomeScreen| {}))
     }
 }
 

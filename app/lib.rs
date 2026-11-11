@@ -29,6 +29,7 @@ mod settings;
 mod status_bar;
 #[cfg(test)]
 mod tests;
+mod wifi;
 
 mod resources {
     #![allow(dead_code)]
@@ -84,6 +85,7 @@ pub fn run() {
         phone_audio::set_output(audio);
     }
     adb_link::start(board.power);
+    wifi::start();
     harness_rs::register("adb", screens::adb_command);
     if let Err(err) = harness_rs::start(&board) {
         error!(TAG, "harness_rs::start: {err}");
