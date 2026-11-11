@@ -14,6 +14,8 @@ use idf::executor;
 use crate::protocol::{self, CODEC_JPEG, FRAME, FRAME_HEAD, FrameHead, HEADER_BYTES, Header, OK, REPLY, VIDEO_START, VideoStart};
 use crate::{Error, Result};
 
+const WINDOW: u32 = 512 * 1024;
+
 pub enum Jpeg<A: Allocator> {
     Lent(Slice),
     Copied(Vec<u8, A>),
@@ -43,7 +45,7 @@ pub struct Video {
 
 impl Video {
     pub(crate) async fn open(conn: &Connection, service: &str, start: &VideoStart, max: u32, timeout: Duration) -> Result<Self> {
-        let mut stream = conn.open(service).await?;
+        let mut stream = conn.open_with_window(service, WINDOW).await?;
         let mut out = Vec::new();
         protocol::message(&mut out, VIDEO_START, 0, &start.encode());
         stream.write(&out).await?;

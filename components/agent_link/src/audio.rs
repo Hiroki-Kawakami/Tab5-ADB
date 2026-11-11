@@ -12,6 +12,8 @@ use idf::executor;
 use crate::protocol::{self, AUDIO, AUDIO_START, AudioCodec, AudioFormat, AudioSource, HEADER_BYTES, Header, OK, REPLY, VOLUME};
 use crate::{Error, Result};
 
+const WINDOW: u32 = 64 * 1024;
+
 pub enum AudioMessage {
     /// PCM or one Opus packet, as the format says.
     Data(Vec<u8>),
@@ -29,7 +31,7 @@ pub struct Audio {
 
 impl Audio {
     pub(crate) async fn open(conn: &Connection, service: &str, codec: AudioCodec, source: AudioSource, max: u32, timeout: Duration) -> Result<Self> {
-        let mut stream = conn.open(service).await?;
+        let mut stream = conn.open_with_window(service, WINDOW).await?;
         let mut out = Vec::new();
         protocol::message(&mut out, AUDIO_START, 0, &protocol::audio_start(codec, source));
         stream.write(&out).await?;

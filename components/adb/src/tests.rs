@@ -3,10 +3,18 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use idf::executor::Spawner;
+
+use crate::Result;
 use crate::link::base64;
 use crate::link::connection::banner_has_feature;
 use crate::link::identity::{n0inv, r_squared};
-use crate::link::packet::{A_CNXN, A_VERSION, Header, Packet};
+use crate::link::packet::{A_CNXN, A_OKAY, A_OPEN, A_VERSION, A_WRTE, Header, Packet};
+use crate::link::transport::{BoxFuture, PacketReader, PacketWriter, Transport};
+use crate::link::{Connection, Identity};
 use crate::link::pair::Cipher;
 use crate::link::spake2::{Role, Spake2};
 use crate::services::shell::{packet, window_size};
@@ -164,4 +172,149 @@ fn pairing_records_match_boringssl() {
     Cipher::new(&material).unwrap().seal(&mut record).unwrap();
     record[0] ^= 1;
     assert!(Cipher::new(&material).unwrap().open(&mut record).is_err());
+}
+
+struct FakeDevice {
+    from_host: idf::executor::Receiver<Packet>,
+    to_host: idf::executor::Sender<Packet>,
+}
+
+struct FakeTransport {
+    from_device: idf::executor::Receiver<Packet>,
+    to_device: idf::executor::Sender<Packet>,
+}
+
+struct FakeReader(idf::executor::Receiver<Packet>);
+struct FakeWriter(idf::executor::Sender<Packet>);
+
+impl Transport for FakeTransport {
+    fn split(self: Box<Self>) -> (Box<dyn PacketReader>, Box<dyn PacketWriter>) {
+        (Box::new(FakeReader(self.from_device)), Box::new(FakeWriter(self.to_device)))
+    }
+}
+
+impl PacketReader for FakeReader {
+    fn read(&mut self) -> BoxFuture<'_, Result<Packet>> {
+        Box::pin(async { Ok(self.0.recv().await) })
+    }
+}
+
+impl PacketWriter for FakeWriter {
+    fn write<'a>(&'a mut self, packet: &'a Packet) -> BoxFuture<'a, Result<()>> {
+        let copy = Packet::new(packet.command, packet.arg0, packet.arg1, packet.payload.segments().flatten().copied().collect());
+        Box::pin(async move {
+            self.0.send(copy).await;
+            Ok(())
+        })
+    }
+}
+
+impl FakeDevice {
+    fn recv(&mut self) -> Packet {
+        idf::executor::block_on(idf::executor::timeout(Duration::from_secs(5), self.from_host.recv())).expect("no packet from the host")
+    }
+
+    fn idle(&mut self) -> bool {
+        idf::executor::block_on(idf::executor::timeout(Duration::from_millis(100), self.from_host.recv())).is_err()
+    }
+
+    fn send(&self, command: u32, arg0: u32, arg1: u32, payload: &[u8]) {
+        assert!(self.to_host.try_send(Packet::new(command, arg0, arg1, payload.to_vec())).is_ok());
+    }
+}
+
+fn wait<T>(handle: idf::executor::JoinHandle<T>) -> T {
+    idf::executor::block_on(idf::executor::timeout(Duration::from_secs(5), handle)).expect("the host did not finish")
+}
+
+fn online(features: &str) -> (Connection, FakeDevice, Spawner) {
+    let (to_device, from_host) = idf::executor::channel(64);
+    let (to_host, from_device) = idf::executor::channel(64);
+    let spawner = idf::thread::Builder::new().name("adb_test").stack_size(32 * 1024).spawn_local_executor(|_| {}).unwrap();
+    static IDENTITY: std::sync::OnceLock<Arc<Identity>> = std::sync::OnceLock::new();
+    let identity = IDENTITY.get_or_init(|| Arc::new(Identity::generate("test").unwrap())).clone();
+    let conn = Connection::connect(Box::new(FakeTransport { from_device, to_device }), identity, &spawner);
+    let mut device = FakeDevice { from_host, to_host };
+    let cnxn = device.recv();
+    assert_eq!(cnxn.command, A_CNXN);
+    assert!(banner_has_feature(core::str::from_utf8(&cnxn.payload.into_vec()).unwrap(), "delayed_ack"));
+    device.send(A_CNXN, A_VERSION, 4096, format!("device::features={features}").as_bytes());
+    let waiting = conn.clone();
+    wait(spawner.spawn(async move { waiting.online().await.unwrap() }));
+    (conn, device, spawner)
+}
+
+fn acked(packet: &Packet) -> u32 {
+    let payload = packet.payload.segments().flatten().copied().collect::<Vec<u8>>();
+    u32::from_le_bytes(payload.try_into().expect("OKAY without 4 bytes"))
+}
+
+#[test]
+fn delayed_ack_windows() {
+    let (conn, mut device, spawner) = online("shell_v2,delayed_ack");
+    let opener = conn.clone();
+    let opening = spawner.spawn(async move { opener.open_with_window("sync:", 1000).await });
+    let open = device.recv();
+    assert_eq!((open.command, open.arg1), (A_OPEN, 1000));
+    let local = open.arg0;
+    device.send(A_OKAY, 7, local, &5000u32.to_le_bytes());
+    let (mut reader, mut writer) = wait(opening).unwrap().into_split();
+
+    for _ in 0..3 {
+        device.send(A_WRTE, 7, local, &[1; 400]);
+    }
+    let read = wait(spawner.spawn(async move {
+        let mut buf = [0u8; 400];
+        for _ in 0..2 {
+            reader.read_exact(&mut buf).await.unwrap();
+        }
+        reader
+    }));
+    let okay = device.recv();
+    assert_eq!((okay.command, okay.arg0, okay.arg1, acked(&okay)), (A_OKAY, local, 7, 800));
+    let mut reader = read;
+    wait(spawner.spawn(async move {
+        let mut buf = [0u8; 400];
+        reader.read_exact(&mut buf).await.unwrap();
+    }));
+    assert_eq!(acked(&device.recv()), 400);
+
+    let writing = spawner.spawn(async move { writer.write(&[2; 10000]).await });
+    for len in [4096, 4096] {
+        let wrte = device.recv();
+        assert_eq!((wrte.command, wrte.arg0, wrte.arg1, wrte.payload.len()), (A_WRTE, local, 7, len));
+    }
+    assert!(device.idle());
+    device.send(A_OKAY, 7, local, &8192u32.to_le_bytes());
+    assert_eq!(device.recv().payload.len(), 1808);
+    wait(writing).unwrap();
+}
+
+#[test]
+fn stop_and_wait_without_delayed_ack() {
+    let (conn, mut device, spawner) = online("shell_v2");
+    let opener = conn.clone();
+    let opening = spawner.spawn(async move { opener.open("sync:").await });
+    let open = device.recv();
+    assert_eq!((open.command, open.arg1), (A_OPEN, 0));
+    let local = open.arg0;
+    device.send(A_OKAY, 7, local, &[]);
+    let (mut reader, mut writer) = wait(opening).unwrap().into_split();
+
+    device.send(A_WRTE, 7, local, &[1; 400]);
+    wait(spawner.spawn(async move {
+        let mut buf = [0u8; 400];
+        reader.read_exact(&mut buf).await.unwrap();
+    }));
+    let okay = device.recv();
+    assert_eq!((okay.command, okay.payload.len()), (A_OKAY, 0));
+
+    let writing = spawner.spawn(async move { writer.write(&[2; 5000]).await });
+    assert_eq!(device.recv().payload.len(), 4096);
+    assert!(device.idle());
+    device.send(A_OKAY, 7, local, &[]);
+    assert_eq!(device.recv().payload.len(), 904);
+    assert!(device.idle());
+    device.send(A_OKAY, 7, local, &[]);
+    wait(writing).unwrap();
 }

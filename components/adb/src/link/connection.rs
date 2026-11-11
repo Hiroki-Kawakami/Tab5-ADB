@@ -23,7 +23,10 @@ use crate::link::transport::{PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
 
 const MAX_PAYLOAD: u32 = 256 * 1024;
-const BANNER: &[u8] = b"host::features=shell_v2,cmd\0";
+const BANNER: &[u8] = b"host::features=shell_v2,cmd,delayed_ack";
+const DELAYED_ACK: &str = "delayed_ack";
+/// What `Connection::open` lets the device send ahead of what was read.
+pub const DEFAULT_WINDOW: u32 = 256 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum State {
@@ -64,6 +67,7 @@ struct Shared {
     streams: Mutex<BTreeMap<u32, Arc<StreamShared>>>,
     next_local: AtomicU32,
     max_payload: AtomicU32,
+    delayed_ack: AtomicBool,
     banner: Mutex<String>,
     reader: Mutex<Option<JoinHandle<()>>>,
 }
@@ -123,7 +127,9 @@ impl Shared {
                 self.max_payload.store(p.arg1.min(MAX_PAYLOAD), Ordering::Release);
                 let payload = p.payload.into_vec();
                 let end = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
-                *self.banner.lock() = String::from_utf8_lossy(&payload[..end]).into_owned();
+                let banner = String::from_utf8_lossy(&payload[..end]).into_owned();
+                self.delayed_ack.store(banner_has_feature(&banner, DELAYED_ACK), Ordering::Release);
+                *self.banner.lock() = banner;
                 self.set_state(State::Online);
             }
             A_AUTH if p.arg0 == AUTH_TOKEN => {
@@ -140,9 +146,15 @@ impl Shared {
                 }
             }
             A_OKAY => {
+                let payload = p.payload.into_vec();
+                let acked = match payload.len() {
+                    0 => 0,
+                    4 => i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+                    _ => return Err(Error::Protocol),
+                };
                 let stream = self.streams.lock().get(&p.arg1).cloned();
                 if let Some(stream) = stream {
-                    stream.okay(p.arg0);
+                    stream.okay(p.arg0, acked);
                 }
             }
             A_WRTE => {
@@ -232,6 +244,7 @@ impl Connection {
             streams: Mutex::new(BTreeMap::new()),
             next_local: AtomicU32::new(1),
             max_payload: AtomicU32::new(MAX_PAYLOAD),
+            delayed_ack: AtomicBool::new(false),
             banner: Mutex::new(String::new()),
             reader: Mutex::new(None),
         });
@@ -298,18 +311,26 @@ impl Connection {
 
     /// Opens `service` (`shell:ls`, `sync:`, `localabstract:<name>`, ...).
     pub async fn open(&self, service: &str) -> Result<Stream> {
+        self.open_with_window(service, DEFAULT_WINDOW).await
+    }
+
+    /// As `open`, letting the device send up to `window` bytes ahead of what
+    /// was read, plus one packet. Devices without delayed ack send one packet
+    /// at a time whatever `window` is.
+    pub async fn open_with_window(&self, service: &str, window: u32) -> Result<Stream> {
         if self.shared().state().0 != State::Online {
             return Err(Error::NotOnline);
         }
         let shared = self.shared();
         let local = shared.next_local.fetch_add(1, Ordering::Relaxed);
-        let stream = Arc::new(StreamShared::new(local));
+        let window = shared.delayed_ack.load(Ordering::Acquire).then_some(window.max(1));
+        let stream = Arc::new(StreamShared::new(local, window));
         shared.streams.lock().insert(local, stream.clone());
         let guard = Arc::new(Closer { handle: self.handle.clone(), stream: stream.clone() });
         let mut name = Vec::with_capacity(service.len() + 1);
         name.extend_from_slice(service.as_bytes());
         name.push(0);
-        shared.send(Packet::new(A_OPEN, local, 0, name)).await?;
+        shared.send(Packet::new(A_OPEN, local, window.unwrap_or(0), name)).await?;
         poll_fn(|cx| {
             let mut s = stream.state.lock();
             match s.phase {
@@ -346,12 +367,18 @@ struct StreamState {
     /// The device answered the OPEN with OKAY; the stream may be closed since.
     accepted: bool,
     remote: u32,
-    writable: bool,
+    /// Bytes the device takes before its next OKAY; a WRTE may overdraw it.
+    /// Without delayed ack, 1 after each OKAY.
+    budget: i64,
     inbox: VecDeque<Chunk>,
     /// Into the front of `inbox`.
     read_at: usize,
-    /// The device's last WRTE, not acknowledged until it is read.
+    /// `None` without delayed ack.
+    window: Option<u32>,
+    /// Without delayed ack: the device's last WRTE, not acknowledged until it is read.
     unacked: bool,
+    /// With delayed ack: bytes read since the last OKAY.
+    consumed: u32,
     opener: Option<Waker>,
     reader: Option<Waker>,
     writer: Option<Waker>,
@@ -363,17 +390,19 @@ struct StreamShared {
 }
 
 impl StreamShared {
-    fn new(local: u32) -> Self {
+    fn new(local: u32, window: Option<u32>) -> Self {
         Self {
             local,
             state: Mutex::new(StreamState {
                 phase: Phase::Opening,
                 accepted: false,
                 remote: 0,
-                writable: false,
+                budget: 0,
                 inbox: VecDeque::new(),
                 read_at: 0,
+                window,
                 unacked: false,
+                consumed: 0,
                 opener: None,
                 reader: None,
                 writer: None,
@@ -387,25 +416,28 @@ impl StreamShared {
         }
     }
 
-    fn okay(&self, remote: u32) {
+    fn okay(&self, remote: u32, acked: i32) {
         let mut s = self.state.lock();
         match s.phase {
             Phase::Opening => {
                 s.phase = Phase::Open;
                 s.accepted = true;
                 s.remote = remote;
-                s.writable = true;
             }
-            Phase::Open => s.writable = true,
+            Phase::Open => {}
             Phase::Closed => return,
         }
+        s.budget = match s.window {
+            Some(_) => s.budget + i64::from(acked),
+            None => 1,
+        };
         Self::wake(&mut s);
     }
 
     fn deliver(&self, data: Payload) {
         let mut s = self.state.lock();
         s.inbox.extend(data.into_chunks());
-        s.unacked = true;
+        s.unacked = s.window.is_none();
         Self::wake(&mut s);
     }
 
@@ -471,7 +503,8 @@ impl Stream {
         self.reader.read_slice(max).await
     }
 
-    /// Returns once the device took all of `data`.
+    /// Returns once the device has room for more: within its delayed-ack
+    /// window, or, without delayed ack, once it took all of `data`.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         self.writer.write(data).await
     }
@@ -512,10 +545,20 @@ impl StreamReader {
                 } else {
                     s.read_at += n;
                 }
-                let ack = (s.inbox.is_empty() && s.unacked && s.phase == Phase::Open).then(|| {
-                    s.unacked = false;
-                    s.remote
-                });
+                let ack = match s.window {
+                    _ if s.phase != Phase::Open => None,
+                    None => (s.inbox.is_empty() && s.unacked).then(|| {
+                        s.unacked = false;
+                        (s.remote, Vec::new())
+                    }),
+                    Some(window) => {
+                        s.consumed += n as u32;
+                        (s.consumed > 0 && (s.inbox.is_empty() || s.consumed >= window / 2)).then(|| {
+                            let acked = core::mem::take(&mut s.consumed);
+                            (s.remote, acked.to_le_bytes().to_vec())
+                        })
+                    }
+                };
                 return Poll::Ready((Slice::new(front, at, at + n), ack));
             }
             if s.phase == Phase::Closed {
@@ -525,8 +568,8 @@ impl StreamReader {
             Poll::Pending
         })
         .await;
-        if let Some(remote) = ack {
-            let packet = Packet::new(A_OKAY, self.stream.local, remote, Vec::new());
+        if let Some((remote, acked)) = ack {
+            let packet = Packet::new(A_OKAY, self.stream.local, remote, acked);
             self.guard.handle.0.send(packet).await?;
         }
         Ok(slice)
@@ -569,8 +612,8 @@ impl StreamWriter {
                 let mut s = self.stream.state.lock();
                 match s.phase {
                     Phase::Closed => Poll::Ready(Err(Error::Closed)),
-                    Phase::Open if s.writable => {
-                        s.writable = false;
+                    Phase::Open if s.budget > 0 => {
+                        s.budget -= chunk.len() as i64;
                         Poll::Ready(Ok(s.remote))
                     }
                     _ => {
@@ -587,7 +630,7 @@ impl StreamWriter {
             let mut s = self.stream.state.lock();
             match s.phase {
                 Phase::Closed => Poll::Ready(Err(Error::Closed)),
-                _ if s.writable => Poll::Ready(Ok(())),
+                _ if s.budget > 0 => Poll::Ready(Ok(())),
                 _ => {
                     s.writer = Some(cx.waker().clone());
                     Poll::Pending

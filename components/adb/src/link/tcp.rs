@@ -9,15 +9,17 @@ use alloc::vec::Vec;
 
 use devkit_crypto::tls::{ClientConfig, Verify};
 use devkit_net::{TcpStream, TlsReader, TlsStream, TlsWriter};
+use idf::heap::Caps;
 use idf::sync::Mutex;
 
 use crate::link::identity::Identity;
-use crate::link::packet::{HEADER_BYTES, Header, Packet};
+use crate::link::packet::{Chunk, HEADER_BYTES, Header, Packet, Payload};
 use crate::link::transport::{BoxFuture, PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
 
 const BUFFER: usize = 64 * 1024;
 const COALESCE: usize = 4 * 1024;
+const PAYLOAD_CAPS: Caps = Caps::SPIRAM;
 
 /// Connects to adbd at `addr` (`host:port`), as `adb connect` does.
 pub async fn connect(addr: &str) -> Result<Box<dyn Transport>> {
@@ -82,11 +84,15 @@ impl TcpPacketReader {
         let mut head = [0u8; HEADER_BYTES];
         self.read_exact(&mut head).await?;
         let header = Header::parse(&head).ok_or(Error::Protocol)?;
-        let mut payload = Vec::new();
-        payload.try_reserve_exact(header.length as usize).map_err(|_| Error::NoMemory)?;
-        payload.resize(header.length as usize, 0);
+        let len = header.length as usize;
+        if len == 0 {
+            return Ok(Packet::new(header.command, header.arg0, header.arg1, Vec::new()));
+        }
+        let mut payload = idf::heap::try_vec(len, PAYLOAD_CAPS).map_err(|_| Error::NoMemory)?;
+        payload.resize(len, 0);
         self.read_exact(&mut payload).await?;
-        Ok(Packet::new(header.command, header.arg0, header.arg1, payload))
+        let chunk: Chunk = Arc::new(payload);
+        Ok(Packet { command: header.command, arg0: header.arg0, arg1: header.arg1, payload: Payload::Chunks(alloc::vec![chunk]) })
     }
 
     async fn upgrade(&mut self, identity: &Identity) -> Result<()> {

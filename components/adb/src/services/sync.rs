@@ -29,6 +29,7 @@ pub const DATA_MAX: usize = 64 * 1024;
 /// Device feature that `stat_v2` needs.
 pub const FEATURE_STAT_V2: &str = "stat_v2";
 const FAIL_MAX: usize = 4096;
+const WINDOW: u32 = 1024 * 1024;
 
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
@@ -102,7 +103,7 @@ pub struct Sync {
 
 impl Sync {
     pub async fn open(conn: &Connection) -> Result<Self> {
-        Ok(Self { stream: conn.open("sync:").await? })
+        Ok(Self { stream: conn.open_with_window("sync:", WINDOW).await? })
     }
 
     pub async fn stat(&mut self, path: &str) -> Result<FileStat> {
