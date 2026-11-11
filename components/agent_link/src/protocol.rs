@@ -403,7 +403,7 @@ pub struct MediaRender<'a> {
     pub subtitle: TextImage<'a>,
     pub art_width: u16,
     pub art_height: u16,
-    /// B, G, R, A per pixel, not premultiplied; empty without art.
+    /// Baseline JPEG; empty without art.
     pub art: &'a [u8],
 }
 
@@ -411,9 +411,10 @@ impl<'a> MediaRender<'a> {
     pub fn parse(b: &'a [u8]) -> Option<Self> {
         let (title, rest) = TextImage::parse(b)?;
         let (subtitle, rest) = TextImage::parse(rest)?;
-        let size = rest.get(..4)?;
-        let (art_width, art_height) = (u16::from_le_bytes([size[0], size[1]]), u16::from_le_bytes([size[2], size[3]]));
-        let art = rest.get(4..4 + usize::from(art_width) * usize::from(art_height) * 4)?;
+        let head = rest.get(..8)?;
+        let (art_width, art_height) = (u16::from_le_bytes([head[0], head[1]]), u16::from_le_bytes([head[2], head[3]]));
+        let length = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        let art = rest.get(8..8usize.checked_add(length)?)?;
         Some(Self { title, subtitle, art_width, art_height, art })
     }
 }

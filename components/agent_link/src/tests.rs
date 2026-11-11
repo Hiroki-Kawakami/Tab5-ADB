@@ -136,7 +136,7 @@ fn media_render() {
     assert_eq!(get_media_render(32, 20, 552, 3), [32, 20, 0x28, 0x02, 3, 0, 0, 0]);
     let mut b = alloc::vec![1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0x55];
     b.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0]);
-    b.extend_from_slice(&[1, 0, 1, 0, 9, 8, 7, 6]);
+    b.extend_from_slice(&[1, 0, 1, 0, 4, 0, 0, 0, 9, 8, 7, 6]);
     let render = MediaRender::parse(&b).unwrap();
     assert_eq!((render.title.alpha, render.subtitle.width, render.art), (&[0x55][..], 0, &[9, 8, 7, 6][..]));
     assert_eq!(MediaRender::parse(&b[..b.len() - 1]), None);

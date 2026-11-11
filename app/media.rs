@@ -15,13 +15,14 @@ use core::time::Duration;
 use adb::link::Connection;
 use agent_link::protocol::{ESTATE, MEDIA};
 use agent_link::{Link, MediaAction, MediaState, PlayState};
-use devkit_gfx::{ImageBuf, ImageFormat, ImageSource};
+use devkit_gfx::ImageSource;
 use devkit_ui::{Component, Cx, This};
 use idf::executor::{self, Receiver};
 use idf::heap::Caps;
 use idf::log::error;
 use idf::time::Instant;
 
+use crate::preview;
 use crate::raster_text::RasterText;
 
 const TAG: &CStr = c"media";
@@ -97,13 +98,7 @@ async fn draw(link: &Link, size: DrawSize) -> Result<Drawn, String> {
     let reply = link.media_render(size.title_px, size.subtitle_px, size.art_px, size.subtitle, TIMEOUT).await.map_err(|e| e.to_string())?;
     let render = reply.render().ok_or("bad render")?;
     let text = |image| RasterText::copy_in(image, Caps::SPIRAM).map_err(|_| "out of memory");
-    let art = if render.art_width > 0 && render.art_height > 0 {
-        let mut image = unsafe { ImageBuf::new_uninit_in(ImageFormat::Argb8888, render.art_width, render.art_height, usize::from(render.art_width), 4, Caps::SPIRAM) }.map_err(|_| "out of memory")?;
-        image.pixels_mut().copy_from_slice(render.art);
-        Some(Arc::new(image) as Arc<dyn ImageSource>)
-    } else {
-        None
-    };
+    let art = if render.art.is_empty() { None } else { Some(Arc::new(preview::decode_jpeg(render.art).await?) as Arc<dyn ImageSource>) };
     Ok(Drawn { title: Some(text(&render.title)?), subtitle: Some(text(&render.subtitle)?), art })
 }
 

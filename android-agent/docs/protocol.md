@@ -284,7 +284,8 @@ REPLY result
   TEXT_IMAGE subtitle    `subtitle` のうち空でないものを " · " でつないだもの
   u16 art_width          0 = アートは無い
   u16 art_height
-  ... art                art_width × art_height 個の u32。0xAARRGGBB、乗算済みでない
+  u32 art_length
+  ... art                JPEG。baseline、YUV 4:2:0
 ```
 
 - アートは縦横比を保ったまま、短い辺が `art_px` になるように縮め、中央を `art_px` × `art_px` で

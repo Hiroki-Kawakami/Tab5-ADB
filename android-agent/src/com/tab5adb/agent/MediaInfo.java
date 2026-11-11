@@ -43,6 +43,7 @@ final class MediaInfo {
     private static final int SUBTITLE_ARTIST = 1;
     private static final int SUBTITLE_ALBUM = 2;
     private static final int SUBTITLE_APP = 4;
+    private static final int ART_QUALITY = 80;
     private static final int ACTION_PLAY_PAUSE = 0;
     private static final int ACTION_NEXT = 1;
     private static final int ACTION_PREVIOUS = 2;
@@ -145,20 +146,16 @@ final class MediaInfo {
         }
         text.write(out, line.toString(), subtitlePx);
         Bitmap art = metadata != null && artPx > 0 ? art(metadata) : null;
-        int[] pixels = art != null ? crop(art, artPx) : null;
-        int size = pixels != null ? artPx : 0;
+        byte[] jpeg = art != null ? crop(art, artPx) : new byte[0];
+        int size = jpeg.length > 0 ? artPx : 0;
         out.write(size);
         out.write(size >> 8);
         out.write(size);
         out.write(size >> 8);
-        if (pixels != null) {
-            for (int pixel : pixels) {
-                out.write(pixel);
-                out.write(pixel >> 8);
-                out.write(pixel >> 16);
-                out.write(pixel >>> 24);
-            }
+        for (int shift = 0; shift < 32; shift += 8) {
+            out.write(jpeg.length >> shift);
         }
+        out.write(jpeg, 0, jpeg.length);
         return out.toByteArray();
     }
 
@@ -417,17 +414,17 @@ final class MediaInfo {
         return art;
     }
 
-    // Drawn through a Canvas: getPixels cannot read a HARDWARE bitmap.
-    private static int[] crop(Bitmap art, int size) {
+    // Drawn through a Canvas: compress cannot read a HARDWARE bitmap.
+    private static byte[] crop(Bitmap art, int size) {
         int side = Math.min(art.getWidth(), art.getHeight());
         int left = (art.getWidth() - side) / 2;
         int top = (art.getHeight() - side) / 2;
         Bitmap out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         new Canvas(out).drawBitmap(art, new Rect(left, top, left + side, top + side), new Rect(0, 0, size, size), new Paint(Paint.FILTER_BITMAP_FLAG));
-        int[] pixels = new int[size * size];
-        out.getPixels(pixels, 0, size, 0, 0, size, size);
+        ByteArrayOutputStream jpeg = new ByteArrayOutputStream(64 * 1024);
+        boolean ok = out.compress(Bitmap.CompressFormat.JPEG, ART_QUALITY, jpeg);
         out.recycle();
-        return pixels;
+        return ok ? jpeg.toByteArray() : new byte[0];
     }
 
     private String appName(String packageName) {
