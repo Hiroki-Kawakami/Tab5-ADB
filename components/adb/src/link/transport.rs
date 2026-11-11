@@ -7,7 +7,8 @@ use alloc::boxed::Box;
 use core::future::Future;
 use core::pin::Pin;
 
-use crate::Result;
+use crate::link::identity::Identity;
+use crate::{Error, Result};
 pub use crate::link::packet::Packet;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -20,6 +21,12 @@ pub trait Transport: Send {
 /// One reader reads packets in order; an error ends the connection.
 pub trait PacketReader: Send {
     fn read(&mut self) -> BoxFuture<'_, Result<Packet>>;
+
+    /// Turns both halves into TLS presenting `identity`, as A_STLS asks;
+    /// the writer is idle meanwhile. Links that cannot fail with `Protocol`.
+    fn start_tls<'a>(&'a mut self, _identity: &'a Identity) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(Error::Protocol) })
+    }
 }
 
 /// Called by one writer at a time.

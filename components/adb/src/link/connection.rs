@@ -17,7 +17,7 @@ use idf::sync::Mutex;
 
 use crate::link::identity::Identity;
 use crate::link::packet::{
-    A_AUTH, A_CLSE, A_CNXN, A_OKAY, A_OPEN, A_VERSION, A_WRTE, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, Chunk, Packet, Payload, Slice,
+    A_AUTH, A_CLSE, A_CNXN, A_OKAY, A_OPEN, A_STLS, A_STLS_VERSION, A_VERSION, A_WRTE, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, Chunk, Packet, Payload, Slice,
 };
 use crate::link::transport::{PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
@@ -171,11 +171,22 @@ async fn read_loop(shared: Weak<Shared>, mut reader: Box<dyn PacketReader>, iden
             return;
         }
     }
-    let (mut signed, mut offered) = (false, false);
+    let (mut signed, mut offered, mut tls) = (false, false, false);
     loop {
         let packet = reader.read().await;
         let Some(s) = shared.upgrade() else { return };
         let result = match packet {
+            Ok(p) if p.command == A_STLS => {
+                if tls {
+                    Err(Error::Protocol)
+                } else {
+                    tls = true;
+                    match s.send(Packet::new(A_STLS, A_STLS_VERSION, 0, Vec::new())).await {
+                        Ok(()) => reader.start_tls(&identity).await,
+                        Err(err) => Err(err),
+                    }
+                }
+            }
             Ok(p) => s.handle(p, &identity, &mut signed, &mut offered).await,
             Err(err) => Err(err),
         };

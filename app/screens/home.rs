@@ -4,18 +4,17 @@
  */
 
 use alloc::string::{String, ToString};
-use alloc::vec;
 use alloc::vec::Vec;
 
 use devkit_gfx::{Color, FontChain};
 use devkit_net::wifi_manager::State as WifiState;
 use devkit_ui::widgets::text_field;
-use devkit_ui::{Align, ColorRole, Component, Cx, Element, Handle, Icon, Justify, Overlay, Prop, Root, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Transition, Ui};
+use devkit_ui::{Align, ColorRole, Component, Cx, Element, Handle, Icon, Justify, Overlay, Prop, Root, Screen, Sides, State, StateStyle, TextBuffer, TextInput, Transition, Ui, id};
 use idf::sync::Mutex;
 
 use crate::fonts::{HERO, icon, small_icon};
-use crate::resources::{colors, icons};
-use crate::{adb_link, wifi};
+use crate::resources::{TOUCH_PAIR_ADDRESS_KEYBOARD, colors, icons};
+use crate::{adb_link, tcp_history, wifi};
 
 use super::connecting::ConnectingScreen;
 use super::file_manager::FileManagerScreen;
@@ -27,6 +26,8 @@ const GAP: i16 = 20;
 const CARD_PADDING: i16 = 24;
 const CARD_RADIUS: u8 = 24;
 const SIDEBAR_WIDTH: i16 = 400;
+const ADDRESS_MAX: usize = 63;
+const CLOSE_KEY: u16 = 1;
 
 const HERO_BG: Color = Color::hex(0x111418);
 const HERO_TEXT: Color = Color::hex(0xffffff);
@@ -52,7 +53,7 @@ pub enum Msg {
     Pair,
     TcpConnect,
     Address(TextInput),
-    Recent,
+    Recent(usize),
     Requested,
 }
 
@@ -75,10 +76,7 @@ pub struct HomeScreen {
 
 impl HomeScreen {
     pub fn new() -> Self {
-        Self {
-            address: TextBuffer::new(),
-            recent: vec![String::from("192.168.x.x:36645"), String::from("192.168.x.x:5555")],
-        }
+        Self { address: TextBuffer::new(), recent: Vec::new() }
     }
 
     fn hero<'a>(&'a self, ui: &'a Ui<Msg>, landscape: bool) -> Element<'a, Msg> {
@@ -131,14 +129,24 @@ impl HomeScreen {
         let header = ui.row([ui.column([card_header(ui, icons::WIFI, "Wireless (TCP/IP)"), status.padding_x(4)]).gap(8).grow(1), pair]).align(Align::Start);
         let input = ui
             .row([
-                text_field(ui, &self.address, Msg::Address).placeholder("192.168.x.x:5555").padding_y(18).grow(1),
+                text_field(ui, &self.address, Msg::Address)
+                    .placeholder("192.168.x.x:5555")
+                    .keyboard(&TOUCH_PAIR_ADDRESS_KEYBOARD)
+                    .padding_y(18)
+                    .grow(1)
+                    .id(id!("address")),
                 action(ui, caption, "Connect", theme.widgets.button.primary, Msg::TcpConnect).size(160, 64),
             ])
             .gap(12)
             .align(Align::Center);
-        let rows: Vec<_> = self.recent.iter().map(|address| recent_row(ui, address, Msg::Recent)).collect();
-        let recent = ui.column([ui.text(caption, "RECENT").foreground(colors::MUTED).padding_each(0, 8, 0, 4), ui.column(rows)]);
-        card(ui, ui.column([header, input, recent]).gap(20)).grow(1).task(|this| wifi::follow(this, |_: &mut HomeScreen| {}))
+        let list = if self.recent.is_empty() {
+            ui.text(theme.fonts.body, "No recent connections").foreground(colors::MUTED).padding_y(20)
+        } else {
+            let rows: Vec<_> = self.recent.iter().enumerate().map(|(i, address)| recent_row(ui, address, Msg::Recent(i))).collect();
+            ui.scroll(ui.column(rows)).grow(1)
+        };
+        let recent = ui.column([ui.text(caption, "RECENT").foreground(colors::MUTED).padding_each(0, 8, 0, 4), list]).grow(1);
+        card(ui, ui.column([header, input, recent]).gap(20).grow(1)).grow(1).task(|this| wifi::follow(this, |_: &mut HomeScreen| {}))
     }
 }
 
@@ -154,12 +162,24 @@ impl Component for HomeScreen {
                 Ok(conn) => cx.nav_of::<Overlay>().push(ConnectingScreen::usb(conn)),
                 Err(err) => cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err)),
             },
-            Msg::TcpConnect => {
+            Msg::TcpConnect | Msg::Address(TextInput::Enter) => {
                 let addr = self.address.as_str().trim();
                 if !addr.is_empty() {
-                    cx.nav_of::<Overlay>().push(ConnectingScreen::tcp(addr.into()));
+                    let addr = String::from(addr);
+                    cx.focus(id!("home"));
+                    cx.nav_of::<Overlay>().push(ConnectingScreen::tcp(addr));
                 }
             }
+            Msg::Recent(i) => {
+                if let Some(addr) = self.recent.get(i).cloned() {
+                    self.address.set_text(&addr);
+                    cx.focus(id!("home"));
+                    cx.rebuild();
+                    cx.nav_of::<Overlay>().push(ConnectingScreen::tcp(addr));
+                }
+            }
+            Msg::Address(TextInput::Custom(CLOSE_KEY)) => cx.focus(id!("home")),
+            Msg::Address(TextInput::Char(c)) if !(c.is_ascii_digit() || c == '.' || c == ':') || self.address.as_str().len() >= ADDRESS_MAX => {}
             Msg::Requested => {
                 if let Some(addr) = REQUESTED.lock().take() {
                     self.address.set_text(&addr);
@@ -187,12 +207,19 @@ impl Component for HomeScreen {
         body.gap(GAP)
             .padding_each(24, ui.insets().top + 4, 24, 24)
             .background(ui.colors().background)
+            .focusable()
+            .id(id!("home"))
     }
 }
 
 impl Screen for HomeScreen {
     fn on_load(&mut self, cx: &mut Cx<Self>) {
         *HOME.lock() = Some(cx.handle());
+    }
+
+    fn will_appear(&mut self, cx: &mut Cx<Self>) {
+        self.recent = tcp_history::load();
+        cx.rebuild();
     }
 }
 

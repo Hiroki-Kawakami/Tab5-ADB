@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use core::ffi::CStr;
 
 use adb::link::{Connection, State};
@@ -67,7 +67,8 @@ async fn follow(this: This<ConnectingScreen>, route: Route, conn: Connection) {
                 return;
             }
             State::Closed(err) => {
-                this.with(|_, cx| cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err.to_string())));
+                let message = adb_link::describe(&route, &err);
+                this.with(|_, cx| cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", message)));
                 return;
             }
             _ => {
@@ -98,7 +99,8 @@ async fn open_dashboard(this: This<ConnectingScreen>, route: Route, conn: Connec
         None
     };
     if let State::Closed(err) = conn.state() {
-        this.with(|_, cx| cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", err.to_string())));
+        let message = adb_link::describe(&route, &err);
+        this.with(|_, cx| cx.nav_of::<Overlay>().push(MessageScreen::new("Connection failed", message)));
         return;
     }
     this.with(|_, cx| {

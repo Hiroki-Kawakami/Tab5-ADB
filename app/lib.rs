@@ -27,6 +27,7 @@ mod raster_text;
 mod screens;
 mod settings;
 mod status_bar;
+mod tcp_history;
 #[cfg(test)]
 mod tests;
 mod wifi;

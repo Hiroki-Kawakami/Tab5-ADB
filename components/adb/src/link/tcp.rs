@@ -4,15 +4,20 @@
  */
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use devkit_net::{TcpReader, TcpStream, TcpWriter};
+use devkit_crypto::tls::{ClientConfig, Verify};
+use devkit_net::{TcpStream, TlsReader, TlsStream, TlsWriter};
+use idf::sync::Mutex;
 
+use crate::link::identity::Identity;
 use crate::link::packet::{HEADER_BYTES, Header, Packet};
 use crate::link::transport::{BoxFuture, PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
 
 const BUFFER: usize = 64 * 1024;
+const COALESCE: usize = 4 * 1024;
 
 /// Connects to adbd at `addr` (`host:port`), as `adb connect` does.
 pub async fn connect(addr: &str) -> Result<Box<dyn Transport>> {
@@ -25,41 +30,78 @@ struct TcpDevice(TcpStream);
 
 impl Transport for TcpDevice {
     fn split(self: Box<Self>) -> (Box<dyn PacketReader>, Box<dyn PacketWriter>) {
-        let (reader, writer) = self.0.split();
-        (Box::new(TcpPacketReader(reader)), Box::new(TcpPacketWriter(writer)))
+        let stream = Arc::new(self.0);
+        let write = Arc::new(Mutex::new(WriteHalf::Plain(stream.clone())));
+        (Box::new(TcpPacketReader { read: ReadHalf::Plain(stream), write: write.clone() }), Box::new(TcpPacketWriter(write)))
     }
 }
 
 fn link(err: devkit_net::Error) -> Error {
     match err {
+        devkit_net::Error::Tls(e) => Error::Crypto(e),
         devkit_net::Error::NoMemory => Error::NoMemory,
         _ => Error::Disconnected,
     }
 }
 
-async fn read_exact(reader: &TcpReader, mut buf: &mut [u8]) -> Result<()> {
-    while !buf.is_empty() {
-        let n = reader.read_async(buf).await.map_err(link)?;
-        if n == 0 {
-            return Err(Error::Disconnected);
-        }
-        buf = &mut buf[n..];
-    }
-    Ok(())
+enum ReadHalf {
+    Plain(Arc<TcpStream>),
+    Tls(TlsReader),
+    Gone,
 }
 
-struct TcpPacketReader(TcpReader);
+enum WriteHalf {
+    Plain(Arc<TcpStream>),
+    Tls(TlsWriter),
+    Gone,
+}
+
+struct TcpPacketReader {
+    read: ReadHalf,
+    write: Arc<Mutex<WriteHalf>>,
+}
 
 impl TcpPacketReader {
+    async fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {
+        while !buf.is_empty() {
+            let n = match &mut self.read {
+                ReadHalf::Plain(tcp) => tcp.read_async(buf).await,
+                ReadHalf::Tls(tls) => tls.read_async(buf).await,
+                ReadHalf::Gone => return Err(Error::Disconnected),
+            };
+            let n = n.map_err(link)?;
+            if n == 0 {
+                return Err(Error::Disconnected);
+            }
+            buf = &mut buf[n..];
+        }
+        Ok(())
+    }
+
     async fn read_packet(&mut self) -> Result<Packet> {
         let mut head = [0u8; HEADER_BYTES];
-        read_exact(&self.0, &mut head).await?;
+        self.read_exact(&mut head).await?;
         let header = Header::parse(&head).ok_or(Error::Protocol)?;
         let mut payload = Vec::new();
         payload.try_reserve_exact(header.length as usize).map_err(|_| Error::NoMemory)?;
         payload.resize(header.length as usize, 0);
-        read_exact(&self.0, &mut payload).await?;
+        self.read_exact(&mut payload).await?;
         Ok(Packet::new(header.command, header.arg0, header.arg1, payload))
+    }
+
+    async fn upgrade(&mut self, identity: &Identity) -> Result<()> {
+        let mut write = self.write.lock_async().await;
+        let (WriteHalf::Plain(_), ReadHalf::Plain(_)) = (&*write, &self.read) else { return Err(Error::Protocol) };
+        *write = WriteHalf::Gone;
+        let ReadHalf::Plain(stream) = core::mem::replace(&mut self.read, ReadHalf::Gone) else { unreachable!() };
+        let tcp = Arc::into_inner(stream).ok_or(Error::Protocol)?;
+        let mut config = ClientConfig::new(Verify::None);
+        config.identity = Some(identity.tls_identity()?);
+        let tls = TlsStream::start_async(tcp, None, Arc::new(config)).await.map_err(link)?;
+        let (reader, writer) = tls.split();
+        self.read = ReadHalf::Tls(reader);
+        *write = WriteHalf::Tls(writer);
+        Ok(())
     }
 }
 
@@ -67,15 +109,39 @@ impl PacketReader for TcpPacketReader {
     fn read(&mut self) -> BoxFuture<'_, Result<Packet>> {
         Box::pin(self.read_packet())
     }
+
+    fn start_tls<'a>(&'a mut self, identity: &'a Identity) -> BoxFuture<'a, Result<()>> {
+        Box::pin(self.upgrade(identity))
+    }
 }
 
-struct TcpPacketWriter(TcpWriter);
+struct TcpPacketWriter(Arc<Mutex<WriteHalf>>);
 
 impl TcpPacketWriter {
     async fn write_packet(&mut self, packet: &Packet) -> Result<()> {
-        self.0.write_all_async(&packet.header()).await.map_err(link)?;
-        for segment in packet.payload.segments() {
-            self.0.write_all_async(segment).await.map_err(link)?;
+        let mut write = self.0.lock_async().await;
+        let header = packet.header();
+        match &mut *write {
+            WriteHalf::Plain(tcp) => {
+                tcp.write_all_async(&header).await.map_err(link)?;
+                for segment in packet.payload.segments() {
+                    tcp.write_all_async(segment).await.map_err(link)?;
+                }
+            }
+            WriteHalf::Tls(tls) if packet.payload.len() <= COALESCE => {
+                let mut record = Vec::new();
+                record.try_reserve_exact(HEADER_BYTES + packet.payload.len()).map_err(|_| Error::NoMemory)?;
+                record.extend_from_slice(&header);
+                packet.payload.segments().for_each(|segment| record.extend_from_slice(segment));
+                tls.write_all_async(&record).await.map_err(link)?;
+            }
+            WriteHalf::Tls(tls) => {
+                tls.write_all_async(&header).await.map_err(link)?;
+                for segment in packet.payload.segments() {
+                    tls.write_all_async(segment).await.map_err(link)?;
+                }
+            }
+            WriteHalf::Gone => return Err(Error::Disconnected),
         }
         Ok(())
     }

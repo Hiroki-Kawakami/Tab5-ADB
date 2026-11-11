@@ -22,7 +22,7 @@ use idf::sync::{Mutex, OnceLock};
 use usb_host_rs::{Device, Event};
 use idf::thread::{self, Builder};
 
-use crate::{clock, wifi};
+use crate::{clock, tcp_history, wifi};
 
 const TAG: &CStr = c"adb_link";
 const KEY_NAMESPACE: &CStr = c"adb";
@@ -185,8 +185,37 @@ pub async fn connect_tcp(addr: &str) -> Result<Connection, String> {
         return Ok(conn);
     }
     join_network().await?;
-    let transport = adb::link::tcp::connect(addr).await.map_err(|e| e.to_string())?;
-    begin(route, transport)
+    let transport = adb::link::tcp::connect(addr).await.map_err(|err| {
+        error!(TAG, "tcp {addr}: {err}");
+        match err {
+            adb::Error::Net(devkit_net::Error::InvalidInput | devkit_net::Error::NotFound) => String::from("The address is not valid. Enter it as host:port."),
+            adb::Error::Net(devkit_net::Error::ConnectionRefused) => "Nothing is listening at that port. Check the address and port shown on Android.".into(),
+            adb::Error::Net(devkit_net::Error::TimedOut) => "The device did not answer. Check that both devices are on the same Wi-Fi network.".into(),
+            adb::Error::Net(_) => "Could not reach the device. Check that both devices are on the same Wi-Fi network.".into(),
+            err => err.to_string(),
+        }
+    })?;
+    let conn = begin(route, transport)?;
+    let (recorded, addr) = (conn.clone(), String::from(addr));
+    if let Some(spawner) = SPAWNER.get() {
+        drop(spawner.spawn(async move {
+            if recorded.online().await.is_ok() {
+                tcp_history::add(&addr);
+            }
+        }));
+    }
+    Ok(conn)
+}
+
+/// Why `err` closed a connection, in words for the user.
+pub fn describe(route: &Route, err: &adb::Error) -> String {
+    match (route, err) {
+        (Route::Tcp(_), adb::Error::Crypto(_)) => {
+            "The secure connection was refused. Pair this Tab5 under Wireless debugging first, or connect once over USB and allow debugging.".into()
+        }
+        (Route::Tcp(_), adb::Error::Disconnected) => "The device closed the connection.".into(),
+        (_, err) => err.to_string(),
+    }
 }
 
 async fn join_network() -> Result<(), String> {

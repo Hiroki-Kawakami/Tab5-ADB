@@ -13,8 +13,10 @@ pub(crate) const A_OPEN: u32 = 0x4e45_504f;
 pub(crate) const A_OKAY: u32 = 0x5941_4b4f;
 pub(crate) const A_CLSE: u32 = 0x4553_4c43;
 pub(crate) const A_WRTE: u32 = 0x4554_5257;
+pub(crate) const A_STLS: u32 = 0x534c_5453;
 
 pub(crate) const A_VERSION: u32 = 0x0100_0001;
+pub(crate) const A_STLS_VERSION: u32 = 0x0100_0000;
 
 pub(crate) const AUTH_TOKEN: u32 = 1;
 pub(crate) const AUTH_SIGNATURE: u32 = 2;
