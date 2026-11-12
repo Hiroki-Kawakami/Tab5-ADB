@@ -103,6 +103,9 @@ impl TcpPacketReader {
         let tcp = Arc::into_inner(stream).ok_or(Error::Protocol)?;
         let mut config = ClientConfig::new(Verify::None);
         config.identity = Some(identity.tls_identity()?);
+        // DEFAULT lands in PSRAM ahead of RETENT_RAM on the P4, where AES-GCM
+        // opens records at a tenth of the speed.
+        config.buffer_caps = Caps::INTERNAL;
         let tls = TlsStream::start_async(tcp, None, Arc::new(config)).await.map_err(link)?;
         let (reader, writer) = tls.split();
         self.read = ReadHalf::Tls(reader);
