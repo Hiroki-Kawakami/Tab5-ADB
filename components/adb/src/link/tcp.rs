@@ -6,6 +6,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::DerefMut;
 
 use devkit_crypto::tls::{ClientConfig, Verify};
 use devkit_net::{TcpStream, TlsReader, TlsStream, TlsWriter};
@@ -21,20 +22,36 @@ const BUFFER: usize = 64 * 1024;
 const COALESCE: usize = 4 * 1024;
 const PAYLOAD_CAPS: Caps = Caps::SPIRAM;
 
-/// Connects to adbd at `addr` (`host:port`), as `adb connect` does.
-pub async fn connect(addr: &str) -> Result<Box<dyn Transport>> {
-    let stream = TcpStream::builder().rx_buffer(BUFFER).tx_buffer(BUFFER).connect_async(addr).await.map_err(Error::Net)?;
-    let _ = stream.set_nodelay(true);
-    Ok(Box::new(TcpDevice(stream)))
+/// Memory a connection receives in instead of the heap.
+pub struct Memory {
+    /// What TCP holds until it is read; its size is the receive window.
+    pub ring: Box<dyn DerefMut<Target = [u8]> + Send>,
+    /// At least `TLS_RECORD` bytes.
+    pub record: Box<dyn DerefMut<Target = [u8]> + Send>,
 }
 
-struct TcpDevice(TcpStream);
+/// What `Memory::record` holds at least.
+pub const TLS_RECORD: usize = devkit_crypto::tls::Connection::RX_BYTES;
+
+/// Connects to adbd at `addr` (`host:port`), as `adb connect` does.
+pub async fn connect(addr: &str, memory: Option<Memory>) -> Result<Box<dyn Transport>> {
+    let (ring, record) = memory.map_or((None, None), |m| (Some(m.ring), Some(m.record)));
+    let builder = match ring {
+        Some(ring) => TcpStream::builder().rx_memory(ring),
+        None => TcpStream::builder().rx_buffer(BUFFER),
+    };
+    let stream = builder.tx_buffer(BUFFER).connect_async(addr).await.map_err(Error::Net)?;
+    let _ = stream.set_nodelay(true);
+    Ok(Box::new(TcpDevice(stream, record)))
+}
+
+struct TcpDevice(TcpStream, Option<Box<dyn DerefMut<Target = [u8]> + Send>>);
 
 impl Transport for TcpDevice {
     fn split(self: Box<Self>) -> (Box<dyn PacketReader>, Box<dyn PacketWriter>) {
         let stream = Arc::new(self.0);
         let write = Arc::new(Mutex::new(WriteHalf::Plain(stream.clone())));
-        (Box::new(TcpPacketReader { read: ReadHalf::Plain(stream), write: write.clone() }), Box::new(TcpPacketWriter(write)))
+        (Box::new(TcpPacketReader { read: ReadHalf::Plain(stream), write: write.clone(), record: self.1 }), Box::new(TcpPacketWriter(write)))
     }
 }
 
@@ -61,6 +78,7 @@ enum WriteHalf {
 struct TcpPacketReader {
     read: ReadHalf,
     write: Arc<Mutex<WriteHalf>>,
+    record: Option<Box<dyn DerefMut<Target = [u8]> + Send>>,
 }
 
 impl TcpPacketReader {
@@ -106,7 +124,11 @@ impl TcpPacketReader {
         // DEFAULT lands in PSRAM ahead of RETENT_RAM on the P4, where AES-GCM
         // opens records at a tenth of the speed.
         config.buffer_caps = Caps::INTERNAL;
-        let tls = TlsStream::start_async(tcp, None, Arc::new(config)).await.map_err(link)?;
+        let tls = match self.record.take() {
+            Some(record) => TlsStream::start_in_async(tcp, None, Arc::new(config), record).await,
+            None => TlsStream::start_async(tcp, None, Arc::new(config)).await,
+        };
+        let tls = tls.map_err(link)?;
         let (reader, writer) = tls.split();
         self.read = ReadHalf::Tls(reader);
         *write = WriteHalf::Tls(writer);

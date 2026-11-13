@@ -12,7 +12,6 @@ use core::time::Duration;
 
 use agent_link::protocol::{CAP_AUDIO, ROTATION_RELEASE};
 use agent_link::{AudioSource, Frame, FrameHead, Jpeg, Link, Touch, VideoStart};
-use devkit::Lease;
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
 use devkit_ui::widgets::{divider, vertical_divider};
 use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Handle, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, State, Strips, TouchPoint, Ui, id};
@@ -30,7 +29,8 @@ use crate::fonts::icon;
 use crate::resources::{colors, icons};
 use crate::phone_audio::PhoneAudio;
 use crate::settings::{self, AudioPlayback, MirrorOrientation};
-use crate::{STRIP_LANES, SharedSram};
+use crate::STRIP_LANES;
+use crate::sram::Sram;
 
 const TAG: &CStr = c"mirror";
 const UI_STRIP_BYTES: usize = 128 * 1024;
@@ -46,6 +46,9 @@ const STRIPS: u8 = 4;
 const STRIP_TIMEOUT: Duration = Duration::from_millis(200);
 const MAX_QUEUED_STRIPS: usize = 64;
 const STATS_PERIOD: Duration = Duration::from_secs(1);
+// Above the ADB executor, which decrypts over TCP, so the player runs as soon
+// as a decode finishes; below the phone audio threads.
+const PLAYER_PRIORITY: u32 = 11;
 const MAX_FRAME_BUFFERS: usize = 4;
 const BLACK: Color = Color::rgb(0, 0, 0);
 const BAR_THICKNESS: i16 = 72;
@@ -67,7 +70,6 @@ pub mod keycode {
 }
 
 type Spare = Vec<u8, Caps>;
-type Sram = Lease<'static, SharedSram>;
 
 struct Shared {
     stop: AtomicBool,
@@ -328,7 +330,7 @@ struct Player {
 }
 
 impl Player {
-    fn run(&mut self, sram: &mut SharedSram) {
+    fn run(&mut self, sram: &mut Sram) {
         while !self.shared.stop.load(Ordering::Acquire) {
             self.shared.wake.take_timeout(IDLE);
             let refresh = self.shared.refresh.lock().take();
@@ -441,7 +443,7 @@ impl Player {
         }
     }
 
-    fn render(&mut self, frame: &ExternalFrame, strip: &Frame<Caps>, (rect, turn): (Rect, Rotation), sram: &mut SharedSram) -> idf::Result<()> {
+    fn render(&mut self, frame: &ExternalFrame, strip: &Frame<Caps>, (rect, turn): (Rect, Rotation), sram: &mut Sram) -> idf::Result<()> {
         let mut transform = Transform::new();
         transform.rotation = turn;
         let at = strip_rect(&strip.head, rect, turn);
@@ -450,7 +452,8 @@ impl Player {
         let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
         let decoder = decoder_for(&mut self.decoder, frame.fb.format())?;
         let bytes = sram.as_mut();
-        let (a, b) = bytes.split_at_mut(bytes.len() / 2);
+        // The decoder refuses strip buffers off a 64-byte boundary.
+        let (a, b) = bytes.split_at_mut(bytes.len() / 2 / 64 * 64);
         decoder.render(&strip.jpeg, &mut [a, b], &transform, &mut target)?.wait()?;
         self.stats.2 += strip.jpeg.len();
         Ok(())
@@ -458,7 +461,7 @@ impl Player {
 
     /// Draws strips as they arrive; `false` when the frame did not come
     /// whole.
-    fn draw_new(&mut self, frame: &ExternalFrame, first: Frame<Caps>, sram: &mut SharedSram) -> idf::Result<bool> {
+    fn draw_new(&mut self, frame: &ExternalFrame, first: Frame<Caps>, sram: &mut Sram) -> idf::Result<bool> {
         let mut drawn = Vec::new();
         let complete = self.draw_strips(frame, first, &mut drawn, sram);
         if matches!(complete, Ok(true)) {
@@ -470,7 +473,7 @@ impl Player {
         complete
     }
 
-    fn draw_strips(&mut self, frame: &ExternalFrame, first: Frame<Caps>, drawn: &mut Vec<Frame<Caps>>, sram: &mut SharedSram) -> idf::Result<bool> {
+    fn draw_strips(&mut self, frame: &ExternalFrame, first: Frame<Caps>, drawn: &mut Vec<Frame<Caps>>, sram: &mut Sram) -> idf::Result<bool> {
         let Some((rect, turn, _)) = self.place(frame, &first.head)? else {
             drawn.push(first);
             return Ok(false);
@@ -510,7 +513,7 @@ impl Player {
         }
     }
 
-    fn redraw(&mut self, frame: &ExternalFrame, sram: &mut SharedSram) -> idf::Result<bool> {
+    fn redraw(&mut self, frame: &ExternalFrame, sram: &mut Sram) -> idf::Result<bool> {
         let shown = core::mem::take(&mut self.shown);
         let result = (|| {
             let Some(first) = shown.first() else { return Ok(false) };
@@ -679,7 +682,12 @@ impl MirrorScreen {
         self.switching = true;
     }
 
-    fn play(&mut self, mut sram: Sram, handle: Handle<MirrorMsg>) {
+    fn play(&mut self, ui: Sram, handle: Handle<MirrorMsg>) {
+        drop(ui);
+        let Some(mut sram) = crate::sram::mirror() else {
+            error!(TAG, "strips: taken");
+            return;
+        };
         self.shared.stop.store(false, Ordering::Release);
         let mut player = Player {
             surface: self.surface.clone(),
@@ -698,7 +706,7 @@ impl MirrorScreen {
             handle,
             fills: None,
         };
-        let spawned = thread::Builder::new().name("mirror").stack_size(8192).priority(5).spawn(move || {
+        let spawned = thread::Builder::new().name("mirror").stack_size(8192).priority(PLAYER_PRIORITY).spawn(move || {
             player.run(&mut sram);
             sram
         });
@@ -717,7 +725,12 @@ impl MirrorScreen {
         Some(sram)
     }
 
-    fn restore(&mut self, sram: Sram, cx: &mut Cx<Self>) {
+    fn restore(&mut self, mirror: Sram, cx: &mut Cx<Self>) {
+        drop(mirror);
+        let Some(sram) = crate::sram::ui() else {
+            error!(TAG, "strips: taken");
+            return;
+        };
         cx.set_render_mode(RenderMode { strips: Strips::new(sram), lanes: STRIP_LANES, display: Default::default() }, MirrorMsg::Restored);
     }
 

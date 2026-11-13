@@ -6,7 +6,6 @@
 use core::ffi::CStr;
 
 use bsp_rs::display;
-use devkit::Lease;
 use devkit_net::wifi_manager::State as WifiState;
 use devkit_ui::widgets::{DropdownMenu, dropdown, segmented, slider, slider_value, switch, table, table_chevron, table_header, table_label, table_row, table_section, table_value, top_bar};
 use devkit_ui::{Align, AutoRotation, ColorMode, Component, Cx, Drag, Element, Input, RenderMode, Screen, Strips, Ui, id};
@@ -18,7 +17,8 @@ use crate::fonts::icon;
 use crate::resources::{colors, icons};
 use crate::settings::{self, AgentMode, AudioPlayback, ColorDepth, MirrorOrientation};
 use crate::wifi;
-use crate::{SHARED_SRAM_BYTES, STRIP_LANES, SharedSram};
+use crate::STRIP_LANES;
+use crate::sram::{Sram, UI_BYTES};
 
 use super::wifi::WifiScreen;
 
@@ -80,7 +80,7 @@ impl SettingsScreen {
         if self.switching || depth == settings::color_depth() {
             return;
         }
-        let strips = match Strips::allocate(SHARED_SRAM_BYTES, Caps::SPIRAM) {
+        let strips = match Strips::allocate(UI_BYTES, Caps::SPIRAM) {
             Ok(strips) => strips,
             Err(err) => {
                 error!(TAG, "color depth: strips: {err}");
@@ -96,7 +96,7 @@ impl SettingsScreen {
     // Reconfiguring the display needs strips other than the ones in use, so it
     // draws in PSRAM for one frame and then takes the shared SRAM back.
     fn restore_strips(&mut self, depth: ColorDepth, cx: &mut Cx<Self>) {
-        let Some(sram) = cx.take_strips().and_then(Strips::into_inner::<Lease<'static, SharedSram>>) else {
+        let Some(sram) = cx.take_strips().and_then(Strips::into_inner::<Sram>) else {
             error!(TAG, "color depth: display refused the change");
             self.switching = false;
             return;

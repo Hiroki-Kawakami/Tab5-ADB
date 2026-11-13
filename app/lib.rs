@@ -26,6 +26,7 @@ mod preview;
 mod raster_text;
 mod screens;
 mod settings;
+mod sram;
 mod status_bar;
 mod tcp_history;
 #[cfg(test)]
@@ -40,7 +41,6 @@ mod resources {
 use alloc::boxed::Box;
 use core::ffi::CStr;
 
-use devkit::StaticLease;
 use devkit_ui::{App, AppConfig, AutoRotation, SavedColorMode, StripSource, Strips};
 use idf::log::error;
 
@@ -48,19 +48,7 @@ use screens::HomeScreen;
 use status_bar::StatusBar;
 
 const TAG: &CStr = c"tab5-adb";
-pub(crate) const SHARED_SRAM_BYTES: usize = 245760;
 pub(crate) const STRIP_LANES: usize = 2;
-
-#[repr(C, align(64))]
-pub(crate) struct SharedSram([u8; SHARED_SRAM_BYTES]);
-
-impl AsMut<[u8]> for SharedSram {
-    fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.0
-    }
-}
-
-static SRAM: StaticLease<SharedSram> = StaticLease::new(SharedSram([0; SHARED_SRAM_BYTES]));
 
 pub fn run() {
     settings::init();
@@ -97,7 +85,7 @@ pub fn run() {
     config.plugins.push(Box::new(rotation.clone()));
     config.plugins.push(Box::new(SavedColorMode::new()));
     screens::set_rotation(rotation);
-    let Some(sram) = SRAM.take() else {
+    let Some(sram) = sram::ui() else {
         error!(TAG, "strips: taken");
         return;
     };

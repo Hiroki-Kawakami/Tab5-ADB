@@ -185,7 +185,7 @@ pub async fn connect_tcp(addr: &str) -> Result<Connection, String> {
         return Ok(conn);
     }
     join_network().await?;
-    let transport = adb::link::tcp::connect(addr).await.map_err(|err| {
+    let transport = adb::link::tcp::connect(addr, crate::sram::tcp()).await.map_err(|err| {
         error!(TAG, "tcp {addr}: {err}");
         match err {
             adb::Error::Net(devkit_net::Error::InvalidInput | devkit_net::Error::NotFound) => String::from("The address is not valid. Enter it as host:port."),
