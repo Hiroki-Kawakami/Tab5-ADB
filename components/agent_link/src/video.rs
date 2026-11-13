@@ -4,8 +4,6 @@
  */
 
 use alloc::vec::Vec;
-use core::alloc::Allocator;
-use core::ops::Deref;
 use core::time::Duration;
 
 use adb::link::{Connection, Slice, Stream};
@@ -16,25 +14,26 @@ use crate::{Error, Result};
 
 const WINDOW: u32 = 512 * 1024;
 
-pub enum Jpeg<A: Allocator> {
-    Lent(Slice),
-    Copied(Vec<u8, A>),
-}
+/// A frame's JPEG, lent in the pieces the transport received it in.
+pub struct Jpeg(Vec<Slice>);
 
-impl<A: Allocator> Deref for Jpeg<A> {
-    type Target = [u8];
+impl Jpeg {
+    pub fn parts(&self) -> Vec<&[u8]> {
+        self.0.iter().map(|s| &s[..]).collect()
+    }
 
-    fn deref(&self) -> &[u8] {
-        match self {
-            Jpeg::Lent(slice) => slice,
-            Jpeg::Copied(vec) => vec,
-        }
+    pub fn len(&self) -> usize {
+        self.0.iter().map(|s| s.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
-pub struct Frame<A: Allocator> {
+pub struct Frame {
     pub head: FrameHead,
-    pub jpeg: Jpeg<A>,
+    pub jpeg: Jpeg,
 }
 
 /// The video stream of an agent; dropping it closes the stream.
@@ -97,9 +96,7 @@ impl Video {
         }
     }
 
-    /// The next frame. Its JPEG is lent from what the transport received
-    /// when it arrived in one piece, and copied into `spare()` otherwise.
-    pub async fn next_frame<A: Allocator>(&mut self, spare: impl FnOnce() -> Vec<u8, A>) -> Result<Frame<A>> {
+    pub async fn next_frame(&mut self) -> Result<Frame> {
         loop {
             let header = self.read_header().await?;
             let length = header.length as usize;
@@ -113,27 +110,18 @@ impl Video {
             let mut head = [0u8; FRAME_HEAD];
             self.stream.read_exact(&mut head).await?;
             let head = FrameHead::parse(&head);
-            let len = length - FRAME_HEAD;
-            let first = self.stream.read_slice(len).await?;
-            if first.is_empty() && len > 0 {
-                return Err(Error::Closed);
-            }
-            if first.len() == len {
-                return Ok(Frame { head, jpeg: Jpeg::Lent(first) });
-            }
-            let mut jpeg = spare();
-            jpeg.clear();
-            jpeg.try_reserve(len).map_err(|_| Error::NoMemory)?;
-            jpeg.extend_from_slice(&first);
-            drop(first);
-            while jpeg.len() < len {
-                let more = self.stream.read_slice(len - jpeg.len()).await?;
-                if more.is_empty() {
+            let mut left = length - FRAME_HEAD;
+            let mut parts = Vec::new();
+            while left > 0 {
+                let part = self.stream.read_slice(left).await?;
+                if part.is_empty() {
                     return Err(Error::Closed);
                 }
-                jpeg.extend_from_slice(&more);
+                left -= part.len();
+                parts.try_reserve(1).map_err(|_| Error::NoMemory)?;
+                parts.push(part);
             }
-            return Ok(Frame { head, jpeg: Jpeg::Copied(jpeg) });
+            return Ok(Frame { head, jpeg: Jpeg(parts) });
         }
     }
 }

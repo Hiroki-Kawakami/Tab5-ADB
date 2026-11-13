@@ -97,7 +97,7 @@ enum Outcome {
 }
 
 enum Received {
-    Frame(Frame<Caps>),
+    Frame(Frame),
     Unavailable,
     Ended,
 }
@@ -165,7 +165,7 @@ async fn video(this: &This<Preview>, spawner: &Spawner, link: Link, size: (u16, 
                 Received::Unavailable => return Outcome::Unavailable,
                 Received::Ended => break,
             };
-            let picture = match decode(&mut decoder, &frame.jpeg, &mut pool, (stride, rows)).await {
+            let picture = match decode(&mut decoder, &frame.jpeg.parts(), &mut pool, (stride, rows)).await {
                 Ok(Some(picture)) => picture,
                 Ok(None) => continue,
                 Err(err) => {
@@ -192,7 +192,7 @@ async fn receive(link: Link, (width, height): (u16, u16), tx: &Sender<Received>)
             return Received::Unavailable;
         }
     };
-    match executor::timeout(FIRST_FRAME_TIMEOUT, video.next_frame(|| Vec::new_in(Caps::SPIRAM))).await {
+    match executor::timeout(FIRST_FRAME_TIMEOUT, video.next_frame()).await {
         Ok(Ok(frame)) => tx.send(Received::Frame(frame)).await,
         Ok(Err(err)) => {
             error!(TAG, "first frame: {err}");
@@ -204,7 +204,7 @@ async fn receive(link: Link, (width, height): (u16, u16), tx: &Sender<Received>)
         }
     }
     while !tx.is_closed() {
-        match video.next_frame(|| Vec::new_in(Caps::SPIRAM)).await {
+        match video.next_frame().await {
             Ok(frame) => tx.send(Received::Frame(frame)).await,
             Err(err) => {
                 error!(TAG, "video: {err}");
@@ -216,7 +216,7 @@ async fn receive(link: Link, (width, height): (u16, u16), tx: &Sender<Received>)
 }
 
 /// `None` while every buffer is still shown.
-async fn decode(decoder: &mut Decoder, jpeg: &[u8], pool: &mut Vec<Arc<Picture>>, (stride, rows): (u16, u16)) -> Result<Option<Arc<Picture>>, String> {
+async fn decode(decoder: &mut Decoder, jpeg: &[&[u8]], pool: &mut Vec<Arc<Picture>>, (stride, rows): (u16, u16)) -> Result<Option<Arc<Picture>>, String> {
     let header = Header::parse(jpeg).map_err(|e| format!("header: {e}"))?;
     let (w, h) = (header.padded_width, header.padded_height);
     if w > stride || h > rows {
@@ -352,12 +352,12 @@ pub(crate) async fn rescale(picture: &Picture, (width, height): (u16, u16)) -> R
 pub(crate) async fn decode_jpeg(jpeg: &[u8]) -> Result<Picture, String> {
     let yuv = Yuv { range: YuvRange::Full, standard: YuvStandard::Bt601 };
     let mut decoder = Decoder::new(&DecodeConfig { format: FORMAT, yuv }).map_err(|e| format!("decoder: {e}"))?;
-    let header = Header::parse(jpeg).map_err(|e| format!("header: {e}"))?;
+    let header = Header::parse(&[jpeg]).map_err(|e| format!("header: {e}"))?;
     let (w, h) = (header.padded_width, header.padded_height);
     let mut picture = ImageBuf::new_in(FORMAT, w, h, usize::from(w), 64, Caps::SPIRAM).map_err(|_| format!("alloc {w}x{h}"))?;
     {
         let mut target = Target::new(picture.pixels_mut(), FORMAT, Size::new(w, h), usize::from(w)).ok_or("target")?;
-        decoder.decode(jpeg, &mut target).map_err(|e| format!("decode: {e}"))?.await.map_err(|e| format!("decode: {e}"))?;
+        decoder.decode(&[jpeg], &mut target).map_err(|e| format!("decode: {e}"))?.await.map_err(|e| format!("decode: {e}"))?;
     }
     picture.reshape(FORMAT, header.width, header.height, usize::from(w));
     Ok(picture)

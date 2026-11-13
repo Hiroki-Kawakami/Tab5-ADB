@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use core::time::Duration;
 
 use agent_link::protocol::{CAP_AUDIO, ROTATION_RELEASE};
-use agent_link::{AudioSource, Frame, FrameHead, Jpeg, Link, Touch, VideoStart};
+use agent_link::{AudioSource, Frame, FrameHead, Link, Touch, VideoStart};
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
 use devkit_ui::widgets::{divider, vertical_divider};
 use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Handle, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, State, Strips, TouchPoint, Ui, id};
@@ -69,7 +69,6 @@ pub mod keycode {
     pub const APP_SWITCH: u16 = 187;
 }
 
-type Spare = Vec<u8, Caps>;
 
 struct Shared {
     stop: AtomicBool,
@@ -81,8 +80,7 @@ struct Shared {
     /// The box frames are sent for.
     box_size: Mutex<(u16, u16)>,
     wake: Semaphore,
-    strips: Mutex<VecDeque<Frame<Caps>>>,
-    spare: Mutex<Vec<Spare>>,
+    strips: Mutex<VecDeque<Frame>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -112,15 +110,9 @@ impl Shared {
         self.wake.give();
     }
 
-    fn recycle(&self, strip: Frame<Caps>) {
-        if let Jpeg::Copied(vec) = strip.jpeg {
-            self.spare.lock().push(vec);
-        }
-    }
-
     /// The first strip of the newest frame that can be drawn whole, dropping
     /// what comes before it.
-    fn next_frame(&self) -> Option<Frame<Caps>> {
+    fn next_frame(&self) -> Option<Frame> {
         let mut strips = self.strips.lock();
         let mut dropped = Vec::new();
         loop {
@@ -140,7 +132,7 @@ impl Shared {
         }
         let first = strips.pop_front();
         drop(strips);
-        dropped.into_iter().for_each(|s| self.recycle(s));
+        drop(dropped);
         first
     }
 }
@@ -289,7 +281,7 @@ async fn receive(link: Link, shared: Arc<Shared>, start: VideoStart, rotation: O
     };
     info!(TAG, "box {}x{}{}", start.box_width, start.box_height, if start.swap { " swap" } else { "" });
     loop {
-        let strip = match video.next_frame(|| shared.spare.lock().pop().unwrap_or_else(|| Vec::new_in(Caps::SPIRAM))).await {
+        let strip = match video.next_frame().await {
             Ok(strip) => strip,
             Err(err) => {
                 error!(TAG, "video: {err}");
@@ -301,9 +293,7 @@ async fn receive(link: Link, shared: Arc<Shared>, start: VideoStart, rotation: O
             strips.push_back(strip);
             (strips.len() > MAX_QUEUED_STRIPS).then(|| strips.pop_front()).flatten()
         };
-        if let Some(old) = old {
-            shared.recycle(old);
-        }
+        drop(old);
         shared.wake.give();
     }
 }
@@ -314,7 +304,7 @@ struct Player {
     link: Link,
     mode: MirrorOrientation,
     decoder: Option<(ImageFormat, Decoder)>,
-    shown: Vec<Frame<Caps>>,
+    shown: Vec<Frame>,
     geometry: Option<Geometry>,
     session: Option<JoinHandle<()>>,
     blacked: [Option<Rect>; MAX_FRAME_BUFFERS],
@@ -443,7 +433,7 @@ impl Player {
         }
     }
 
-    fn render(&mut self, frame: &ExternalFrame, strip: &Frame<Caps>, (rect, turn): (Rect, Rotation), sram: &mut Sram) -> idf::Result<()> {
+    fn render(&mut self, frame: &ExternalFrame, strip: &Frame, (rect, turn): (Rect, Rotation), sram: &mut Sram) -> idf::Result<()> {
         let mut transform = Transform::new();
         transform.rotation = turn;
         let at = strip_rect(&strip.head, rect, turn);
@@ -454,26 +444,25 @@ impl Player {
         let bytes = sram.as_mut();
         // The decoder refuses strip buffers off a 64-byte boundary.
         let (a, b) = bytes.split_at_mut(bytes.len() / 2 / 64 * 64);
-        decoder.render(&strip.jpeg, &mut [a, b], &transform, &mut target)?.wait()?;
+        decoder.render(&strip.jpeg.parts(), &mut [a, b], &transform, &mut target)?.wait()?;
         self.stats.2 += strip.jpeg.len();
         Ok(())
     }
 
     /// Draws strips as they arrive; `false` when the frame did not come
     /// whole.
-    fn draw_new(&mut self, frame: &ExternalFrame, first: Frame<Caps>, sram: &mut Sram) -> idf::Result<bool> {
+    fn draw_new(&mut self, frame: &ExternalFrame, first: Frame, sram: &mut Sram) -> idf::Result<bool> {
         let mut drawn = Vec::new();
         let complete = self.draw_strips(frame, first, &mut drawn, sram);
         if matches!(complete, Ok(true)) {
-            drawn = core::mem::replace(&mut self.shown, drawn);
+            self.shown = drawn;
             self.seq = self.seq.wrapping_add(1);
             self.held[buffer(frame)] = self.seq;
         }
-        drawn.into_iter().for_each(|s| self.shared.recycle(s));
         complete
     }
 
-    fn draw_strips(&mut self, frame: &ExternalFrame, first: Frame<Caps>, drawn: &mut Vec<Frame<Caps>>, sram: &mut Sram) -> idf::Result<bool> {
+    fn draw_strips(&mut self, frame: &ExternalFrame, first: Frame, drawn: &mut Vec<Frame>, sram: &mut Sram) -> idf::Result<bool> {
         let Some((rect, turn, _)) = self.place(frame, &first.head)? else {
             drawn.push(first);
             return Ok(false);
@@ -499,7 +488,7 @@ impl Player {
         }
     }
 
-    fn next_strip(&self) -> Option<Frame<Caps>> {
+    fn next_strip(&self) -> Option<Frame> {
         let start = Instant::now();
         loop {
             if let Some(strip) = self.shared.strips.lock().pop_front() {
@@ -656,7 +645,6 @@ impl MirrorScreen {
             box_size: Mutex::new((0, 0)),
             wake: Semaphore::new(0, 1),
             strips: Mutex::new(VecDeque::new()),
-            spare: Mutex::new(Vec::new()),
         });
         let refresh = shared.clone();
         surface.set_on_refresh(move |area| {
