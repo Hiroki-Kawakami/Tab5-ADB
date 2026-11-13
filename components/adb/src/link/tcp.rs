@@ -15,7 +15,7 @@ use idf::heap::Caps;
 use idf::sync::Mutex;
 
 use crate::link::identity::Identity;
-use crate::link::packet::{Chunk, HEADER_BYTES, Header, Packet, Payload};
+use crate::link::packet::{Chunk, HEADER_BYTES, Header, Packet};
 use crate::link::transport::{BoxFuture, PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
 
@@ -99,19 +99,17 @@ impl TcpPacketReader {
         Ok(())
     }
 
-    async fn read_packet(&mut self) -> Result<Packet> {
+    async fn header(&mut self) -> Result<Header> {
         let mut head = [MaybeUninit::uninit(); HEADER_BYTES];
         self.read_exact(&mut head).await?;
-        let header = Header::parse(&head.map(|b| unsafe { b.assume_init() })).ok_or(Error::Protocol)?;
-        let len = header.length as usize;
-        if len == 0 {
-            return Ok(Packet::new(header.command, header.arg0, header.arg1, Vec::new()));
-        }
+        Header::parse(&head.map(|b| unsafe { b.assume_init() })).ok_or(Error::Protocol)
+    }
+
+    async fn payload(&mut self, len: usize) -> Result<Chunk> {
         let mut payload = idf::heap::try_vec(len, PAYLOAD_CAPS).map_err(|_| Error::NoMemory)?;
         self.read_exact(&mut payload.spare_capacity_mut()[..len]).await?;
         unsafe { payload.set_len(len) };
-        let chunk: Chunk = Arc::new(payload);
-        Ok(Packet { command: header.command, arg0: header.arg0, arg1: header.arg1, payload: Payload::Chunks(alloc::vec![chunk]) })
+        Ok(Arc::new(payload))
     }
 
     async fn upgrade(&mut self, identity: &Identity) -> Result<()> {
@@ -138,8 +136,12 @@ impl TcpPacketReader {
 }
 
 impl PacketReader for TcpPacketReader {
-    fn read(&mut self) -> BoxFuture<'_, Result<Packet>> {
-        Box::pin(self.read_packet())
+    fn read_header(&mut self) -> BoxFuture<'_, Result<Header>> {
+        Box::pin(self.header())
+    }
+
+    fn read_payload(&mut self, len: usize) -> BoxFuture<'_, Result<Chunk>> {
+        Box::pin(self.payload(len))
     }
 
     fn start_tls<'a>(&'a mut self, identity: &'a Identity) -> BoxFuture<'a, Result<()>> {

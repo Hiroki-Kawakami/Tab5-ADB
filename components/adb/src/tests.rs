@@ -12,7 +12,7 @@ use crate::Result;
 use crate::link::base64;
 use crate::link::connection::banner_has_feature;
 use crate::link::identity::{n0inv, r_squared};
-use crate::link::packet::{A_CNXN, A_OKAY, A_OPEN, A_VERSION, A_WRTE, Header, Packet};
+use crate::link::packet::{A_CNXN, A_OKAY, A_OPEN, A_VERSION, A_WRTE, Chunk, Header, Packet};
 use crate::link::transport::{BoxFuture, PacketReader, PacketWriter, Transport};
 use crate::link::{Connection, Identity};
 use crate::link::pair::Cipher;
@@ -184,18 +184,27 @@ struct FakeTransport {
     to_device: idf::executor::Sender<Packet>,
 }
 
-struct FakeReader(idf::executor::Receiver<Packet>);
+struct FakeReader(idf::executor::Receiver<Packet>, Vec<u8>);
 struct FakeWriter(idf::executor::Sender<Packet>);
 
 impl Transport for FakeTransport {
     fn split(self: Box<Self>) -> (Box<dyn PacketReader>, Box<dyn PacketWriter>) {
-        (Box::new(FakeReader(self.from_device)), Box::new(FakeWriter(self.to_device)))
+        (Box::new(FakeReader(self.from_device, Vec::new())), Box::new(FakeWriter(self.to_device)))
     }
 }
 
 impl PacketReader for FakeReader {
-    fn read(&mut self) -> BoxFuture<'_, Result<Packet>> {
-        Box::pin(async { Ok(self.0.recv().await) })
+    fn read_header(&mut self) -> BoxFuture<'_, Result<Header>> {
+        Box::pin(async {
+            let packet = self.0.recv().await;
+            self.1 = packet.payload.into_vec();
+            Ok(Header { command: packet.command, arg0: packet.arg0, arg1: packet.arg1, length: self.1.len() as u32 })
+        })
+    }
+
+    fn read_payload(&mut self, len: usize) -> BoxFuture<'_, Result<Chunk>> {
+        let chunk: Chunk = Arc::new(self.1.drain(..len).collect::<Vec<u8>>());
+        Box::pin(async move { Ok(chunk) })
     }
 }
 

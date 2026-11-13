@@ -17,12 +17,14 @@ use idf::sync::Mutex;
 
 use crate::link::identity::Identity;
 use crate::link::packet::{
-    A_AUTH, A_CLSE, A_CNXN, A_OKAY, A_OPEN, A_STLS, A_STLS_VERSION, A_VERSION, A_WRTE, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, Chunk, Packet, Payload, Slice,
+    A_AUTH, A_CLSE, A_CNXN, A_OKAY, A_OPEN, A_STLS, A_STLS_VERSION, A_VERSION, A_WRTE, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, Chunk, Header, Packet, Payload, Slice,
 };
 use crate::link::transport::{PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
 
 const MAX_PAYLOAD: u32 = 256 * 1024;
+/// What a stream is handed of a WRTE payload at a time, as it arrives.
+const PIECE: usize = 16 * 1024;
 const BANNER: &[u8] = b"host::features=shell_v2,cmd,delayed_ack";
 const DELAYED_ACK: &str = "delayed_ack";
 /// What `Connection::open` lets the device send ahead of what was read.
@@ -121,6 +123,29 @@ impl Shared {
         Ok(())
     }
 
+    /// A WRTE's payload, handed to its stream piece by piece as it arrives.
+    async fn receive(&self, reader: &mut dyn PacketReader, h: Header) -> Result<()> {
+        let stream = self.streams.lock().get(&h.arg1).cloned();
+        let mut left = h.length as usize;
+        if left == 0
+            && let Some(stream) = &stream
+        {
+            stream.deliver(None, true);
+        }
+        while left > 0 {
+            let n = left.min(PIECE);
+            let chunk = reader.read_payload(n).await?;
+            left -= n;
+            if let Some(stream) = &stream {
+                stream.deliver(Some(chunk), left == 0);
+            }
+        }
+        if stream.is_none() {
+            self.send(Packet::new(A_CLSE, 0, h.arg0, Vec::new())).await?;
+        }
+        Ok(())
+    }
+
     async fn handle(&self, p: Packet, identity: &Identity, signed: &mut bool, offered: &mut bool) -> Result<()> {
         match p.command {
             A_CNXN => {
@@ -157,13 +182,6 @@ impl Shared {
                     stream.okay(p.arg0, acked);
                 }
             }
-            A_WRTE => {
-                let stream = self.streams.lock().get(&p.arg1).cloned();
-                match stream {
-                    Some(stream) => stream.deliver(p.payload),
-                    None => self.send(Packet::new(A_CLSE, 0, p.arg0, Vec::new())).await?,
-                }
-            }
             A_CLSE => {
                 let stream = self.streams.lock().remove(&p.arg1);
                 if let Some(stream) = stream {
@@ -185,8 +203,19 @@ async fn read_loop(shared: Weak<Shared>, mut reader: Box<dyn PacketReader>, iden
     }
     let (mut signed, mut offered, mut tls) = (false, false, false);
     loop {
-        let packet = reader.read().await;
+        let header = reader.read_header().await;
         let Some(s) = shared.upgrade() else { return };
+        let packet = match header {
+            Ok(h) if h.command == A_WRTE => {
+                if let Err(err) = s.receive(&mut *reader, h).await {
+                    s.shut(err);
+                    return;
+                }
+                continue;
+            }
+            Ok(h) => whole(&mut *reader, h).await,
+            Err(err) => Err(err),
+        };
         let result = match packet {
             Ok(p) if p.command == A_STLS => {
                 if tls {
@@ -207,6 +236,18 @@ async fn read_loop(shared: Weak<Shared>, mut reader: Box<dyn PacketReader>, iden
             return;
         }
     }
+}
+
+/// A packet with all of its payload.
+async fn whole(reader: &mut dyn PacketReader, h: Header) -> Result<Packet> {
+    let mut chunks = Vec::new();
+    let mut left = h.length as usize;
+    while left > 0 {
+        let n = left.min(PIECE);
+        chunks.push(reader.read_payload(n).await?);
+        left -= n;
+    }
+    Ok(Packet { command: h.command, arg0: h.arg0, arg1: h.arg1, payload: Payload::Chunks(chunks) })
 }
 
 /// Closes the connection once the last `Connection` and `Stream` are gone.
@@ -434,10 +475,12 @@ impl StreamShared {
         Self::wake(&mut s);
     }
 
-    fn deliver(&self, data: Payload) {
+    /// Part of a WRTE payload; `last` with its end, which a stream without a
+    /// window answers once read.
+    fn deliver(&self, chunk: Option<Chunk>, last: bool) {
         let mut s = self.state.lock();
-        s.inbox.extend(data.into_chunks());
-        s.unacked = s.window.is_none();
+        s.inbox.extend(chunk);
+        s.unacked |= last && s.window.is_none();
         Self::wake(&mut s);
     }
 

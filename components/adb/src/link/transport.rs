@@ -9,7 +9,7 @@ use core::pin::Pin;
 
 use crate::link::identity::Identity;
 use crate::{Error, Result};
-pub use crate::link::packet::Packet;
+pub use crate::link::packet::{Chunk, Header, Packet};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -18,9 +18,14 @@ pub trait Transport: Send {
     fn split(self: Box<Self>) -> (Box<dyn PacketReader>, Box<dyn PacketWriter>);
 }
 
-/// One reader reads packets in order; an error ends the connection.
+/// One reader reads packets in order, each header then all of its payload;
+/// an error ends the connection.
 pub trait PacketReader: Send {
-    fn read(&mut self) -> BoxFuture<'_, Result<Packet>>;
+    fn read_header(&mut self) -> BoxFuture<'_, Result<Header>>;
+
+    /// The next `len` bytes of the payload being read, at most what is left
+    /// of it, in a chunk of their own.
+    fn read_payload(&mut self, len: usize) -> BoxFuture<'_, Result<Chunk>>;
 
     /// Turns both halves into TLS presenting `identity`, as A_STLS asks;
     /// the writer is idle meanwhile. Links that cannot fail with `Protocol`.

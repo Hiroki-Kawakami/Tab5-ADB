@@ -13,7 +13,7 @@ use idf::log::error;
 use idf::sync::Mutex;
 use usb_host_rs::{Buffer, Device, Endpoint, Interface};
 
-use crate::link::packet::{Chunk, HEADER_BYTES, Header, Packet, Payload};
+use crate::link::packet::{Chunk, HEADER_BYTES, Header, Packet};
 use crate::link::transport::{BoxFuture, PacketReader, PacketWriter, Transport};
 use crate::{Error, Result};
 
@@ -115,25 +115,25 @@ struct UsbReader {
 }
 
 impl UsbReader {
-    async fn read_packet(&mut self) -> Result<Packet> {
+    async fn header(&mut self) -> Result<Header> {
         let mps = usize::from(self.input.max_packet_bytes()).max(1);
-        let header = loop {
+        loop {
             let buf = take(&mut self.header, mps, HEADER_CAPS)?;
             let (buf, r) = self.input.transfer(buf, mps).await;
             let n = r.map_err(link)?;
             let parsed = (n == HEADER_BYTES).then(|| Header::parse(buf[..HEADER_BYTES].try_into().unwrap())).flatten();
             self.header = Some(buf);
             match parsed {
-                Some(header) => break header,
+                Some(header) => return Ok(header),
                 None if n == 0 => continue,
                 None => return Err(Error::Protocol),
             }
-        };
-        let len = header.length as usize;
-        if len == 0 {
-            return Ok(Packet::new(header.command, header.arg0, header.arg1, Vec::new()));
         }
-        let capacity = len.next_multiple_of(CHUNK);
+    }
+
+    async fn payload(&mut self, len: usize) -> Result<Chunk> {
+        let mps = usize::from(self.input.max_packet_bytes()).max(1);
+        let capacity = len.next_multiple_of(mps);
         let spare = {
             let mut spare = self.spare.lock();
             let at = spare.iter().position(|b| b.len() >= capacity);
@@ -154,14 +154,17 @@ impl UsbReader {
                 return Err(Error::Protocol);
             }
         }
-        let chunk: Chunk = Arc::new(Received { buf: Some(buf), len, spare: self.spare.clone() });
-        Ok(Packet { command: header.command, arg0: header.arg0, arg1: header.arg1, payload: Payload::Chunks(alloc::vec![chunk]) })
+        Ok(Arc::new(Received { buf: Some(buf), len, spare: self.spare.clone() }))
     }
 }
 
 impl PacketReader for UsbReader {
-    fn read(&mut self) -> BoxFuture<'_, Result<Packet>> {
-        Box::pin(self.read_packet())
+    fn read_header(&mut self) -> BoxFuture<'_, Result<Header>> {
+        Box::pin(self.header())
+    }
+
+    fn read_payload(&mut self, len: usize) -> BoxFuture<'_, Result<Chunk>> {
+        Box::pin(self.payload(len))
     }
 }
 
