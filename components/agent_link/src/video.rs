@@ -126,9 +126,13 @@ impl Video {
             jpeg.try_reserve(len).map_err(|_| Error::NoMemory)?;
             jpeg.extend_from_slice(&first);
             drop(first);
-            let at = jpeg.len();
-            jpeg.resize(len, 0);
-            self.stream.read_exact(&mut jpeg[at..]).await?;
+            while jpeg.len() < len {
+                let more = self.stream.read_slice(len - jpeg.len()).await?;
+                if more.is_empty() {
+                    return Err(Error::Closed);
+                }
+                jpeg.extend_from_slice(&more);
+            }
             return Ok(Frame { head, jpeg: Jpeg::Copied(jpeg) });
         }
     }

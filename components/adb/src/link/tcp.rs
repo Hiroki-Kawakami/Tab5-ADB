@@ -6,6 +6,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::mem::MaybeUninit;
 use core::ops::DerefMut;
 
 use devkit_crypto::tls::{ClientConfig, Verify};
@@ -82,11 +83,11 @@ struct TcpPacketReader {
 }
 
 impl TcpPacketReader {
-    async fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {
+    async fn read_exact(&mut self, mut buf: &mut [MaybeUninit<u8>]) -> Result<()> {
         while !buf.is_empty() {
             let n = match &mut self.read {
-                ReadHalf::Plain(tcp) => tcp.read_async(buf).await,
-                ReadHalf::Tls(tls) => tls.read_async(buf).await,
+                ReadHalf::Plain(tcp) => tcp.read_uninit_async(buf).await,
+                ReadHalf::Tls(tls) => tls.read_uninit_async(buf).await,
                 ReadHalf::Gone => return Err(Error::Disconnected),
             };
             let n = n.map_err(link)?;
@@ -99,16 +100,16 @@ impl TcpPacketReader {
     }
 
     async fn read_packet(&mut self) -> Result<Packet> {
-        let mut head = [0u8; HEADER_BYTES];
+        let mut head = [MaybeUninit::uninit(); HEADER_BYTES];
         self.read_exact(&mut head).await?;
-        let header = Header::parse(&head).ok_or(Error::Protocol)?;
+        let header = Header::parse(&head.map(|b| unsafe { b.assume_init() })).ok_or(Error::Protocol)?;
         let len = header.length as usize;
         if len == 0 {
             return Ok(Packet::new(header.command, header.arg0, header.arg1, Vec::new()));
         }
         let mut payload = idf::heap::try_vec(len, PAYLOAD_CAPS).map_err(|_| Error::NoMemory)?;
-        payload.resize(len, 0);
-        self.read_exact(&mut payload).await?;
+        self.read_exact(&mut payload.spare_capacity_mut()[..len]).await?;
+        unsafe { payload.set_len(len) };
         let chunk: Chunk = Arc::new(payload);
         Ok(Packet { command: header.command, arg0: header.arg0, arg1: header.arg1, payload: Payload::Chunks(alloc::vec![chunk]) })
     }
