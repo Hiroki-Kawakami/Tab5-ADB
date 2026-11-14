@@ -9,7 +9,7 @@
 use alloc::boxed::Box;
 
 use adb::link::tcp::{Memory, TLS_RECORD};
-use devkit::{BufferBytes, BufferLease, BufferPool};
+use devkit_core::{BufferBytes, BufferLease, BufferPool};
 use idf::sync::FreeRtos;
 
 const BYTES: usize = 245760;

@@ -158,7 +158,7 @@ async fn video(this: &This<Preview>, spawner: &Spawner, link: Link, size: (u16, 
                 tx.send(end).await;
             })
         };
-        let _receiving = devkit::guard(receiving, |task| task.abort());
+        let _receiving = devkit_core::guard(receiving, |task| task.abort());
         loop {
             let frame = match rx.recv().await {
                 Received::Frame(frame) => frame,
@@ -282,7 +282,7 @@ async fn screencap(this: &This<Preview>, spawner: &Spawner, size: (u16, u16)) {
 
 pub(crate) async fn capture(spawner: &Spawner, conn: &Connection, jpeg: bool) -> Result<Vec<u8, Caps>, String> {
     let conn = conn.clone();
-    let mut task = devkit::guard(
+    let mut task = devkit_core::guard(
         spawner.spawn(async move {
             let mut stream = conn.open(if jpeg { "exec:screencap -j" } else { "exec:screencap -p" }).await.map_err(|e| format!("open: {e}"))?;
             let mut shot = Vec::new_in(Caps::SPIRAM);

@@ -55,7 +55,7 @@ impl Agent {
     /// Dropping the future stops the bring-up.
     pub async fn start(conn: Connection) -> Result<Self, String> {
         let spawner = adb_link::spawner().ok_or("adb not started")?;
-        let mut task = devkit::guard(spawner.spawn(async move { bring_up(&conn, spawner).await }), |task| task.abort());
+        let mut task = devkit_core::guard(spawner.spawn(async move { bring_up(&conn, spawner).await }), |task| task.abort());
         let link = (&mut *task).await?;
         let [major, minor, patch] = link.info().version;
         info!(TAG, "ready: agent {major}.{minor}.{patch}");
