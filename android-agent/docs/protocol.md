@@ -609,7 +609,7 @@ FRAME_ACK
 
 ```
 AUDIO_START
-  u8  codec              1 = PCM（S16LE）, 2 = Opus
+  u8  codec              1 = PCM（S16LE）, 2 = Opus, 3 = AAC-LC
   u8  source             0 = メディアの再生だけ, 1 = 通話以外のすべての再生
   u8  reserved[2]
 
@@ -620,7 +620,8 @@ REPLY result
   u32 rate               48000
 
 AUDIO
-  ... data               PCM はインターリーブした約 10 ms 分。Opus は 1 パケット（20 ms）
+  ... data               PCM はインターリーブした約 10 ms 分。Opus は 1 パケット（20 ms）。
+                         AAC-LC は 1 アクセスユニット（1024 サンプル）
 
 VOLUME
   u8  volume             端末のメディアの音量の段階
@@ -634,6 +635,7 @@ VOLUME
   取り込みを許していない音は取れない。
 - `VOLUME` は応答の直後に 1 つ送り、以降は変わるたびに送る。ミュート中は `volume` = 0。Tab5 は
   鳴らす音量をこれで決める。
-- Android 12 より前の端末、Opus を作れない端末で Opus を求められたときは `ENOTSUP`。Opus を
-  求められて PCM で答えることはしない。
+- Android 12 より前の端末、求められた Opus・AAC-LC を作れない端末では `ENOTSUP`。求められた
+  ものと別の codec で答えることはしない。
 - Opus のパケットは 48 kHz・ステレオ・20 ms で、OpusHead は送らない。
+- AAC-LC は 48 kHz・ステレオで、ADTS ヘッダも AudioSpecificConfig も送らない。

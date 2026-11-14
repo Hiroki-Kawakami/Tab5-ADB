@@ -31,6 +31,7 @@ final class AudioServer {
     private static final int EFAIL = 0xFF;
     private static final int CODEC_PCM = 1;
     private static final int CODEC_OPUS = 2;
+    private static final int CODEC_AAC = 3;
     private static final int CHUNK_BYTES = AudioCapture.RATE / 100 * AudioCapture.CHANNELS * 2;
     private static final int VOLUME_CHUNKS = 10;
 
@@ -130,7 +131,7 @@ final class AudioServer {
             in.readFully(payload);
             int codec = payload[0] & 0xFF;
             boolean all = payload[1] != 0;
-            if (codec != CODEC_PCM && codec != CODEC_OPUS) {
+            if (codec != CODEC_PCM && codec != CODEC_OPUS && codec != CODEC_AAC) {
                 reply(out, EINVAL, codec);
                 return;
             }
@@ -138,8 +139,8 @@ final class AudioServer {
                 reply(out, ENOTSUP, codec);
                 return;
             }
-            OpusEncoder opus = codec == CODEC_OPUS ? OpusEncoder.create() : null;
-            if (codec == CODEC_OPUS && opus == null) {
+            AudioEncoder encoder = codec == CODEC_OPUS ? AudioEncoder.opus() : codec == CODEC_AAC ? AudioEncoder.aac() : null;
+            if (codec != CODEC_PCM && encoder == null) {
                 reply(out, ENOTSUP, codec);
                 return;
             }
@@ -148,21 +149,21 @@ final class AudioServer {
                 capture = AudioCapture.start(all);
             } catch (Exception e) {
                 System.out.println("audio: " + e);
-                if (opus != null) {
-                    opus.close();
+                if (encoder != null) {
+                    encoder.close();
                 }
                 reply(out, EFAIL, codec);
                 return;
             }
             try {
                 reply(out, OK, codec);
-                System.out.println("audio: " + (codec == CODEC_OPUS ? "opus" : "pcm") + (all ? " all" : " media"));
+                System.out.println("audio: " + (codec == CODEC_OPUS ? "opus" : codec == CODEC_AAC ? "aac" : "pcm") + (all ? " all" : " media"));
                 watchClose(in);
-                stream(out, capture, opus);
+                stream(out, capture, encoder);
             } finally {
                 capture.close();
-                if (opus != null) {
-                    opus.close();
+                if (encoder != null) {
+                    encoder.close();
                 }
             }
         }
@@ -180,21 +181,21 @@ final class AudioServer {
             thread.start();
         }
 
-        private void stream(OutputStream out, AudioCapture capture, OpusEncoder opus) throws Exception {
+        private void stream(OutputStream out, AudioCapture capture, AudioEncoder encoder) throws Exception {
             AudioManager audio = (AudioManager) SystemContext.get().getSystemService(Context.AUDIO_SERVICE);
             int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
             int volume = heard(audio);
             write(out, VOLUME, new byte[] {(byte) volume, (byte) max});
-            byte[] chunk = new byte[opus != null ? OpusEncoder.FRAME_BYTES : CHUNK_BYTES];
+            byte[] chunk = new byte[encoder != null ? AudioEncoder.FRAME_BYTES : CHUNK_BYTES];
             int chunks = 0;
             while (!stopped) {
                 if (capture.read(chunk) <= 0) {
                     throw new IOException("capture ended");
                 }
-                if (opus == null) {
+                if (encoder == null) {
                     write(out, AUDIO, chunk);
                 } else {
-                    for (byte[] packet : opus.encode(chunk)) {
+                    for (byte[] packet : encoder.encode(chunk)) {
                         write(out, AUDIO, packet);
                     }
                 }

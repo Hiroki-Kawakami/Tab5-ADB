@@ -16,28 +16,43 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
-// 20 ms of 48 kHz stereo S16 in, raw Opus packets out.
-final class OpusEncoder implements AutoCloseable {
+// 20 ms of 48 kHz stereo S16 in, raw Opus packets or AAC-LC access units out.
+final class AudioEncoder implements AutoCloseable {
     static final int FRAME_BYTES = AudioCapture.RATE / 50 * AudioCapture.CHANNELS * 2;
-    private static final int BIT_RATE = 96000;
+    private static final int OPUS_BIT_RATE = 96000;
+    private static final int AAC_BIT_RATE = 128000;
     private static final long INPUT_TIMEOUT_US = 100_000;
     private static final long OUTPUT_TIMEOUT_US = 10_000;
 
     private final MediaCodec codec;
+    private final String name;
     private long timeUs;
 
-    private OpusEncoder(MediaCodec codec) {
+    private AudioEncoder(MediaCodec codec, String name) {
         this.codec = codec;
+        this.name = name;
     }
 
     // Null when the device has no Opus encoder.
-    static OpusEncoder create() throws IOException {
+    static AudioEncoder opus() throws IOException {
         if (Build.VERSION.SDK_INT < 29) {
             return null;
         }
         MediaFormat format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, AudioCapture.RATE, AudioCapture.CHANNELS);
-        format.setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE);
+        format.setInteger(MediaFormat.KEY_BIT_RATE, OPUS_BIT_RATE);
         format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+        return create("opus", format);
+    }
+
+    // Null when the device has no AAC encoder.
+    static AudioEncoder aac() throws IOException {
+        MediaFormat format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AudioCapture.RATE, AudioCapture.CHANNELS);
+        format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
+        format.setInteger(MediaFormat.KEY_BIT_RATE, AAC_BIT_RATE);
+        return create("aac", format);
+    }
+
+    private static AudioEncoder create(String what, MediaFormat format) throws IOException {
         format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, FRAME_BYTES);
         String name = new MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(format);
         if (name == null) {
@@ -49,15 +64,15 @@ final class OpusEncoder implements AutoCloseable {
             codec.start();
         } catch (RuntimeException e) {
             codec.release();
-            throw new IOException("opus " + name, e);
+            throw new IOException(what + " " + name, e);
         }
-        return new OpusEncoder(codec);
+        return new AudioEncoder(codec, what);
     }
 
     List<byte[]> encode(byte[] pcm) {
         int input = codec.dequeueInputBuffer(INPUT_TIMEOUT_US);
         if (input < 0) {
-            throw new IllegalStateException("opus input timed out");
+            throw new IllegalStateException(name + " input timed out");
         }
         ByteBuffer buffer = codec.getInputBuffer(input);
         buffer.clear();

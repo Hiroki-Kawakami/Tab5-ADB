@@ -12,6 +12,7 @@ use core::time::Duration;
 
 use agent_link::{AudioCodec, AudioMessage, AudioSource, Link};
 use bsp_rs::audio::{Audio, Format, Pcm, SampleFormat};
+use devkit_audio::aac::{AacConfig, AacDecoder, HeMode};
 use devkit_audio::fifo::{self, FifoConfig, Overrun, Underrun};
 use devkit_audio::opus::{OpusConfig, OpusDecoder};
 use idf::executor::JoinHandle;
@@ -68,7 +69,7 @@ impl PhoneAudio {
             return None;
         };
         let codec = match adb_link::route() {
-            Some(Route::Tcp(_)) => AudioCodec::Opus,
+            Some(Route::Tcp(_)) => AudioCodec::Aac,
             _ => AudioCodec::Pcm,
         };
         let config = FifoConfig { channels: CHANNELS, capacity: BUFFER_FRAMES, prefill: PREFILL_FRAMES, underrun: Underrun::Silence, overrun: Overrun::DropOldest, caps: Caps::SPIRAM };
@@ -153,42 +154,55 @@ fn decode(codec: AudioCodec, packets: sync::Receiver<Packet>, mut fifo: fifo::Wr
 }
 
 fn decode_into(codec: AudioCodec, packets: &sync::Receiver<Packet>, fifo: &mut fifo::Writer<i16>) {
-    let mut opus = match codec {
+    let mut decoder = match codec {
         AudioCodec::Opus => {
             let head = opus_head();
             match OpusDecoder::new(&OpusConfig { head: &head, caps: Caps::SPIRAM }) {
-                Ok(decoder) => Some(decoder),
+                Ok(decoder) => Compressed::Opus(decoder),
                 Err(err) => {
                     error!(TAG, "opus: {err:?}");
                     return;
                 }
             }
         }
-        AudioCodec::Pcm => None,
+        AudioCodec::Aac => {
+            let asc = aac_asc();
+            match AacDecoder::new(&AacConfig { asc: &asc, adts: false, he: HeMode::Off, caps: Caps::SPIRAM, scratch_caps: Some(Caps::INTERNAL), clock: None }) {
+                Ok(decoder) => Compressed::Aac(decoder),
+                Err(err) => {
+                    error!(TAG, "aac: {err:?}");
+                    return;
+                }
+            }
+        }
+        AudioCodec::Pcm => Compressed::None,
     };
     let mut pcm = alloc::vec![0i16; OPUS_FRAMES * usize::from(CHANNELS)];
     loop {
         let Packet::Data(data) = packets.recv() else { return };
-        let samples = match &mut opus {
-            Some(decoder) => match decoder.decode(&data, &mut pcm) {
-                Ok(frames) => &pcm[..frames * usize::from(CHANNELS)],
-                Err(err) => {
-                    error!(TAG, "opus: {err:?}");
-                    continue;
-                }
-            },
-            None => {
+        let decoded = match &mut decoder {
+            Compressed::Opus(decoder) => decoder.decode(&data, &mut pcm).map_err(|err| error!(TAG, "opus: {err:?}")),
+            Compressed::Aac(decoder) => decoder.decode(&data, &mut pcm).map_err(|err| error!(TAG, "aac: {err:?}")),
+            Compressed::None => {
                 let n = (data.len() / 2).min(pcm.len());
                 for (sample, bytes) in pcm[..n].iter_mut().zip(data.chunks_exact(2)) {
                     *sample = i16::from_le_bytes([bytes[0], bytes[1]]);
                 }
-                &pcm[..n - n % usize::from(CHANNELS)]
+                Ok(n / usize::from(CHANNELS))
             }
         };
+        let Ok(frames) = decoded else { continue };
+        let samples = &pcm[..frames * usize::from(CHANNELS)];
         if fifo.write(samples).is_err() {
             return;
         }
     }
+}
+
+enum Compressed {
+    None,
+    Opus(OpusDecoder),
+    Aac(AacDecoder),
 }
 
 // The stream sends raw packets without an OpusHead; this one says 48 kHz stereo.
@@ -199,6 +213,12 @@ fn opus_head() -> [u8; 19] {
     head[9] = CHANNELS;
     head[12..16].copy_from_slice(&RATE.to_le_bytes());
     head
+}
+
+// AAC-LC, 48 kHz, stereo.
+fn aac_asc() -> [u8; 2] {
+    let (aot, rate_index) = (2u16, 3u16);
+    ((aot << 11) | (rate_index << 7) | (u16::from(CHANNELS) << 3)).to_be_bytes()
 }
 
 fn play(output: &'static Audio, mut fifo: fifo::Reader<i16>) {

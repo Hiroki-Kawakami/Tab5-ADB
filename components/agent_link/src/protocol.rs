@@ -455,6 +455,8 @@ pub enum AudioCodec {
     /// Interleaved S16LE.
     Pcm = 1,
     Opus = 2,
+    /// Raw AAC-LC access units, without ADTS headers.
+    Aac = 3,
 }
 
 /// What an audio stream takes from the device.
@@ -484,6 +486,7 @@ impl AudioFormat {
         let codec = match b[0] {
             1 => AudioCodec::Pcm,
             2 => AudioCodec::Opus,
+            3 => AudioCodec::Aac,
             _ => return None,
         };
         Some(Self { codec, channels: b[1], rate: u32::from_le_bytes([b[4], b[5], b[6], b[7]]) })

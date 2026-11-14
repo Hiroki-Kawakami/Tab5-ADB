@@ -156,7 +156,8 @@ fn audio_start_and_format() {
     assert_eq!(audio_start(AudioCodec::Opus, AudioSource::All), [2, 1, 0, 0]);
     assert_eq!(audio_start(AudioCodec::Pcm, AudioSource::Media), [1, 0, 0, 0]);
     assert_eq!(AudioFormat::parse(&[2, 2, 0, 0, 0x80, 0xbb, 0, 0]), Some(AudioFormat { codec: AudioCodec::Opus, channels: 2, rate: 48000 }));
-    assert_eq!(AudioFormat::parse(&[3, 2, 0, 0, 0x80, 0xbb, 0, 0]), None);
+    assert_eq!(AudioFormat::parse(&[3, 2, 0, 0, 0x80, 0xbb, 0, 0]), Some(AudioFormat { codec: AudioCodec::Aac, channels: 2, rate: 48000 }));
+    assert_eq!(AudioFormat::parse(&[4, 2, 0, 0, 0x80, 0xbb, 0, 0]), None);
 }
 
 #[test]
