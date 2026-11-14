@@ -13,7 +13,18 @@ use crate::protocol::{self, AUDIO, AUDIO_START, AudioCodec, AudioFormat, AudioSo
 use crate::link::Activity;
 use crate::{Error, Result};
 
-const WINDOW: u32 = 64 * 1024;
+/// What the device may queue ahead of the reader; more only arrives late.
+const WINDOW_MS: u32 = 200;
+
+/// The stream's bytes per second at the rates the protocol fixes, framing included.
+fn bytes_per_second(codec: AudioCodec) -> u32 {
+    let header = HEADER_BYTES as u32;
+    match codec {
+        AudioCodec::Pcm => 48000 * 2 * 2 + 100 * header,
+        AudioCodec::Opus => 96000 / 8 + 50 * header,
+        AudioCodec::Aac => 128000 / 8 + 47 * header,
+    }
+}
 
 pub enum AudioMessage {
     /// PCM or one Opus packet, as the format says.
@@ -32,7 +43,7 @@ pub struct Audio {
 
 impl Audio {
     pub(crate) async fn open(conn: &Connection, service: &str, codec: AudioCodec, source: AudioSource, volume: AudioVolume, max: u32, activity: &Activity, timeout: Duration) -> Result<Self> {
-        let mut stream = conn.open_with_window(service, WINDOW).await?;
+        let mut stream = conn.open_with_window(service, bytes_per_second(codec) * WINDOW_MS / 1000).await?;
         let mut out = Vec::new();
         protocol::message(&mut out, AUDIO_START, 0, &protocol::audio_start(codec, source, volume));
         stream.write(&out).await?;

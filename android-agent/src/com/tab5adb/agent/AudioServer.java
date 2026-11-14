@@ -35,6 +35,7 @@ final class AudioServer {
     private static final int CHUNK_BYTES = AudioCapture.RATE / 100 * AudioCapture.CHANNELS * 2;
     private static final int VOLUME_CHUNKS = 10;
     private static final int VOLUME_SCALE = 1000;
+    private static final int SEND_BUFFER_MS = 200;
 
     private static Session current;
 
@@ -72,6 +73,17 @@ final class AudioServer {
         }, "audio-accept");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    private static int bytesPerSecond(int codec) {
+        switch (codec) {
+            case CODEC_OPUS:
+                return AudioEncoder.OPUS_BIT_RATE / 8;
+            case CODEC_AAC:
+                return AudioEncoder.AAC_BIT_RATE / 8;
+            default:
+                return AudioCapture.RATE * AudioCapture.CHANNELS * 2;
+        }
     }
 
     private static void closeQuietly(LocalSocket socket) {
@@ -174,6 +186,9 @@ final class AudioServer {
                 reply(out, OK, codec);
                 System.out.println("audio: " + (codec == CODEC_OPUS ? "opus" : codec == CODEC_AAC ? "aac" : "pcm") + (all ? " all" : " media"));
                 watchClose(in);
+                // The default buffer holds seconds of compressed audio; a small one blocks the writes
+                // on a stalled link, so the capture drops what cannot go out instead of sending it late.
+                socket.setSendBufferSize(bytesPerSecond(codec) * SEND_BUFFER_MS / 1000);
                 stream(out, capture, encoder, audio, max);
             } finally {
                 AudioClaim.putBack();

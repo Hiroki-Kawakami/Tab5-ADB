@@ -666,8 +666,10 @@ VOLUME
 - 別の agent が取り込んでいる間は `EBUSY`（「音声の占有」を参照）。
 - Android 12 より前の端末、求められた Opus・AAC-LC を作れない端末では `ENOTSUP`。求められた
   ものと別の codec で答えることはしない。
-- Opus のパケットは 48 kHz・ステレオ・20 ms で、OpusHead は送らない。
-- AAC-LC は 48 kHz・ステレオで、ADTS ヘッダも AudioSpecificConfig も送らない。
+- Opus のパケットは 48 kHz・ステレオ・20 ms・約 96 kbps（VBR）で、OpusHead は送らない。
+- AAC-LC は 48 kHz・ステレオ・128 kbps で、ADTS ヘッダも AudioSpecificConfig も送らない。
+- Tab5 はストリームのウィンドウを約 200 ms 分にする。agent は送れない間の音を手元に溜めず、
+  取り込みが溢れた分は捨てる。
 
 ### 音声の占有
 

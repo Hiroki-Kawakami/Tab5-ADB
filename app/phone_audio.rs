@@ -14,8 +14,11 @@ use agent_link::protocol::{EBUSY, VOLUME_SCALE};
 use agent_link::{AudioCodec, AudioMessage, AudioSource, AudioVolume, Error, Link};
 use bsp_rs::audio::{Audio, Format, Pcm, SampleFormat};
 use devkit_audio::aac::{AacConfig, AacDecoder, HeMode};
+use devkit_audio::drift::{Drift, DriftConfig};
 use devkit_audio::fifo::{self, FifoConfig, Overrun, Underrun};
+use devkit_audio::graph::{GraphBuilder, GraphConfig};
 use devkit_audio::opus::{OpusConfig, OpusDecoder};
+use devkit_audio::resampler::{Resampler, ResamplerConfig, ResamplerKind};
 use idf::executor::JoinHandle;
 use idf::heap::Caps;
 use idf::log::error;
@@ -30,7 +33,12 @@ const RATE: u32 = 48000;
 const CHANNELS: u8 = 2;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(3);
 const BUFFER_FRAMES: usize = RATE as usize;
-const PREFILL_FRAMES: usize = RATE as usize / 10;
+/// Prefill, which the drift also holds, and the skip threshold.
+const PCM_BUFFERING: (usize, usize) = (RATE as usize / 10, RATE as usize * 80 / 1000);
+/// The mirror player outranks the decoder on core 1, so this has to outlast a
+/// decode waiting on it while the overlay is redrawn.
+const DECODED_BUFFERING: (usize, usize) = (RATE as usize / 4, RATE as usize / 4);
+const SKIP_FADE_FRAMES: usize = RATE as usize / 100;
 const WRITE_FRAMES: usize = RATE as usize / 100;
 const PACKETS: usize = 32;
 const UNITY_VOLUME: u16 = 100;
@@ -75,11 +83,15 @@ impl PhoneAudio {
             Some(Route::Tcp(_)) => AudioCodec::Aac,
             _ => AudioCodec::Pcm,
         };
-        let config = FifoConfig { channels: CHANNELS, capacity: BUFFER_FRAMES, prefill: PREFILL_FRAMES, underrun: Underrun::Silence, overrun: Overrun::DropOldest, caps: Caps::SPIRAM };
+        let buffering = match codec {
+            AudioCodec::Pcm => PCM_BUFFERING,
+            AudioCodec::Opus | AudioCodec::Aac => DECODED_BUFFERING,
+        };
+        let config = FifoConfig { channels: CHANNELS, capacity: BUFFER_FRAMES, prefill: buffering.0, underrun: Underrun::Silence, overrun: Overrun::DropOldest, caps: Caps::SPIRAM };
         let (writer, reader) = fifo::new::<i16>(&config).inspect_err(|err| error!(TAG, "fifo: {err:?}")).ok()?;
         let (packets, received) = sync::channel(PACKETS);
         let decode = Builder::new().name("phone-decode").stack_size(STACK).priority(DECODE_PRIORITY).core(Some(CORE)).spawn(move || decode(codec, received, writer)).inspect_err(|err| error!(TAG, "decode: {err}")).ok()?;
-        let play = match Builder::new().name("phone-play").stack_size(STACK).priority(PLAY_PRIORITY).core(Some(CORE)).spawn(move || play(output, reader)) {
+        let play = match Builder::new().name("phone-play").stack_size(STACK).priority(PLAY_PRIORITY).core(Some(CORE)).spawn(move || play(output, reader, buffering)) {
             Ok(play) => play,
             Err(err) => {
                 error!(TAG, "play: {err}");
@@ -245,7 +257,26 @@ fn aac_asc() -> [u8; 2] {
     ((aot << 11) | (rate_index << 7) | (u16::from(CHANNELS) << 3)).to_be_bytes()
 }
 
-fn play(output: &'static Audio, mut fifo: fifo::Reader<i16>) {
+fn play(output: &'static Audio, fifo: fifo::Reader<i16>, (prefill, skip_threshold): (usize, usize)) {
+    let resampler = ResamplerConfig { kind: ResamplerKind::Cubic, channels: CHANNELS, in_rate: RATE, out_rate: RATE, max_in_frames: 0, taps: 0, phases: 0, caps: Caps::DEFAULT };
+    let (resampler, _) = match Resampler::<i16>::new(&resampler) {
+        Ok(resampler) => resampler,
+        Err(err) => {
+            error!(TAG, "resampler: {err:?}");
+            return;
+        }
+    };
+    let drift = Drift::new(&DriftConfig { sample_rate: RATE, target_frames: prefill, skip_threshold_frames: skip_threshold, skip_fade_frames: SKIP_FADE_FRAMES, ..Default::default() });
+    let mut graph = GraphBuilder::new(&GraphConfig { max_frames: WRITE_FRAMES, caps: Caps::DEFAULT });
+    let source = graph.add_fifo(fifo);
+    let synced = graph.add_resampler(source, resampler, Some(drift));
+    let mut graph = match graph.build() {
+        Ok(graph) => graph,
+        Err(err) => {
+            error!(TAG, "graph: {err:?}");
+            return;
+        }
+    };
     let mut stream = match output.open(Format { sample_rate: RATE, sample: SampleFormat::S16, channels: CHANNELS }) {
         Ok(stream) => stream,
         Err(err) => {
@@ -254,7 +285,7 @@ fn play(output: &'static Audio, mut fifo: fifo::Reader<i16>) {
         }
     };
     let mut pcm = alloc::vec![0i16; WRITE_FRAMES * usize::from(CHANNELS)];
-    while fifo.read(&mut pcm).is_ok() {
+    while graph.read(synced, &mut pcm).is_ok() {
         if let Err(err) = stream.write(Pcm::S16(&pcm)) {
             error!(TAG, "write: {err}");
             break;

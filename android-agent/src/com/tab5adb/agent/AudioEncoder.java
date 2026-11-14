@@ -19,8 +19,8 @@ import java.util.List;
 // 20 ms of 48 kHz stereo S16 in, raw Opus packets or AAC-LC access units out.
 final class AudioEncoder implements AutoCloseable {
     static final int FRAME_BYTES = AudioCapture.RATE / 50 * AudioCapture.CHANNELS * 2;
-    private static final int OPUS_BIT_RATE = 96000;
-    private static final int AAC_BIT_RATE = 128000;
+    static final int OPUS_BIT_RATE = 96000;
+    static final int AAC_BIT_RATE = 128000;
     private static final long INPUT_TIMEOUT_US = 100_000;
     private static final long OUTPUT_TIMEOUT_US = 10_000;
 
