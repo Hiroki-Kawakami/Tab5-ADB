@@ -21,6 +21,7 @@ final class Input {
     private static final int INJECT_MODE_ASYNC = 0;
     private static final int MAX_POINTERS = 10;
     private static final long UINT32_MASK = 0xFFFFFFFFL;
+    private static final long DRIFT_INTERVAL_MS = 10_000;
 
     private final Object inputManager;
     private final Method injectInputEvent;
@@ -30,8 +31,10 @@ final class Input {
     private final float[] xs = new float[MAX_POINTERS];
     private final float[] ys = new float[MAX_POINTERS];
     private int count;
-    private long sourceAnchor;
-    private long uptimeAnchor;
+    private boolean synced;
+    private long source;
+    private long offset;
+    private long offsetAt;
     private long downTime;
     private long lastTime;
     private final Map<Integer, Long> heldKeys = new LinkedHashMap<>();
@@ -50,11 +53,6 @@ final class Input {
     }
 
     synchronized void touch(long time, int n, int[] pid, float[] px, float[] py) {
-        if (count == 0 && n > 0) {
-            sourceAnchor = time;
-            uptimeAnchor = SystemClock.uptimeMillis();
-            lastTime = 0;
-        }
         long when = eventTime(time);
         boolean moved = false;
         for (int i = 0; i < count; i++) {
@@ -127,13 +125,29 @@ final class Input {
         heldKeys.clear();
     }
 
+    // Maps the Tab5 clock by the lowest latency seen so far rather than the
+    // first sample's: a delayed first sample would push every later one to its
+    // arrival time, letting network jitter into the gesture's velocity.
     private long eventTime(long time) {
-        long delta = (time - sourceAnchor) & UINT32_MASK;
-        if (delta >= 0x80000000L) {
-            delta -= 0x100000000L;
+        long now = SystemClock.uptimeMillis();
+        if (synced) {
+            long delta = (time - source) & UINT32_MASK;
+            if (delta >= 0x80000000L) {
+                delta -= 0x100000000L;
+            }
+            source += delta;
+        } else {
+            source = time;
         }
-        long when = Math.min(uptimeAnchor + delta, SystemClock.uptimeMillis());
-        when = Math.max(when, lastTime);
+        long latest = now - source;
+        long allowed = offset + (now - offsetAt) / DRIFT_INTERVAL_MS;
+        if (!synced || latest <= allowed) {
+            synced = true;
+            offset = latest;
+            offsetAt = now;
+            allowed = latest;
+        }
+        long when = Math.max(source + allowed, lastTime);
         lastTime = when;
         return when;
     }

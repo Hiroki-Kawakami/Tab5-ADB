@@ -485,8 +485,8 @@ TOUCH
   agent は捨てる。注入中の指があれば取り消す（`ACTION_CANCEL`）。
 - Tab5 はフレームの外で触れた指を、フレームに入るまで載せない。入った最初の位置で触れた
   ことになる。フレームの中で触れた指が外へ出たら、座標をフレームの縁に寄せて載せ続ける。
-- agent はジェスチャーの最初のメッセージの `time_ms` を `SystemClock.uptimeMillis()` に
-  対応付け、以降はその差を `MotionEvent` の時刻にする。
+- agent は `time_ms` に、届いたときの `SystemClock.uptimeMillis()` との差のこれまでの最小値
+  を足して `MotionEvent` の時刻にする。時計のずれを追うため、最小値は 10 秒ごとに 1 ms 緩める。
 - 前と同じ内容のメッセージは Tab5 は送らない。
 
 ### KEY
