@@ -118,8 +118,8 @@ fn indexed(i: u8) -> Color {
     }
 }
 
-/// One screen row, laid out: a run per foreground, with blanks where the
-/// others are, so every run starts at the first column.
+/// One screen row, laid out: a run per foreground, each character over the
+/// columns it takes.
 #[derive(Default)]
 struct Line {
     fills: Vec<(Range<u16>, Ink)>,
@@ -127,8 +127,19 @@ struct Line {
     underlines: Vec<(Range<u16>, Ink, bool)>,
 }
 
+/// The characters of `cells`, as `(column, span, char)`, that `keep` takes.
+fn placed<'a>(cells: &'a [Cell], mut keep: impl FnMut(usize) -> bool + 'a) -> impl Iterator<Item = (u16, u8, char)> + 'a {
+    cells.iter().enumerate().filter_map(move |(col, cell)| {
+        if cell.ch == ' ' || cell.attr & attr::WIDE_TAIL != 0 || !keep(col) {
+            return None;
+        }
+        let wide = cells.get(col + 1).is_some_and(|next| next.attr & attr::WIDE_TAIL != 0);
+        Some((col as u16, if wide { 2 } else { 1 }, cell.ch))
+    })
+}
+
 impl Line {
-    fn build(&mut self, cells: &[Cell], text: &mut String) {
+    fn build(&mut self, cells: &[Cell], advance: i32) {
         let looks: Vec<Look> = cells.iter().map(Look::of).collect();
         self.fills.clear();
         self.underlines.clear();
@@ -136,23 +147,21 @@ impl Line {
         spans(&looks, |l| l.underline.then_some((l.fg, l.dim)), |span, (fg, dim)| self.underlines.push((span, fg, dim)));
         let mut inks: Vec<(Ink, bool)> = Vec::new();
         for (cell, look) in cells.iter().zip(&looks) {
-            if cell.ch != b' ' && !inks.contains(&(look.fg, look.dim)) {
+            if cell.ch != ' ' && !inks.contains(&(look.fg, look.dim)) {
                 inks.push((look.fg, look.dim));
             }
         }
         self.runs.truncate(inks.len());
         for (i, &(fg, dim)) in inks.iter().enumerate() {
-            text.clear();
-            text.extend(cells.iter().zip(&looks).map(|(cell, look)| if (look.fg, look.dim) == (fg, dim) { cell.ch as char } else { ' ' }));
-            let trimmed = text.trim_end();
+            let chars = placed(cells, |col| (looks[col].fg, looks[col].dim) == (fg, dim));
             match self.runs.get_mut(i) {
                 Some(run) => {
                     (run.0, run.1) = (fg, dim);
-                    run.2.layout(&MONO, trimmed, &TextOptions::default());
+                    run.2.layout_cells(&MONO, chars, advance);
                 }
                 None => {
                     let mut run = TextRun::new_in(Caps::SPIRAM);
-                    run.layout(&MONO, trimmed, &TextOptions::default());
+                    run.layout_cells(&MONO, chars, advance);
                     self.runs.push((fg, dim, run));
                 }
             }
@@ -191,7 +200,6 @@ pub struct TerminalScreen {
     advance: i32,
     lines: Vec<Line>,
     cursor_run: TextRun<Caps>,
-    text: String,
     size: (i16, i16),
     sized: bool,
     input: Option<Sender<Input>>,
@@ -210,7 +218,6 @@ impl TerminalScreen {
             advance: measure_advance(),
             lines: Vec::new(),
             cursor_run: TextRun::new_in(Caps::SPIRAM),
-            text: String::new(),
             size: (0, 0),
             sized: false,
             input: None,
@@ -234,8 +241,11 @@ impl TerminalScreen {
         Rect::new(0, self.y(rows.start), self.size.0, (rows.end - rows.start) as i16 * MONO.line_height())
     }
 
+    /// The cursor's cell, both columns of a two-column character.
     fn cell_rect(&self, (row, col): (usize, usize)) -> Rect {
-        Rect::new(self.x(col), self.y(row), self.x(col + 1) - self.x(col), MONO.line_height())
+        let wide = self.term.row(row, 0).get(col + 1).is_some_and(|next| next.attr & attr::WIDE_TAIL != 0);
+        let end = col + if wide { 2 } else { 1 };
+        Rect::new(self.x(col), self.y(row), self.x(end) - self.x(col), MONO.line_height())
     }
 
     fn cursor(&self) -> Option<(usize, usize)> {
@@ -300,7 +310,7 @@ impl TerminalScreen {
             None => 0..0,
         };
         for row in rows.clone() {
-            self.lines[row].build(self.term.row(row, self.offset), &mut self.text);
+            self.lines[row].build(self.term.row(row, self.offset), self.advance);
         }
         if !rows.is_empty() {
             cx.redraw_rect(id!("term"), self.rows_rect(rows));
@@ -313,10 +323,9 @@ impl TerminalScreen {
             self.drawn_cursor = cursor;
         }
         if let Some(at) = cursor {
-            let ch = self.term.row(at.0, 0)[at.1].ch;
-            self.text.clear();
-            self.text.push(ch as char);
-            self.cursor_run.layout(&MONO, &self.text, &TextOptions::default());
+            let row = self.term.row(at.0, 0);
+            let cell = &row[at.1..(at.1 + 2).min(row.len())];
+            self.cursor_run.layout_cells(&MONO, placed(cell, |col| col == 0), self.advance);
             self.blink_on = true;
             cx.redraw_rect(id!("term"), self.cell_rect(at));
         }

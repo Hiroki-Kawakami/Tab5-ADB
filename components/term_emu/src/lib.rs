@@ -28,21 +28,22 @@ pub mod attr {
     pub const FG_DEFAULT: u8 = 1 << 4;
     /// `bg` means nothing: the theme's background.
     pub const BG_DEFAULT: u8 = 1 << 5;
+    /// The right half of the two-column character in the cell to the left;
+    /// `ch` is a space.
+    pub const WIDE_TAIL: u8 = 1 << 6;
 }
 
 /// One character cell. Colors are xterm 256-color indices.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
-    /// Printable ASCII; `?` stands for any other character, followed by a
-    /// blank cell when it is a wide one.
-    pub ch: u8,
+    pub ch: char,
     pub fg: u8,
     pub bg: u8,
     pub attr: u8,
 }
 
 impl Cell {
-    pub const BLANK: Cell = Cell { ch: b' ', fg: 0, bg: 0, attr: attr::FG_DEFAULT | attr::BG_DEFAULT };
+    pub const BLANK: Cell = Cell { ch: ' ', fg: 0, bg: 0, attr: attr::FG_DEFAULT | attr::BG_DEFAULT };
 }
 
 /// Keys that send a sequence rather than a character.
@@ -69,8 +70,11 @@ pub enum Key {
 const MAX_COLS: usize = 512;
 const MAX_ROWS: usize = 256;
 
-/// DEC special graphics 0x60..=0x7e in ASCII, as the font has no box drawing.
-const DEC_GRAPHICS: &[u8; 31] = b"+#    '#  +++++----_++++|<>*!#.";
+/// DEC special graphics, 0x60..=0x7e.
+const DEC_GRAPHICS: [char; 31] = [
+    '◆', '▒', '␉', '␌', '␍', '␊', '°', '±', '␤', '␋', '┘', '┐', '┌', '└', '┼', '⎺', '⎻', '─', '⎼', '⎽', '├', '┤', '┴',
+    '┬', '│', '≤', '≥', 'π', '≠', '£', '·',
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Pen {
@@ -167,12 +171,35 @@ fn copy_row(to: &mut [Cell], from: &[Cell]) {
     let n = to.len().min(from.len());
     to[..n].copy_from_slice(&from[..n]);
     to[n..].fill(Cell::BLANK);
+    if from.get(n).is_some_and(|cut| cut.attr & attr::WIDE_TAIL != 0) {
+        to[n - 1].ch = ' ';
+    }
 }
 
-/// Coarse wcwidth == 2 ranges, to keep the cursor column in step with the
-/// device's.
-fn is_wide(cp: u32) -> bool {
-    matches!(cp, 0x1100..=0x115f | 0x2e80..=0xa4cf | 0xac00..=0xd7a3 | 0xf900..=0xfaff | 0xfe30..=0xfe4f | 0xff00..=0xff60 | 0xffe0..=0xffe6 | 0x1f300..=0x1f64f | 0x20000..=0x3fffd)
+/// Columns a character takes, `None` for a control character. Marks and
+/// formats take none, so a terminal on the other end counts as this one does.
+fn columns(c: char) -> Option<usize> {
+    use unicode::{EastAsianWidth, GeneralCategory};
+    match unicode::general_category(c) {
+        GeneralCategory::Control => return None,
+        GeneralCategory::NonspacingMark | GeneralCategory::EnclosingMark | GeneralCategory::Format => return Some(0),
+        _ => {}
+    }
+    match unicode::east_asian_width(c) {
+        EastAsianWidth::Wide | EastAsianWidth::Fullwidth => Some(2),
+        _ => Some(1),
+    }
+}
+
+/// Blanks both halves of a two-column character that the boundary before cell
+/// `at` runs through.
+fn split_wide(line: &mut [Cell], at: usize) {
+    if let Some(tail) = line.get_mut(at)
+        && tail.attr & attr::WIDE_TAIL != 0
+    {
+        tail.attr &= !attr::WIDE_TAIL;
+        line[at - 1].ch = ' ';
+    }
 }
 
 pub struct Terminal<A: Allocator + Clone = Global> {
@@ -194,7 +221,7 @@ pub struct Terminal<A: Allocator + Clone = Global> {
     autowrap: bool,
     insert: bool,
     dec_graphics: bool,
-    last_printed: u8,
+    last_printed: char,
     saved: Saved,
     alt_saved: Saved,
     dirty: Option<Range<usize>>,
@@ -232,7 +259,7 @@ impl<A: Allocator + Clone> Terminal<A> {
             autowrap: true,
             insert: false,
             dec_graphics: false,
-            last_printed: b' ',
+            last_printed: ' ',
             saved: Saved::HOME,
             alt_saved: Saved::HOME,
             dirty: Some(0..rows),
@@ -347,7 +374,7 @@ impl<A: Allocator + Clone> Terminal<A> {
         self.autowrap = true;
         self.insert = false;
         self.dec_graphics = false;
-        self.last_printed = b' ';
+        self.last_printed = ' ';
         self.saved = Saved::HOME;
         self.alt_saved = Saved::HOME;
         self.parser = Parser::new();
@@ -427,12 +454,15 @@ impl<A: Allocator + Clone> Terminal<A> {
 
     /// Erased cells keep the background (BCE) but no other attribute.
     fn blank(&self) -> Cell {
-        Cell { ch: b' ', fg: 0, bg: self.pen.bg, attr: (self.pen.attr & attr::BG_DEFAULT) | attr::FG_DEFAULT }
+        Cell { ch: ' ', fg: 0, bg: self.pen.bg, attr: (self.pen.attr & attr::BG_DEFAULT) | attr::FG_DEFAULT }
     }
 
     fn erase(&mut self, row: usize, cols: Range<usize>) {
         let blank = self.blank();
-        self.screen().row_mut(row)[cols].fill(blank);
+        let line = self.screen().row_mut(row);
+        split_wide(line, cols.start);
+        split_wide(line, cols.end);
+        line[cols].fill(blank);
         self.mark_dirty(row..row + 1);
     }
 
@@ -493,38 +523,77 @@ impl<A: Allocator + Clone> Terminal<A> {
         self.wrap_pending = false;
     }
 
-    fn put(&mut self, ch: u8) {
+    /// A two-column character that does not fit the last column goes to the
+    /// next line, or with autowrap off to the two before the margin.
+    fn put(&mut self, ch: char, width: usize) {
         if self.wrap_pending {
             self.carriage_return();
             self.line_feed();
+        }
+        if width == 2 && self.col == self.cols - 1 {
+            if self.autowrap {
+                let (row, col) = (self.row, self.col);
+                self.erase(row, col..col + 1);
+                self.carriage_return();
+                self.line_feed();
+            } else {
+                self.col -= 1;
+            }
         }
         let (row, col, cols, insert) = (self.row, self.col, self.cols, self.insert);
         let cell = Cell { ch, fg: self.pen.fg, bg: self.pen.bg, attr: self.pen.attr };
         let line = self.screen().row_mut(row);
         if insert {
-            line.copy_within(col..cols - 1, col + 1);
+            split_wide(line, col);
+            split_wide(line, cols - width);
+            line.copy_within(col..cols - width, col + width);
         }
+        split_wide(line, col);
+        split_wide(line, col + width);
         line[col] = cell;
+        if width == 2 {
+            line[col + 1] = Cell { ch: ' ', attr: cell.attr | attr::WIDE_TAIL, ..cell };
+        }
         self.mark_dirty(row..row + 1);
-        if col == cols - 1 {
+        if col + width == cols {
+            self.col = cols - 1;
             self.wrap_pending = self.autowrap;
         } else {
-            self.col += 1;
+            self.col += width;
         }
         self.last_printed = ch;
     }
 
+    /// Puts a mark onto the character printed before it: a kana takes a
+    /// voicing mark as its composed form, other marks are dropped.
+    fn combine(&mut self, mark: char) {
+        let col = if self.wrap_pending {
+            self.col
+        } else if self.col > 0 {
+            self.col - 1
+        } else {
+            return;
+        };
+        let row = self.row;
+        let line = self.screen().row_mut(row);
+        let col = if line[col].attr & attr::WIDE_TAIL != 0 { col - 1 } else { col };
+        if let Some(composed) = unicode::compose_kana(line[col].ch, mark) {
+            line[col].ch = composed;
+            self.last_printed = composed;
+            self.mark_dirty(row..row + 1);
+        }
+    }
+
     fn print(&mut self, cp: u32) {
-        match cp {
-            0..=0x1f | 0x7f => {}
-            0x60..=0x7e if self.dec_graphics => self.put(DEC_GRAPHICS[(cp - 0x60) as usize]),
-            0x20..=0x7e => self.put(cp as u8),
-            _ => {
-                self.put(b'?');
-                if is_wide(cp) {
-                    self.put(b' ');
-                }
-            }
+        if self.dec_graphics && (0x60..=0x7e).contains(&cp) {
+            self.put(DEC_GRAPHICS[(cp - 0x60) as usize], 1);
+            return;
+        }
+        let ch = char::from_u32(cp).unwrap_or(char::REPLACEMENT_CHARACTER);
+        match columns(ch) {
+            None => {}
+            Some(0) => self.combine(ch),
+            Some(width) => self.put(ch, width),
         }
     }
 
@@ -651,18 +720,24 @@ impl<A: Allocator + Clone> Terminal<A> {
             b'@' | b'P' | b'X' => {
                 let (row, col, cols) = (self.row, self.col, self.cols);
                 let n = (p(0, 1) as usize).clamp(1, cols - col);
+                let blank = self.blank();
                 let line = self.screen().row_mut(row);
                 match last {
                     b'@' => {
+                        split_wide(line, col);
+                        split_wide(line, cols - n);
                         line.copy_within(col..cols - n, col + n);
-                        self.erase(row, col..col + n);
+                        line[col..col + n].fill(blank);
                     }
                     b'P' => {
+                        split_wide(line, col);
+                        split_wide(line, col + n);
                         line.copy_within(col + n..cols, col);
-                        self.erase(row, cols - n..cols);
+                        line[cols - n..].fill(blank);
                     }
                     _ => self.erase(row, col..col + n),
                 }
+                self.mark_dirty(row..row + 1);
             }
             b'L' | b'M' => {
                 if (self.scroll_top..=self.scroll_bottom).contains(&self.row) {
@@ -682,8 +757,9 @@ impl<A: Allocator + Clone> Terminal<A> {
             b'T' => self.scroll_down(p(0, 1) as usize),
             b'b' => {
                 let n = (p(0, 1) as usize).min(self.cols * self.rows);
+                let (ch, width) = (self.last_printed, columns(self.last_printed).unwrap_or(1).max(1));
                 for _ in 0..n {
-                    self.put(self.last_printed);
+                    self.put(ch, width);
                 }
             }
             b'm' => self.sgr(params),

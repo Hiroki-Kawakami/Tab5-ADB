@@ -8,7 +8,7 @@ use alloc::string::String;
 use crate::{Cell, Key, Terminal, attr};
 
 fn text(t: &Terminal, row: usize, offset: usize) -> String {
-    let line: String = t.row(row, offset).iter().map(|c| c.ch as char).collect();
+    let line: String = t.row(row, offset).iter().filter(|c| c.attr & attr::WIDE_TAIL == 0).map(|c| c.ch).collect();
     String::from(line.trim_end())
 }
 
@@ -166,7 +166,77 @@ fn sgr() {
     t.feed(b"\x1b[44m\x1b[2;5H\x1b[K");
     let r = t.row(1, 0);
     assert!(r[6].bg == 4 && r[6].attr & attr::BG_DEFAULT == 0);
-    assert_eq!(r[6].ch, b' ');
+    assert_eq!(r[6].ch, ' ');
+}
+
+#[test]
+fn wide_characters_take_two_columns() {
+    let mut t = small();
+    t.feed("a日本b".as_bytes());
+    assert_eq!(text(&t, 0, 0), "a日本b");
+    assert_eq!(t.cursor(), (0, 6));
+    let r = t.row(0, 0);
+    assert!(r[2].attr & attr::WIDE_TAIL != 0 && r[2].ch == ' ');
+    assert_eq!(r[3].ch, '本');
+}
+
+#[test]
+fn a_wide_character_at_the_margin_wraps() {
+    let mut t = small();
+    t.feed("123456789日".as_bytes());
+    assert_eq!(text(&t, 0, 0), "123456789");
+    assert_eq!(text(&t, 1, 0), "日");
+    assert_eq!(t.cursor(), (1, 2));
+    t.feed("\x1b[?7l\x1b[1;10H語".as_bytes());
+    assert_eq!(text(&t, 0, 0), "12345678語");
+}
+
+#[test]
+fn overwriting_half_of_a_wide_character_blanks_the_other() {
+    let mut t = small();
+    t.feed("日本語\rX".as_bytes());
+    assert_eq!(text(&t, 0, 0), "X 本語");
+    t.feed("\x1b[1;4HY".as_bytes());
+    assert_eq!(text(&t, 0, 0), "X  Y語");
+    t.feed("\x1b[1;6H\x1b[K".as_bytes());
+    assert_eq!(text(&t, 0, 0), "X  Y");
+    assert!(t.row(0, 0).iter().all(|c| c.attr & attr::WIDE_TAIL == 0));
+}
+
+#[test]
+fn inserting_and_deleting_keep_wide_characters_whole() {
+    let mut t = small();
+    t.feed("ab日本語\x1b[1;1H\x1b[3@".as_bytes());
+    assert_eq!(text(&t, 0, 0), "   ab日本");
+    t.feed("\x1b[1;1H\x1b[3P".as_bytes());
+    assert_eq!(text(&t, 0, 0), "ab日本");
+    t.feed("\x1b[1;4H\x1b[P".as_bytes());
+    assert_eq!(text(&t, 0, 0), "ab 本");
+    assert_eq!(t.row(0, 0)[2].attr & attr::WIDE_TAIL, 0);
+    assert_eq!(t.row(0, 0)[3].ch, '本');
+}
+
+#[test]
+fn voicing_marks_compose_and_other_marks_drop() {
+    let mut t = small();
+    t.feed("か\u{3099}ハ\u{309A}e\u{301}\u{200B}".as_bytes());
+    assert_eq!(text(&t, 0, 0), "がパe");
+    assert_eq!(t.cursor(), (0, 5));
+}
+
+#[test]
+fn dec_graphics_draw_lines() {
+    let mut t = small();
+    t.feed(b"\x1b(0lqk\x1b(Bq");
+    assert_eq!(text(&t, 0, 0), "┌─┐q");
+}
+
+#[test]
+fn narrowing_cuts_a_wide_character_whole() {
+    let mut t = Terminal::new(6, 2, 10);
+    t.feed("abcd日\r\n".as_bytes());
+    t.resize(5, 2);
+    assert_eq!(text(&t, 0, 0), "abcd");
 }
 
 #[test]
@@ -210,20 +280,20 @@ fn osc_and_charset() {
     t.feed(b"\r\x1b]2;t\x1b\\ko");
     assert_eq!(text(&t, 0, 0), "ko");
     t.feed(b"\r\n\x1b(0lqqk\x1b(Bza");
-    assert_eq!(text(&t, 1, 0), "+--+za");
+    assert_eq!(text(&t, 1, 0), "┌──┐za");
 }
 
 #[test]
 fn utf8() {
     let mut t = small();
     t.feed("a\u{e9}b".as_bytes());
-    assert_eq!(text(&t, 0, 0), "a?b");
+    assert_eq!(text(&t, 0, 0), "a\u{e9}b");
     assert_eq!(t.cursor().1, 3);
     t.feed("\r\n\u{65e5}x".as_bytes());
-    assert_eq!(text(&t, 1, 0), "? x");
+    assert_eq!(text(&t, 1, 0), "\u{65e5}x");
     assert_eq!(t.cursor().1, 3);
     t.feed(b"\r\n\xff y");
-    assert_eq!(text(&t, 2, 0), "? y");
+    assert_eq!(text(&t, 2, 0), "\u{fffd} y");
 }
 
 #[test]
