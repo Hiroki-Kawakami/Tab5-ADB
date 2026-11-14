@@ -1,0 +1,79 @@
+name: Firmware
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      force-image:
+        description: Rebuild the build image
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-ref: ${{ steps.image.outputs.image-ref }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+          fetch-depth: 0
+      - id: image
+        uses: ./esp-devkit/ci/image
+        with:
+          force: ${{ inputs.force-image }}
+
+  firmware:
+    needs: image
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [esp32p4]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=checkbuild-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: ./esp-devkit/ci/firmware
+        with:
+          image-ref: ${{ needs.image.outputs.image-ref }}
+          project-dir: ${{ matrix.project }}
+          version: ${{ steps.version.outputs.version }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: firmware
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: esp32p4
+          path: artifacts
+      - run: |
+          mkdir dist
+          cp artifacts/merged-binary.bin "dist/tab5-adb-esp32p4-$GITHUB_REF_NAME.bin"
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --title "Firmware $GITHUB_REF_NAME" --notes ""
