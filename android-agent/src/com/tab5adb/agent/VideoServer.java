@@ -384,13 +384,12 @@ final class VideoServer {
                                 break;
                             }
                             message = f.strips.get(i);
+                            // Before the write: its ack can come back before the write returns.
+                            pacer.wrote(message.length, System.nanoTime());
                         }
                         out.write(message);
                         out.flush();
                         bytes += message.length;
-                        synchronized (this) {
-                            pacer.wrote(message.length, System.nanoTime());
-                        }
                     }
                     synchronized (this) {
                         long now = System.nanoTime();
