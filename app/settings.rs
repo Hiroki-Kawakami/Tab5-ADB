@@ -7,6 +7,7 @@ use core::ffi::CStr;
 
 use agent_link::AudioVolume;
 use agent_link::protocol::VOLUME_SCALE;
+use bsp_rs::audio::Audio;
 use bsp_rs::display::{Display, ImageFormat};
 use idf::log::error;
 use idf::nvs::{Key, Nvs, Raw, Value};
@@ -173,7 +174,9 @@ const fn keep<T>(value: T) -> T {
 struct Store {
     nvs: Option<Nvs>,
     display: Option<&'static Display>,
+    audio: Option<&'static Audio>,
     brightness: Setting<u8>,
+    equalizer: Setting<bool>,
     color_depth: Setting<ColorDepth>,
     mirror_playback: Setting<AudioPlayback>,
     now_playing_playback: Setting<AudioPlayback>,
@@ -188,7 +191,9 @@ struct Store {
 static STORE: Mutex<Store> = Mutex::new(Store {
     nvs: None,
     display: None,
+    audio: None,
     brightness: Setting::new(c"brightness", 80, |percent| percent.clamp(MIN_BRIGHTNESS, 100)),
+    equalizer: Setting::new(c"equalizer", true, keep),
     color_depth: Setting::new(c"color_depth", ColorDepth::Bits24, keep),
     mirror_playback: Setting::new(c"playback", AudioPlayback::Tab5, keep),
     now_playing_playback: Setting::new(c"np_playback", AudioPlayback::Tab5, keep),
@@ -205,6 +210,7 @@ pub fn init() {
     match Nvs::open(NAMESPACE) {
         Ok(nvs) => {
             store.brightness.load(&nvs);
+            store.equalizer.load(&nvs);
             store.color_depth.load(&nvs);
             store.mirror_playback.load(&nvs);
             store.now_playing_playback.load(&nvs);
@@ -226,6 +232,12 @@ pub fn set_display(display: &'static Display) {
     apply_brightness(&store);
 }
 
+pub fn set_audio(audio: &'static Audio) {
+    let mut store = STORE.lock();
+    store.audio = Some(audio);
+    apply_equalizer(&store);
+}
+
 pub fn commit() {
     let mut guard = STORE.lock();
     let store = &mut *guard;
@@ -233,6 +245,7 @@ pub fn commit() {
         return;
     };
     let mut written = store.brightness.commit(nvs);
+    written |= store.equalizer.commit(nvs);
     written |= store.color_depth.commit(nvs);
     written |= store.mirror_playback.commit(nvs);
     written |= store.now_playing_playback.commit(nvs);
@@ -255,6 +268,17 @@ pub fn set_brightness(percent: u8) {
     let mut store = STORE.lock();
     if store.brightness.set(percent) {
         apply_brightness(&store);
+    }
+}
+
+pub fn equalizer() -> bool {
+    STORE.lock().equalizer.value
+}
+
+pub fn set_equalizer(on: bool) {
+    let mut store = STORE.lock();
+    if store.equalizer.set(on) {
+        apply_equalizer(&store);
     }
 }
 
@@ -307,6 +331,14 @@ fn apply_brightness(store: &Store) {
         && let Err(err) = display.set_brightness(store.brightness.value)
     {
         error!(TAG, "set_brightness: {err}");
+    }
+}
+
+fn apply_equalizer(store: &Store) {
+    if let Some(audio) = store.audio
+        && let Err(err) = audio.set_eq_enabled(store.equalizer.value)
+    {
+        error!(TAG, "set_eq_enabled: {err}");
     }
 }
 

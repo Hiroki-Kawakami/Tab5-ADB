@@ -80,6 +80,7 @@ pub fn run() {
         files::set_sd(sd);
     }
     if let Some(audio) = board.audio {
+        settings::set_audio(audio);
         phone_audio::set_output(audio);
     }
     adb_link::start(board.power);

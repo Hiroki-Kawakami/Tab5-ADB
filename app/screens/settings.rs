@@ -70,12 +70,11 @@ const AGENT_MODE_NOTE: &str = "Normal runs tab5adb-agent on the phone for screen
 
 pub struct SettingsScreen {
     switching: bool,
-    equalizer: bool,
 }
 
 impl SettingsScreen {
     pub(crate) fn new() -> Self {
-        Self { switching: false, equalizer: true }
+        Self { switching: false }
     }
 
     fn switch_color_depth(&mut self, depth: ColorDepth, cx: &mut Cx<Self>) {
@@ -151,7 +150,7 @@ impl Component for SettingsScreen {
                 let scale = u32::from(VOLUME_SCALE);
                 settings::set_phone_volume(AudioVolume { level: ((u32::from(value) * scale + 127) / 255) as u16, muted: false });
             }
-            SettingsMsg::Equalizer(on) => self.equalizer = on,
+            SettingsMsg::Equalizer(on) => settings::set_equalizer(on),
             SettingsMsg::OpenMirrorPlayback => {
                 if let Some(anchor) = cx.tap_rect() {
                     cx.popup(DropdownMenu::new(anchor, &PLAYBACK_LABELS, playback_index(settings::mirror_playback()), cx.handle(), SettingsMsg::MirrorPlayback));
@@ -183,6 +182,7 @@ impl Component for SettingsScreen {
         let dark = ui.color_mode() == ColorMode::Dark;
         let brightness = settings::brightness();
         let brightness_value = (u32::from(brightness) * 255 / 100) as u8;
+        let equalizer = settings::equalizer();
         ui.column([
             top_bar(ui, Some(SettingsMsg::Back), "Settings", ui.empty()).scroll_border(id!("content")),
             table(
@@ -204,7 +204,7 @@ impl Component for SettingsScreen {
                         ui,
                         [
                             slider_row(ui, "Volume", ui.format(format_args!("{}", volume * 100 / scale)), volume_value, |d| SettingsMsg::Volume(slider_value(d))).id(id!("volume")),
-                            table_row(ui, [table_label(ui, "Equalizer"), switch(ui, self.equalizer, SettingsMsg::Equalizer(!self.equalizer)).id(id!("equalizer"))]),
+                            table_row(ui, [table_label(ui, "Equalizer"), switch(ui, equalizer, SettingsMsg::Equalizer(!equalizer)).id(id!("equalizer"))]),
                         ],
                     ),
                     table_header(ui, "ANDROID DEVICE"),
