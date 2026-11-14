@@ -513,11 +513,20 @@ impl Player {
     fn redraw(&mut self, frame: &ExternalFrame, sram: &mut Sram) -> idf::Result<bool> {
         let shown = core::mem::take(&mut self.shown);
         let result = (|| {
-            let Some(first) = shown.first() else { return Ok(false) };
             let index = buffer(frame);
             let whole = self.held[index] != self.seq;
             let stale = self.stale[index];
-            let Some((rect, turn, moved)) = self.place(frame, &first.head)? else { return Ok(false) };
+            let placed = match shown.first() {
+                Some(first) => self.place(frame, &first.head)?,
+                None => {
+                    *self.shared.placed.lock() = None;
+                    None
+                }
+            };
+            let Some((rect, turn, moved)) = placed else {
+                self.blank(frame)?;
+                return Ok(true);
+            };
             for strip in &shown {
                 if whole || moved || strip_rect(&strip.head, rect, turn).intersects(&stale) {
                     self.render(frame, strip, (rect, turn), sram)?;
@@ -528,6 +537,19 @@ impl Player {
         })();
         self.shown = shown;
         result
+    }
+
+    fn blank(&mut self, frame: &ExternalFrame) -> idf::Result<()> {
+        let index = buffer(frame);
+        let area = frame.area;
+        let dirty = if self.blacked[index] == Some(Rect::default()) { self.stale[index].intersect(&area) } else { area };
+        if !dirty.is_empty() {
+            let mut target = frame.target().ok_or(idf::Error::INVALID_ARG)?;
+            clear(&mut target, dirty)?;
+            frame.wrote(dirty);
+        }
+        self.blacked[index] = Some(Rect::default());
+        Ok(())
     }
 
     fn count(&mut self) {
