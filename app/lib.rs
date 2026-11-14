@@ -60,6 +60,7 @@ pub fn run() {
     idf::thread::current().set_priority(APP_PRIORITY);
     settings::init();
     clock::init();
+    resources::mount();
     let mut bsp_config = bsp_rs::Config::default();
     bsp_config.display.fb_num = 3;
     bsp_config.dispatch.task_priority = DISPATCH_PRIORITY;

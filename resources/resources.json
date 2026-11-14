@@ -53,8 +53,9 @@
         }
       },
       "fonts": {
-        "caption": "caption_20",
-        "body": "body_24",
+        "title": ["title_28", "jp_28"],
+        "caption": ["caption_20", "jp_20"],
+        "body": ["body_24", "jp_24"],
         "key_symbols": "key_symbols_24"
       },
       "keyboards": {
@@ -380,6 +381,56 @@
       "glyph": [
         " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~…›•°"
       ]
+    },
+    "title_28": {
+      "size": 28,
+      "font": "@montserrat",
+      "variation": {
+        "wght": 400
+      },
+      "glyph": [
+        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~…›"
+      ]
+    },
+    "jp_18": {
+      "size": 18,
+      "font": "@noto-sans-jp",
+      "variation": {
+        "wght": 400
+      },
+      "bpp": 2,
+      "glyph_file": "@jp_glyphs",
+      "partition": "resources"
+    },
+    "jp_20": {
+      "size": 20,
+      "font": "@noto-sans-jp",
+      "variation": {
+        "wght": 400
+      },
+      "bpp": 2,
+      "glyph_file": "@jp_glyphs",
+      "partition": "resources"
+    },
+    "jp_24": {
+      "size": 24,
+      "font": "@noto-sans-jp",
+      "variation": {
+        "wght": 400
+      },
+      "bpp": 2,
+      "glyph_file": "@jp_glyphs",
+      "partition": "resources"
+    },
+    "jp_28": {
+      "size": 28,
+      "font": "@noto-sans-jp",
+      "variation": {
+        "wght": 400
+      },
+      "bpp": 2,
+      "glyph_file": "@jp_glyphs",
+      "partition": "resources"
     },
     "hero_56": {
       "size": 56,
