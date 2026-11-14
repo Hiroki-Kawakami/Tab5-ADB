@@ -14,7 +14,8 @@ use agent_link::protocol::{CAP_AUDIO, ROTATION_RELEASE};
 use agent_link::{AudioSource, Frame, FrameHead, Link, Touch, VideoStart};
 use devkit_gfx::{Color, ImageFormat, Rect, Rotation, Target};
 use devkit_ui::widgets::{divider, vertical_divider};
-use devkit_ui::{Align, Bars, ColorRole, Component, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Handle, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, State, Strips, TouchPoint, Ui, id};
+use devkit_ui::{Align, Bars, ColorRole, Component, Corners, Cx, Drag, Edge, Element, ExternalFrame, ExternalSurface, Handle, Justify, Policy, Presence, Prop, RenderMode, Screen, ScreenStyle, Sides, State, Strips, This, TouchPoint, Ui, id};
+use idf::executor;
 use idf::executor::JoinHandle;
 use idf::cache::{self, Flags};
 use idf::heap::Caps;
@@ -63,6 +64,9 @@ const BAR_SPACE: i16 = BAR_MARGIN + BAR_THICKNESS + BAR_MARGIN;
 const KEY_SIZE: i16 = 64;
 const REVEAL_CORNER: i16 = 96;
 const REVEAL_DISTANCE: i32 = 48;
+const HINT_DURATION: Duration = Duration::from_secs(10);
+const HINT_ACCENT: u8 = 6;
+const HINT_PADDING_Y: i16 = 24;
 
 /// Android's `KeyEvent.KEYCODE_*`.
 pub mod keycode {
@@ -650,6 +654,7 @@ pub struct MirrorScreen {
     /// Fitted frames already fill the box, so the modes look the same.
     fills: bool,
     swipe: Option<(i16, i16)>,
+    hint: bool,
     /// The surface is in the view; screen moves cannot draw over it.
     live: bool,
     audio: Option<PhoneAudio>,
@@ -685,7 +690,7 @@ impl MirrorScreen {
         });
         let mut passthrough = Passthrough { link: link.clone(), shared: shared.clone(), entered: Vec::new(), last: None, failing: false };
         surface.set_on_touch(move |points, sampled_ms| passthrough.touched(points, sampled_ms));
-        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, keys: Vec::new(), display: DisplayMode::Fit, adapting: false, adapt_refused: false, fills: false, swipe: None, live: false, audio: None })
+        Some(Self { link, mode: settings::mirror_orientation(), surface, shared, player: None, switching: false, leaving: false, bar: true, passthrough: true, keys: Vec::new(), display: DisplayMode::Fit, adapting: false, adapt_refused: false, fills: false, swipe: None, hint: false, live: false, audio: None })
     }
 
     fn start(&mut self, cx: &mut Cx<Self>) {
@@ -826,6 +831,11 @@ impl MirrorScreen {
         let (dx, dy) = (i32::from(drag.x - x), i32::from(drag.y - y));
         if !self.bar && dx * dx + dy * dy >= REVEAL_DISTANCE * REVEAL_DISTANCE {
             self.show_bar(true);
+            self.hint = false;
+            if !settings::reveal_learned() {
+                settings::set_reveal_learned();
+                settings::commit();
+            }
             return true;
         }
         false
@@ -881,6 +891,7 @@ impl Component for MirrorScreen {
             MirrorMsg::Restored => drop(cx.take_strips()),
             MirrorMsg::Hide => {
                 self.show_bar(false);
+                self.hint = !settings::reveal_learned();
                 cx.rebuild();
             }
             MirrorMsg::Reveal(drag) => {
@@ -920,12 +931,18 @@ impl Component for MirrorScreen {
     fn view<'a>(&'a self, ui: &'a Ui<MirrorMsg>) -> Element<'a, MirrorMsg> {
         let mut children = Vec::new();
         children.push(if self.live { ui.external(&self.surface).grow(1).id(id!("mirror")) } else { ui.column([]).grow(1) });
+        let (w, h) = ui.screen_size();
+        if self.hint {
+            let hint = reveal_hint(ui).absolute(Some(0), None, None, Some(0)).task(|this: This<Self>| hint_timeout(this));
+            let height = 2 * ui.theme().fonts.body.line_height() + 2 * HINT_PADDING_Y + i16::from(HINT_ACCENT);
+            let presence = Presence::from_edge(Edge::Bottom).offset(-height, 0);
+            children.push(if self.live { hint.appear(presence) } else { hint }.id(id!("hint")));
+        }
         // The corner stays while its swipe lasts, so the press that shows the bar is not a tap on it.
         if !self.bar || self.swipe.is_some() {
             children.push(ui.column([]).size(REVEAL_CORNER, REVEAL_CORNER).absolute(Some(0), None, None, Some(0)).on_drag(MirrorMsg::Reveal).id(id!("reveal")));
         }
         if self.bar {
-            let (w, h) = ui.screen_size();
             let reach = BAR_MARGIN + BAR_THICKNESS;
             let presence = if w < h { Presence::from_edge(Edge::Left).offset(0, reach) } else { Presence::from_edge(Edge::Bottom).offset(-reach, 0) };
             let display = !(self.fills && self.display == DisplayMode::Fit);
@@ -962,6 +979,28 @@ fn control_bar<'a>(ui: &'a Ui<MirrorMsg>, vertical: bool, passthrough: bool, dis
     let pad = (BAR_THICKNESS - KEY_SIZE) / 2;
     let bar = if vertical { ui.column(items).width(BAR_THICKNESS).padding_y(pad) } else { ui.row(items).height(BAR_THICKNESS).padding_x(pad) };
     bar.align(Align::Center).radius(BAR_RADIUS).background(ui.colors().surface)
+}
+
+fn reveal_hint<'a>(ui: &'a Ui<MirrorMsg>) -> Element<'a, MirrorMsg> {
+    let body = ui.theme().fonts.body;
+    let text = ui.column([ui.text(body, "Swipe from this corner"), ui.text(body, "to show controls")]);
+    ui.row([ui.icon(icon(icons::REVEAL)).foreground(ColorRole::Primary), text])
+        .gap(28)
+        .align(Align::Center)
+        .padding_each(28 + i16::from(HINT_ACCENT), HINT_PADDING_Y, 32, HINT_PADDING_Y + i16::from(HINT_ACCENT))
+        .background(ui.colors().surface)
+        .radius(BAR_RADIUS)
+        .corners(Corners::TOP_RIGHT)
+        .border(ColorRole::Primary, HINT_ACCENT)
+        .border_sides(Sides::LEFT | Sides::BOTTOM)
+}
+
+async fn hint_timeout(this: This<MirrorScreen>) {
+    executor::sleep(HINT_DURATION).await;
+    this.with(|s, cx| {
+        s.hint = false;
+        cx.rebuild();
+    });
 }
 
 fn control_key<'a>(ui: &'a Ui<MirrorMsg>, glyph: char, action: Action, passthrough: bool) -> Element<'a, MirrorMsg> {

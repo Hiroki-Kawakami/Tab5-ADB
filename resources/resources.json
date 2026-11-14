@@ -459,6 +459,7 @@
         "VOLUME_UP": "icons/volume.svg",
         "VOLUME_DOWN": "icons/volume-2.svg",
         "HIDE": "icons/chevron-down.svg",
+        "REVEAL": "icons/arrow-up-right.svg",
         "ANDROID": "icons/brand-android.svg",
         "KEYBOARD": "icons/keyboard.svg",
         "KEYBOARD_HIDE": "icons/keyboard-hide.svg",

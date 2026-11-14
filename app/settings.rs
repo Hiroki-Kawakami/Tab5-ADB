@@ -181,6 +181,7 @@ struct Store {
     phone_muted: Setting<bool>,
     agent_mode: Setting<AgentMode>,
     mirror_orientation: Setting<MirrorOrientation>,
+    reveal_learned: Setting<bool>,
     utc_offset: Setting<i16>,
 }
 
@@ -195,6 +196,7 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     phone_muted: Setting::new(c"phone_muted", false, keep),
     agent_mode: Setting::new(c"agent_mode", AgentMode::Normal, keep),
     mirror_orientation: Setting::new(c"mirror_orient", MirrorOrientation::Device, keep),
+    reveal_learned: Setting::new(c"reveal_learned", false, keep),
     utc_offset: Setting::new(c"utc_offset", 0, |minutes| minutes.clamp(-14 * 60, 14 * 60)),
 });
 
@@ -210,6 +212,7 @@ pub fn init() {
             store.phone_muted.load(&nvs);
             store.agent_mode.load(&nvs);
             store.mirror_orientation.load(&nvs);
+            store.reveal_learned.load(&nvs);
             store.utc_offset.load(&nvs);
             store.nvs = Some(nvs);
         }
@@ -237,6 +240,7 @@ pub fn commit() {
     written |= store.phone_muted.commit(nvs);
     written |= store.agent_mode.commit(nvs);
     written |= store.mirror_orientation.commit(nvs);
+    written |= store.reveal_learned.commit(nvs);
     written |= store.utc_offset.commit(nvs);
     if written && let Err(err) = nvs.commit() {
         error!(TAG, "commit: {err}");
@@ -312,6 +316,15 @@ pub fn mirror_orientation() -> MirrorOrientation {
 
 pub fn set_mirror_orientation(orientation: MirrorOrientation) {
     STORE.lock().mirror_orientation.set(orientation);
+}
+
+/// The user has shown the mirror controls by swiping from their corner.
+pub fn reveal_learned() -> bool {
+    STORE.lock().reveal_learned.value
+}
+
+pub fn set_reveal_learned() {
+    STORE.lock().reveal_learned.set(true);
 }
 
 /// Minutes east of UTC, as the last device connected had it.
