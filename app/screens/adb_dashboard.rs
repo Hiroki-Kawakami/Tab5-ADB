@@ -403,6 +403,8 @@ impl Component for AdbDashboardScreen {
             Msg::NowPlaying => {
                 if let Some(link) = agent::link_with(CAP_MEDIA) {
                     cx.nav_of::<Root>().transition(Transition::SlideUp).push(NowPlayingScreen::new(link, self.conn.clone()));
+                } else if self.agent.is_none() {
+                    cx.nav_of::<Overlay>().push(MessageScreen::new("Now Playing unavailable", "The agent could not be started on this device, so Now Playing is disabled."));
                 }
             }
             Msg::Media(action) => self.media_control(action, cx),
