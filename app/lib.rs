@@ -52,6 +52,9 @@ pub(crate) const STRIP_LANES: usize = 2;
 // Above the ADB executor on core 0, so the UI and the overlay on the mirror
 // keep up while it receives; below the strip lanes.
 const APP_PRIORITY: u32 = 9;
+// Above the app, so touch keeps its sampling period while TCP traffic loads
+// the cores.
+const DISPATCH_PRIORITY: u8 = 10;
 
 pub fn run() {
     idf::thread::current().set_priority(APP_PRIORITY);
@@ -59,6 +62,7 @@ pub fn run() {
     clock::init();
     let mut bsp_config = bsp_rs::Config::default();
     bsp_config.display.fb_num = 3;
+    bsp_config.dispatch.task_priority = DISPATCH_PRIORITY;
     bsp_config.display.pixel_format = Some(settings::color_depth().pixel_format());
     bsp_config.audio.speaker_mode = bsp_rs::audio::SpeakerMode::Auto;
     let board = match bsp_rs::init(&bsp_config) {
