@@ -60,6 +60,7 @@ pub fn run() {
     let mut bsp_config = bsp_rs::Config::default();
     bsp_config.display.fb_num = 3;
     bsp_config.display.pixel_format = Some(settings::color_depth().pixel_format());
+    bsp_config.audio.speaker_mode = bsp_rs::audio::SpeakerMode::Auto;
     let board = match bsp_rs::init(&bsp_config) {
         Ok(board) => board,
         Err(err) => {
