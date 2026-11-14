@@ -392,8 +392,8 @@
     "icon_48": {
       "size": 48,
       "icon": {
-        "TRACK_NEXT": "icons/player-track-next-filled.svg",
-        "TRACK_PREVIOUS": "icons/player-track-prev-filled.svg"
+        "TRACK_NEXT": "icons/player-skip-forward-filled.svg",
+        "TRACK_PREVIOUS": "icons/player-skip-back-filled.svg"
       }
     },
     "icon_72": {
