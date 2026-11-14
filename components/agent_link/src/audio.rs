@@ -9,7 +9,7 @@ use core::time::Duration;
 use adb::link::{Connection, Stream};
 use idf::executor;
 
-use crate::protocol::{self, AUDIO, AUDIO_START, AudioCodec, AudioFormat, AudioSource, HEADER_BYTES, Header, OK, REPLY, VOLUME};
+use crate::protocol::{self, AUDIO, AUDIO_START, AudioCodec, AudioFormat, AudioSource, AudioVolume, HEADER_BYTES, Header, OK, REPLY, VOLUME};
 use crate::link::Activity;
 use crate::{Error, Result};
 
@@ -18,8 +18,8 @@ const WINDOW: u32 = 64 * 1024;
 pub enum AudioMessage {
     /// PCM or one Opus packet, as the format says.
     Data(Vec<u8>),
-    /// The device's media volume step, of `max`.
-    Volume { volume: u8, max: u8 },
+    /// The device's media volume step, of `max`; while muted, the step it unmutes to.
+    Volume { volume: u8, max: u8, muted: bool },
 }
 
 /// The audio stream of an agent; dropping it closes the stream, and the device
@@ -31,10 +31,10 @@ pub struct Audio {
 }
 
 impl Audio {
-    pub(crate) async fn open(conn: &Connection, service: &str, codec: AudioCodec, source: AudioSource, max: u32, activity: &Activity, timeout: Duration) -> Result<Self> {
+    pub(crate) async fn open(conn: &Connection, service: &str, codec: AudioCodec, source: AudioSource, volume: AudioVolume, max: u32, activity: &Activity, timeout: Duration) -> Result<Self> {
         let mut stream = conn.open_with_window(service, WINDOW).await?;
         let mut out = Vec::new();
-        protocol::message(&mut out, AUDIO_START, 0, &protocol::audio_start(codec, source));
+        protocol::message(&mut out, AUDIO_START, 0, &protocol::audio_start(codec, source, volume));
         stream.write(&out).await?;
         activity.wrote();
         let reply = match executor::timeout(timeout, read_reply(&mut stream, max)).await {
@@ -60,7 +60,7 @@ impl Audio {
             self.stream.read_exact(&mut payload).await?;
             match header.kind {
                 AUDIO => return Ok(AudioMessage::Data(payload)),
-                VOLUME if payload.len() >= 2 => return Ok(AudioMessage::Volume { volume: payload[0], max: payload[1] }),
+                VOLUME if payload.len() >= 3 => return Ok(AudioMessage::Volume { volume: payload[0], max: payload[1], muted: payload[2] != 0 }),
                 _ => {}
             }
         }

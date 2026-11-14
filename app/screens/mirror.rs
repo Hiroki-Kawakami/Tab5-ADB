@@ -972,7 +972,7 @@ impl Screen for MirrorScreen {
         self.leaving = false;
         self.live = true;
         if self.audio.is_none() && settings::mirror_playback() == AudioPlayback::Tab5 && self.link.supports(CAP_AUDIO) {
-            self.audio = PhoneAudio::start(self.link.clone(), AudioSource::All);
+            self.audio = PhoneAudio::start(self.link.clone(), AudioSource::All, || ());
         }
         cx.rebuild();
         if !self.switching && self.player.is_none() {

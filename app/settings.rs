@@ -5,6 +5,8 @@
 
 use core::ffi::CStr;
 
+use agent_link::AudioVolume;
+use agent_link::protocol::VOLUME_SCALE;
 use bsp_rs::display::{Display, ImageFormat};
 use idf::log::error;
 use idf::nvs::{Key, Nvs, Raw, Value};
@@ -175,6 +177,8 @@ struct Store {
     color_depth: Setting<ColorDepth>,
     mirror_playback: Setting<AudioPlayback>,
     now_playing_playback: Setting<AudioPlayback>,
+    phone_volume: Setting<u16>,
+    phone_muted: Setting<bool>,
     agent_mode: Setting<AgentMode>,
     mirror_orientation: Setting<MirrorOrientation>,
     utc_offset: Setting<i16>,
@@ -187,6 +191,8 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     color_depth: Setting::new(c"color_depth", ColorDepth::Bits24, keep),
     mirror_playback: Setting::new(c"playback", AudioPlayback::Tab5, keep),
     now_playing_playback: Setting::new(c"np_playback", AudioPlayback::Tab5, keep),
+    phone_volume: Setting::new(c"phone_volume", VOLUME_SCALE / 2, |level| level.min(VOLUME_SCALE)),
+    phone_muted: Setting::new(c"phone_muted", false, keep),
     agent_mode: Setting::new(c"agent_mode", AgentMode::Normal, keep),
     mirror_orientation: Setting::new(c"mirror_orient", MirrorOrientation::Device, keep),
     utc_offset: Setting::new(c"utc_offset", 0, |minutes| minutes.clamp(-14 * 60, 14 * 60)),
@@ -200,6 +206,8 @@ pub fn init() {
             store.color_depth.load(&nvs);
             store.mirror_playback.load(&nvs);
             store.now_playing_playback.load(&nvs);
+            store.phone_volume.load(&nvs);
+            store.phone_muted.load(&nvs);
             store.agent_mode.load(&nvs);
             store.mirror_orientation.load(&nvs);
             store.utc_offset.load(&nvs);
@@ -225,6 +233,8 @@ pub fn commit() {
     written |= store.color_depth.commit(nvs);
     written |= store.mirror_playback.commit(nvs);
     written |= store.now_playing_playback.commit(nvs);
+    written |= store.phone_volume.commit(nvs);
+    written |= store.phone_muted.commit(nvs);
     written |= store.agent_mode.commit(nvs);
     written |= store.mirror_orientation.commit(nvs);
     written |= store.utc_offset.commit(nvs);
@@ -266,6 +276,18 @@ pub fn now_playing_playback() -> AudioPlayback {
 
 pub fn set_now_playing_playback(playback: AudioPlayback) {
     STORE.lock().now_playing_playback.set(playback);
+}
+
+/// The Tab5's own volume, which the device plays at while its sound comes to the Tab5.
+pub fn phone_volume() -> AudioVolume {
+    let store = STORE.lock();
+    AudioVolume { level: store.phone_volume.value, muted: store.phone_muted.value }
+}
+
+pub fn set_phone_volume(volume: AudioVolume) {
+    let mut store = STORE.lock();
+    store.phone_volume.set(volume.level);
+    store.phone_muted.set(volume.muted);
 }
 
 pub fn agent_mode() -> AgentMode {

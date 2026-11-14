@@ -10,7 +10,7 @@ use agent_link::protocol::{CAP_AUDIO, SUBTITLE_ALBUM, SUBTITLE_ARTIST};
 use agent_link::{AudioSource, Link, PlayState};
 use devkit_gfx::{TextOptions, TextRun};
 use devkit_ui::widgets::{slider, slider_value, top_bar};
-use devkit_ui::{Align, Canvas, ColorRole, Component, Cx, Drag, Element, Icon, Justify, Part, Prop, Screen, State, Task, This, Ui, id};
+use devkit_ui::{Align, Canvas, ColorRole, Component, Cx, Drag, Element, Icon, Justify, Overlay, Part, Prop, Screen, State, Task, This, Ui, id};
 use idf::executor;
 use idf::time::Instant;
 
@@ -20,6 +20,8 @@ use crate::media::{self, Action, DrawSize, Drawn, Progress, Update};
 use crate::phone_audio::PhoneAudio;
 use crate::resources::{self, colors, icons};
 use crate::settings::{self, AudioPlayback};
+
+use super::message::MessageScreen;
 
 const ART: i16 = 552;
 const ART_RADIUS: u8 = 24;
@@ -47,6 +49,8 @@ pub enum Msg {
     Volume(Drag),
     Mute,
     Cast,
+    /// Another Tab5 takes the device's sound; `true` when the user asked for it here.
+    AudioBusy(bool),
 }
 
 /// The playing track, large, with its controls; needs the agent.
@@ -66,11 +70,12 @@ pub struct NowPlayingScreen {
     volume_sent: Option<u8>,
     tasks: Option<(Task, Task)>,
     audio: Option<PhoneAudio>,
+    audio_busy: bool,
 }
 
 impl NowPlayingScreen {
     pub fn new(link: Link, conn: Connection) -> Self {
-        Self { link, conn, progress: None, drawn: None, marquee: Marquee::new(), ellipsis: OnceCell::new(), seeking: None, volume: None, volume_busy: false, volume_next: None, volume_sent: None, tasks: None, audio: None }
+        Self { link, conn, progress: None, drawn: None, marquee: Marquee::new(), ellipsis: OnceCell::new(), seeking: None, volume: None, volume_busy: false, volume_next: None, volume_sent: None, tasks: None, audio: None, audio_busy: false }
     }
 
     fn size() -> DrawSize {
@@ -96,18 +101,26 @@ impl NowPlayingScreen {
         cx.rebuild();
     }
 
-    fn play_here(&mut self, on: bool) {
+    fn play_here(&mut self, on: bool, asked: bool, cx: &mut Cx<Self>) {
         self.audio = None;
+        self.audio_busy = false;
         if on && self.link.supports(CAP_AUDIO) {
-            self.audio = PhoneAudio::start(self.link.clone(), AudioSource::Media);
+            let handle = cx.handle();
+            self.audio = PhoneAudio::start(self.link.clone(), AudioSource::Media, move || {
+                handle.post(Msg::AudioBusy(asked));
+            });
         }
     }
 
-    fn cast(&mut self) {
-        let here = settings::now_playing_playback() != AudioPlayback::Tab5;
+    fn playing_here(&self) -> bool {
+        settings::now_playing_playback() == AudioPlayback::Tab5 && !self.audio_busy
+    }
+
+    fn cast(&mut self, cx: &mut Cx<Self>) {
+        let here = !self.playing_here();
         settings::set_now_playing_playback(if here { AudioPlayback::Tab5 } else { AudioPlayback::Android });
         settings::commit();
-        self.play_here(here);
+        self.play_here(here, true, cx);
     }
 
     fn set_volume(&mut self, drag: Drag, cx: &mut Cx<Self>) {
@@ -241,7 +254,7 @@ impl NowPlayingScreen {
             _ => icons::VOLUME_UP,
         };
         let speaker = ui.row([ui.icon(icon_36(speaker)).foreground(ColorRole::Text)]).size(ICON_BUTTON, ICON_BUTTON).radius((ICON_BUTTON / 2) as u8).align(Align::Center).justify(Justify::Center).when(State::PRESSED, &[Prop::Background(colors::PRESSED)]).on_tap(Msg::Mute).id(id!("mute"));
-        let here = settings::now_playing_playback() == AudioPlayback::Tab5;
+        let here = self.playing_here();
         let cast = ui.row([ui.icon(icon_36(icons::CAST)).foreground(if here { ColorRole::Surface } else { ColorRole::Text })]).size(ICON_BUTTON, ICON_BUTTON).radius((ICON_BUTTON / 2) as u8).align(Align::Center).justify(Justify::Center);
         let cast = if here { cast.background(ColorRole::Text) } else { cast.when(State::PRESSED, &[Prop::Background(colors::PRESSED)]) };
         let volume = row(ui, speaker, player_slider(ui, level, Msg::Volume).disabled(!state.is_some_and(|s| s.volume_max > 0)), cast.on_tap(Msg::Cast).id(id!("cast")));
@@ -308,7 +321,14 @@ impl Component for NowPlayingScreen {
             Msg::Seek(drag) => self.seek(drag, cx),
             Msg::Volume(drag) => self.set_volume(drag, cx),
             Msg::Mute => self.mute(cx),
-            Msg::Cast => self.cast(),
+            Msg::Cast => self.cast(cx),
+            Msg::AudioBusy(asked) => {
+                self.audio = None;
+                self.audio_busy = true;
+                if asked {
+                    cx.nav_of::<Overlay>().push(MessageScreen::new("Cannot Play on Tab5", "Another Tab5 is playing this device's sound."));
+                }
+            }
         }
         cx.rebuild();
     }
@@ -334,7 +354,7 @@ impl Component for NowPlayingScreen {
 
 impl Screen for NowPlayingScreen {
     fn will_appear(&mut self, cx: &mut Cx<Self>) {
-        self.play_here(settings::now_playing_playback() == AudioPlayback::Tab5);
+        self.play_here(settings::now_playing_playback() == AudioPlayback::Tab5, false, cx);
         let link = self.link.clone();
         let follow = cx.spawn(move |this| media::follow(this, link, Self::size(), Self::apply));
         self.tasks = Some((follow, cx.spawn(tick)));

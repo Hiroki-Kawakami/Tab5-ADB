@@ -17,7 +17,7 @@ use idf::time::Instant;
 
 use crate::protocol::{self, AppEntry, Rendered, RENDER_FILE, SCREENSHOT, SCREENSHOT_RELEASE, SCREENSHOT_RENDER, SCREENSHOT_SAVE, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, GET_MEDIA, GET_MEDIA_RENDER, HELLO, MEDIA_CONTROL, MediaAction, MediaRender, MediaState, Header, Hello, HelloReply, INPUT_CLEAR, KEEPALIVE, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::audio::Audio;
-use crate::protocol::{AudioCodec, AudioSource};
+use crate::protocol::{AudioCodec, AudioSource, AudioVolume};
 use crate::video::Video;
 use crate::{Error, Result};
 
@@ -466,11 +466,13 @@ impl Link {
 
     /// The device's sound from `source`, which it stops playing itself while
     /// the stream is open; one at a time, so opening another ends the last.
-    pub async fn open_audio(&self, codec: AudioCodec, source: AudioSource, timeout: Duration) -> Result<Audio> {
+    /// The device's volume is `volume` until the stream closes. `Status(EBUSY)`
+    /// while another agent takes the device's sound.
+    pub async fn open_audio(&self, codec: AudioCodec, source: AudioSource, volume: AudioVolume, timeout: Duration) -> Result<Audio> {
         if self.is_closed() {
             return Err(self.shared.error());
         }
-        Audio::open(&self.conn, &Channel::Audio.service(&self.id), codec, source, self.config.max_message[2], &self.activity, timeout).await
+        Audio::open(&self.conn, &Channel::Audio.service(&self.id), codec, source, volume, self.config.max_message[2], &self.activity, timeout).await
     }
 
     /// Holds the device's screen at `rotation`, or gives it back with

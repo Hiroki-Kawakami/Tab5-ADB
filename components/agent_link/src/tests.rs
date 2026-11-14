@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{Attr, AttrValue, Rendered, render_file, saved, screenshot, AudioCodec, AudioFormat, AudioSource, Channel, audio_start, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_notice, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
+use crate::protocol::{Attr, AttrValue, Rendered, render_file, saved, screenshot, AudioCodec, AudioFormat, AudioSource, AudioVolume, Channel, audio_start, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_notice, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -153,8 +153,8 @@ fn media_control_bytes() {
 
 #[test]
 fn audio_start_and_format() {
-    assert_eq!(audio_start(AudioCodec::Opus, AudioSource::All), [2, 1, 0, 0]);
-    assert_eq!(audio_start(AudioCodec::Pcm, AudioSource::Media), [1, 0, 0, 0]);
+    assert_eq!(audio_start(AudioCodec::Opus, AudioSource::All, AudioVolume { level: 1000, muted: false }), [2, 1, 0xe8, 0x03, 0, 0, 0, 0]);
+    assert_eq!(audio_start(AudioCodec::Pcm, AudioSource::Media, AudioVolume { level: 500, muted: true }), [1, 0, 0xf4, 0x01, 1, 0, 0, 0]);
     assert_eq!(AudioFormat::parse(&[2, 2, 0, 0, 0x80, 0xbb, 0, 0]), Some(AudioFormat { codec: AudioCodec::Opus, channels: 2, rate: 48000 }));
     assert_eq!(AudioFormat::parse(&[3, 2, 0, 0, 0x80, 0xbb, 0, 0]), Some(AudioFormat { codec: AudioCodec::Aac, channels: 2, rate: 48000 }));
     assert_eq!(AudioFormat::parse(&[4, 2, 0, 0, 0x80, 0xbb, 0, 0]), None);

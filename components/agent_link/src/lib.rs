@@ -20,5 +20,5 @@ mod video;
 pub use audio::{Audio, AudioMessage};
 pub use error::{Error, Result};
 pub use link::{AgentInfo, AppInfoReply, HelloConfig, NoticeWatch, Link, MediaRenderReply, RenderedReply};
-pub use protocol::{AppEntry, AudioCodec, AudioFormat, AudioSource, FrameHead, MediaAction, MediaRender, MediaState, PlayState, Attr, AttrValue, Rendered, TextImage, Touch, TouchPoint, VideoStart};
+pub use protocol::{AppEntry, AudioCodec, AudioFormat, AudioSource, AudioVolume, FrameHead, MediaAction, MediaRender, MediaState, PlayState, Attr, AttrValue, Rendered, TextImage, Touch, TouchPoint, VideoStart};
 pub use video::{Frame, Jpeg, Video};

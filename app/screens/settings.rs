@@ -5,6 +5,8 @@
 
 use core::ffi::CStr;
 
+use agent_link::AudioVolume;
+use agent_link::protocol::VOLUME_SCALE;
 use bsp_rs::display;
 use devkit_net::wifi_manager::State as WifiState;
 use devkit_ui::widgets::{DropdownMenu, dropdown, segmented, slider, slider_value, switch, table, table_chevron, table_header, table_label, table_row, table_section, table_value, top_bar};
@@ -67,13 +69,12 @@ const AGENT_MODE_NOTE: &str = "Normal runs tab5adb-agent on the phone for screen
 
 pub struct SettingsScreen {
     switching: bool,
-    volume: u8,
     equalizer: bool,
 }
 
 impl SettingsScreen {
     pub(crate) fn new() -> Self {
-        Self { switching: false, volume: 255, equalizer: true }
+        Self { switching: false, equalizer: true }
     }
 
     fn switch_color_depth(&mut self, depth: ColorDepth, cx: &mut Cx<Self>) {
@@ -145,7 +146,10 @@ impl Component for SettingsScreen {
                     rotation.set_locked(!rotation.locked());
                 }
             }
-            SettingsMsg::Volume(value) => self.volume = value,
+            SettingsMsg::Volume(value) => {
+                let scale = u32::from(VOLUME_SCALE);
+                settings::set_phone_volume(AudioVolume { level: ((u32::from(value) * scale + 127) / 255) as u16, muted: false });
+            }
             SettingsMsg::Equalizer(on) => self.equalizer = on,
             SettingsMsg::OpenMirrorPlayback => {
                 if let Some(anchor) = cx.tap_rect() {
@@ -172,7 +176,9 @@ impl Component for SettingsScreen {
 
     fn view<'a>(&'a self, ui: &'a Ui<SettingsMsg>) -> Element<'a, SettingsMsg> {
         let c = ui.colors();
-        let percent = |value: u8| u32::from(value) * 100 / 255;
+        let volume = u32::from(settings::phone_volume().level);
+        let scale = u32::from(VOLUME_SCALE);
+        let volume_value = ((volume * 255 + scale / 2) / scale) as u8;
         let dark = ui.color_mode() == ColorMode::Dark;
         let brightness = settings::brightness();
         let brightness_value = (u32::from(brightness) * 255 / 100) as u8;
@@ -196,7 +202,7 @@ impl Component for SettingsScreen {
                     table_section(
                         ui,
                         [
-                            slider_row(ui, "Volume", ui.format(format_args!("{}", percent(self.volume))), self.volume, |d| SettingsMsg::Volume(slider_value(d))).id(id!("volume")),
+                            slider_row(ui, "Volume", ui.format(format_args!("{}", volume * 100 / scale)), volume_value, |d| SettingsMsg::Volume(slider_value(d))).id(id!("volume")),
                             table_row(ui, [table_label(ui, "Equalizer"), switch(ui, self.equalizer, SettingsMsg::Equalizer(!self.equalizer)).id(id!("equalizer"))]),
                         ],
                     ),

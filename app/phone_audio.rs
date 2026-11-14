@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 use core::ffi::CStr;
 use core::time::Duration;
 
-use agent_link::{AudioCodec, AudioMessage, AudioSource, Link};
+use agent_link::protocol::{EBUSY, VOLUME_SCALE};
+use agent_link::{AudioCodec, AudioMessage, AudioSource, AudioVolume, Error, Link};
 use bsp_rs::audio::{Audio, Format, Pcm, SampleFormat};
 use devkit_audio::aac::{AacConfig, AacDecoder, HeMode};
 use devkit_audio::fifo::{self, FifoConfig, Overrun, Underrun};
@@ -22,6 +23,7 @@ use idf::sync::{self, OnceLock};
 use idf::thread::{self, Builder};
 
 use crate::adb_link::{self, Route};
+use crate::settings;
 
 const TAG: &CStr = c"phone_audio";
 const RATE: u32 = 48000;
@@ -50,7 +52,7 @@ enum Packet {
     Stop,
 }
 
-/// Plays until dropped; the device plays its sound itself again then.
+/// Plays until dropped; the device plays its sound itself again then, at its own volume.
 pub struct PhoneAudio {
     receive: Option<JoinHandle<()>>,
     packets: sync::Sender<Packet>,
@@ -59,7 +61,8 @@ pub struct PhoneAudio {
 }
 
 impl PhoneAudio {
-    pub fn start(link: Link, source: AudioSource) -> Option<Self> {
+    /// `busy` runs from another task when another Tab5 takes the device's sound.
+    pub fn start(link: Link, source: AudioSource, busy: impl FnOnce() + Send + 'static) -> Option<Self> {
         let Some(&output) = OUTPUT.get() else {
             error!(TAG, "no audio output");
             return None;
@@ -86,7 +89,7 @@ impl PhoneAudio {
             }
         };
         let sender = packets.clone();
-        let receive = spawner.spawn(async move { receive(link, codec, source, sender, output).await });
+        let receive = spawner.spawn(async move { receive(link, codec, source, sender, output, busy).await });
         Some(Self { receive: Some(receive), packets, decode: Some(decode), play: Some(play) })
     }
 }
@@ -103,12 +106,18 @@ impl Drop for PhoneAudio {
         if let Some(play) = self.play.take() {
             play.join();
         }
+        settings::commit();
     }
 }
 
-async fn receive(link: Link, codec: AudioCodec, source: AudioSource, packets: sync::Sender<Packet>, output: &'static Audio) {
-    let mut audio = match link.open_audio(codec, source, OPEN_TIMEOUT).await {
+async fn receive(link: Link, codec: AudioCodec, source: AudioSource, packets: sync::Sender<Packet>, output: &'static Audio, busy: impl FnOnce()) {
+    let mut audio = match link.open_audio(codec, source, settings::phone_volume(), OPEN_TIMEOUT).await {
         Ok(audio) => audio,
+        Err(Error::Status(EBUSY)) => {
+            error!(TAG, "open: another Tab5 takes the sound");
+            busy();
+            return;
+        }
         Err(err) => {
             error!(TAG, "open: {err}");
             return;
@@ -126,10 +135,11 @@ async fn receive(link: Link, codec: AudioCodec, source: AudioSource, packets: sy
                     error!(TAG, "dropped a packet");
                 }
             }
-            Ok(AudioMessage::Volume { volume, max }) => {
-                if let Err(err) = output.set_volume(tab5_volume(volume, max)) {
+            Ok(AudioMessage::Volume { volume, max, muted }) => {
+                if let Err(err) = output.set_volume(if muted { 0 } else { tab5_volume(volume, max) }) {
                     error!(TAG, "volume: {err}");
                 }
+                remember(volume, max, muted);
             }
             Err(err) => {
                 error!(TAG, "stream: {err}");
@@ -145,6 +155,20 @@ fn tab5_volume(step: u8, max: u8) -> u8 {
         return 0;
     }
     ((u16::from(step.min(max)) * UNITY_VOLUME + u16::from(max) / 2) / u16::from(max)) as u8
+}
+
+/// Keeps the level unless the step differs from the one it rounds to, so it does not drift.
+fn remember(step: u8, max: u8, muted: bool) {
+    if max == 0 {
+        return;
+    }
+    let mut volume = settings::phone_volume();
+    let (step, max) = (u32::from(step.min(max)), u32::from(max));
+    let scale = u32::from(VOLUME_SCALE);
+    if (u32::from(volume.level) * max + scale / 2) / scale != step {
+        volume.level = ((step * scale + max / 2) / max) as u16;
+    }
+    settings::set_phone_volume(AudioVolume { muted, ..volume });
 }
 
 /// Until `Packet::Stop`; aborting the FIFO on the way out ends `play`.

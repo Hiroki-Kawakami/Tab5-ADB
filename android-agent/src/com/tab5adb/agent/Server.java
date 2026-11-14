@@ -148,6 +148,7 @@ public final class Server {
         }
         preview = new Preview(args[0]);
         DisplayClaim.recover(args[0]);
+        AudioClaim.recover(args[0]);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (input != null) {
                 input.clear();
@@ -155,6 +156,7 @@ public final class Server {
             RotationLock.release();
             DisplaySize.release();
             DisplayClaim.save();
+            AudioClaim.release();
             preview.release();
         }));
         System.out.println("listening");

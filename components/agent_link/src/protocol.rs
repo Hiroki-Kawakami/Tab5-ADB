@@ -468,8 +468,19 @@ pub enum AudioSource {
     All = 1,
 }
 
-pub fn audio_start(codec: AudioCodec, source: AudioSource) -> [u8; 4] {
-    [codec as u8, source as u8, 0, 0]
+pub const VOLUME_SCALE: u16 = 1000;
+
+/// What the device plays at while an audio stream is open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AudioVolume {
+    /// Of `VOLUME_SCALE`, the device's maximum.
+    pub level: u16,
+    pub muted: bool,
+}
+
+pub fn audio_start(codec: AudioCodec, source: AudioSource, volume: AudioVolume) -> [u8; 8] {
+    let [l0, l1] = volume.level.to_le_bytes();
+    [codec as u8, source as u8, l0, l1, u8::from(volume.muted), 0, 0, 0]
 }
 
 /// What the reply to AUDIO_START says the stream carries.

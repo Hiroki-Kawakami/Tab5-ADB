@@ -5,7 +5,6 @@
 
 package com.tab5adb.agent;
 
-import android.content.Context;
 import android.media.AudioManager;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
@@ -28,12 +27,14 @@ final class AudioServer {
     private static final int OK = 0x00;
     private static final int EINVAL = 0x01;
     private static final int ENOTSUP = 0x02;
+    private static final int EBUSY = 0x03;
     private static final int EFAIL = 0xFF;
     private static final int CODEC_PCM = 1;
     private static final int CODEC_OPUS = 2;
     private static final int CODEC_AAC = 3;
     private static final int CHUNK_BYTES = AudioCapture.RATE / 100 * AudioCapture.CHANNELS * 2;
     private static final int VOLUME_CHUNKS = 10;
+    private static final int VOLUME_SCALE = 1000;
 
     private static Session current;
 
@@ -124,7 +125,7 @@ final class AudioServer {
             byte[] head = new byte[HEADER_BYTES];
             in.readFully(head);
             long length = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN).getInt(0) & 0xFFFFFFFFL;
-            if ((head[4] & 0xFF) != AUDIO_START || length < 4 || length > 1024) {
+            if ((head[4] & 0xFF) != AUDIO_START || length < 8 || length > 1024) {
                 throw new IOException("audio stream opened with type " + (head[4] & 0xFF));
             }
             byte[] payload = new byte[(int) length];
@@ -132,6 +133,8 @@ final class AudioServer {
             Server.received();
             int codec = payload[0] & 0xFF;
             boolean all = payload[1] != 0;
+            int level = Math.min((payload[2] & 0xFF) | (payload[3] & 0xFF) << 8, VOLUME_SCALE);
+            boolean muted = payload[4] != 0;
             if (codec != CODEC_PCM && codec != CODEC_OPUS && codec != CODEC_AAC) {
                 reply(out, EINVAL, codec);
                 return;
@@ -145,6 +148,13 @@ final class AudioServer {
                 reply(out, ENOTSUP, codec);
                 return;
             }
+            if (!AudioClaim.claim()) {
+                if (encoder != null) {
+                    encoder.close();
+                }
+                reply(out, EBUSY, codec);
+                return;
+            }
             AudioCapture capture;
             try {
                 capture = AudioCapture.start(all);
@@ -153,19 +163,25 @@ final class AudioServer {
                 if (encoder != null) {
                     encoder.close();
                 }
+                AudioClaim.release();
                 reply(out, EFAIL, codec);
                 return;
             }
             try {
+                AudioManager audio = AudioClaim.audio();
+                int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                AudioClaim.set((level * max + VOLUME_SCALE / 2) / VOLUME_SCALE, muted);
                 reply(out, OK, codec);
                 System.out.println("audio: " + (codec == CODEC_OPUS ? "opus" : codec == CODEC_AAC ? "aac" : "pcm") + (all ? " all" : " media"));
                 watchClose(in);
-                stream(out, capture, encoder);
+                stream(out, capture, encoder, audio, max);
             } finally {
+                AudioClaim.putBack();
                 capture.close();
                 if (encoder != null) {
                     encoder.close();
                 }
+                AudioClaim.release();
             }
         }
 
@@ -183,11 +199,9 @@ final class AudioServer {
             thread.start();
         }
 
-        private void stream(OutputStream out, AudioCapture capture, AudioEncoder encoder) throws Exception {
-            AudioManager audio = (AudioManager) SystemContext.get().getSystemService(Context.AUDIO_SERVICE);
-            int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-            int volume = heard(audio);
-            write(out, VOLUME, new byte[] {(byte) volume, (byte) max});
+        private void stream(OutputStream out, AudioCapture capture, AudioEncoder encoder, AudioManager audio, int max) throws Exception {
+            int volume = volume(audio);
+            write(out, VOLUME, volumeNotice(volume, max));
             byte[] chunk = new byte[encoder != null ? AudioEncoder.FRAME_BYTES : CHUNK_BYTES];
             int chunks = 0;
             while (!stopped) {
@@ -202,18 +216,23 @@ final class AudioServer {
                     }
                 }
                 if (++chunks % VOLUME_CHUNKS == 0) {
-                    int now = heard(audio);
+                    int now = volume(audio);
                     if (now != volume) {
                         volume = now;
-                        write(out, VOLUME, new byte[] {(byte) volume, (byte) max});
+                        write(out, VOLUME, volumeNotice(volume, max));
                     }
                 }
             }
         }
     }
 
-    private static int heard(AudioManager audio) {
-        return audio.isStreamMute(AudioManager.STREAM_MUSIC) ? 0 : audio.getStreamVolume(AudioManager.STREAM_MUSIC);
+    // The audible step, and 0x100 while muted.
+    private static int volume(AudioManager audio) {
+        return AudioClaim.audible(audio) | (audio.isStreamMute(AudioManager.STREAM_MUSIC) ? 0x100 : 0);
+    }
+
+    private static byte[] volumeNotice(int volume, int max) {
+        return new byte[] {(byte) volume, (byte) max, (byte) (volume >> 8), 0};
     }
 
     private static void write(OutputStream out, int kind, byte[] payload) throws IOException {
