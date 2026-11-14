@@ -194,7 +194,7 @@ static STORE: Mutex<Store> = Mutex::new(Store {
     audio: None,
     brightness: Setting::new(c"brightness", 80, |percent| percent.clamp(MIN_BRIGHTNESS, 100)),
     equalizer: Setting::new(c"equalizer", true, keep),
-    color_depth: Setting::new(c"color_depth", ColorDepth::Bits24, keep),
+    color_depth: Setting::new(c"color_depth", ColorDepth::Bits16, keep),
     mirror_playback: Setting::new(c"playback", AudioPlayback::Tab5, keep),
     now_playing_playback: Setting::new(c"np_playback", AudioPlayback::Tab5, keep),
     phone_volume: Setting::new(c"phone_volume", VOLUME_SCALE / 2, |level| level.min(VOLUME_SCALE)),
