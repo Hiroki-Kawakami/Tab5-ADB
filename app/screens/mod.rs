@@ -11,6 +11,7 @@ mod device_info;
 mod file_dialogs;
 mod file_manager;
 mod file_preview;
+mod github;
 mod home;
 mod image_preview;
 mod logcat;

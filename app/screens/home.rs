@@ -18,6 +18,7 @@ use crate::{adb_link, tcp_history, wifi};
 
 use super::connecting::ConnectingScreen;
 use super::file_manager::FileManagerScreen;
+use super::github::GitHubScreen;
 use super::message::MessageScreen;
 use super::pair_device::PairDeviceScreen;
 use super::settings::SettingsScreen;
@@ -157,6 +158,7 @@ impl Component for HomeScreen {
         match msg {
             Msg::Settings => cx.nav_of::<Root>().transition(Transition::SlideUp).push(SettingsScreen::new()),
             Msg::Files => cx.nav_of::<Root>().push(FileManagerScreen::new(false)),
+            Msg::GitHub => cx.nav_of::<Overlay>().push(GitHubScreen::new()),
             Msg::Pair => cx.nav_of::<Root>().push(PairDeviceScreen::new()),
             Msg::UsbConnect => match adb_link::connect() {
                 Ok(conn) => cx.nav_of::<Overlay>().push(ConnectingScreen::usb(conn)),
@@ -192,7 +194,6 @@ impl Component for HomeScreen {
                     cx.rebuild();
                 }
             }
-            _ => {}
         }
     }
 
