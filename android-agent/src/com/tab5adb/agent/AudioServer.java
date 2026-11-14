@@ -129,6 +129,7 @@ final class AudioServer {
             }
             byte[] payload = new byte[(int) length];
             in.readFully(payload);
+            Server.received();
             int codec = payload[0] & 0xFF;
             boolean all = payload[1] != 0;
             if (codec != CODEC_PCM && codec != CODEC_OPUS && codec != CODEC_AAC) {
@@ -172,6 +173,7 @@ final class AudioServer {
             Thread thread = new Thread(() -> {
                 try {
                     while (in.read() >= 0) {
+                        Server.received();
                     }
                 } catch (IOException ignored) {
                 }

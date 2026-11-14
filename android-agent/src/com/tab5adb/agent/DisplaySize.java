@@ -39,6 +39,14 @@ final class DisplaySize {
             return;
         }
         held = false;
+        clear();
+    }
+
+    static synchronized boolean held() {
+        return held;
+    }
+
+    static void clear() {
         try {
             Object wm = RotationLock.windowManager();
             wm.getClass().getMethod("clearForcedDisplaySize", int.class).invoke(wm, 0);

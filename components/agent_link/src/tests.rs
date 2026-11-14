@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::protocol::{Attr, AttrValue, Rendered, render_file, saved, screenshot, AudioCodec, AudioFormat, AudioSource, Channel, audio_start, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_event, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
+use crate::protocol::{Attr, AttrValue, Rendered, render_file, saved, screenshot, AudioCodec, AudioFormat, AudioSource, Channel, audio_start, ENOTSUP, FrameHead, HELLO, Header, Hello, HelloReply, MediaAction, MediaRender, MediaState, PlayState, REPLY, TextImage, get_media_render, is_notice, media_control, Touch, TouchPoint, VideoStart, adapt_display, app_entries, get_app_info, key, message, reply};
 
 #[test]
 fn header_round_trip() {
@@ -129,7 +129,7 @@ fn media_state() {
     let state = MediaState { state: PlayState::Playing, has_art: true, can_seek: true, muted: true, token: 0x0102_0304, position_ms: 10_000, duration_ms: 20_000, speed: 1000, volume: 7, volume_max: 25 };
     assert_eq!(MediaState::parse(&b), Some(state));
     assert_eq!(MediaState::parse(&b[..19]), None);
-    assert!(is_event(0xB0) && !is_event(0x80) && !is_event(0xC0));
+    assert!(is_notice(0xB0) && !is_notice(0x80) && !is_notice(0xC0));
 }
 
 #[test]

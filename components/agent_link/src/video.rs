@@ -14,6 +14,7 @@ use idf::executor::{self, JoinHandle, Spawner};
 use idf::sync::Mutex;
 
 use crate::protocol::{self, CODEC_JPEG, FRAME, FRAME_ACK, FRAME_HEAD, FrameHead, HEADER_BYTES, Header, OK, REPLY, VIDEO_START, VideoStart};
+use crate::link::Activity;
 use crate::{Error, Result};
 
 const WINDOW: u32 = 512 * 1024;
@@ -50,7 +51,7 @@ struct Acks {
 
 /// FRAME_ACK for what was read, apart from reading: without delayed ack a
 /// write waits for the device, and acks coalesce while one is out.
-async fn ack_loop(acks: Arc<Mutex<Acks>>, mut writer: StreamWriter) {
+async fn ack_loop(acks: Arc<Mutex<Acks>>, mut writer: StreamWriter, activity: Activity) {
     let mut out = Vec::new();
     loop {
         let received = poll_fn(|cx| {
@@ -68,6 +69,7 @@ async fn ack_loop(acks: Arc<Mutex<Acks>>, mut writer: StreamWriter) {
         if writer.write(&out).await.is_err() {
             return;
         }
+        activity.wrote();
     }
 }
 
@@ -80,11 +82,12 @@ pub struct Video {
 }
 
 impl Video {
-    pub(crate) async fn open(conn: &Connection, spawner: &Spawner, service: &str, start: &VideoStart, max: u32, timeout: Duration) -> Result<Self> {
+    pub(crate) async fn open(conn: &Connection, spawner: &Spawner, service: &str, start: &VideoStart, max: u32, activity: Activity, timeout: Duration) -> Result<Self> {
         let (stream, mut writer) = conn.open_with_window(service, WINDOW).await?.into_split();
         let mut out = Vec::new();
         protocol::message(&mut out, VIDEO_START, 0, &start.encode());
         writer.write(&out).await?;
+        activity.wrote();
         let mut video = Self { stream, max, acks: Arc::new(Mutex::new(Acks::default())), task: None };
         let reply = match executor::timeout(timeout, video.read_reply()).await {
             Ok(reply) => reply?,
@@ -97,7 +100,7 @@ impl Video {
         if result.first() != Some(&CODEC_JPEG) {
             return Err(Error::Protocol);
         }
-        video.task = Some(spawner.spawn(ack_loop(video.acks.clone(), writer)));
+        video.task = Some(spawner.spawn(ack_loop(video.acks.clone(), writer, activity)));
         Ok(video)
     }
 

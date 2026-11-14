@@ -27,6 +27,7 @@ pub const REPLY: u8 = 0x80;
 pub const TOUCH: u8 = 0xC0;
 pub const KEY: u8 = 0xC1;
 pub const INPUT_CLEAR: u8 = 0xC2;
+pub const KEEPALIVE: u8 = 0xC3;
 
 pub const MEDIA: u8 = 0xB0;
 
@@ -333,7 +334,7 @@ pub fn app_entries(b: &[u8], count: usize) -> Option<Vec<Option<AppEntry<'_>>>> 
     Some(entries)
 }
 
-pub fn is_event(kind: u8) -> bool {
+pub fn is_notice(kind: u8) -> bool {
     (0x81..=0xBF).contains(&kind)
 }
 
@@ -347,7 +348,7 @@ pub enum PlayState {
     Stopped,
 }
 
-/// MEDIA_STATE: what GET_MEDIA answers and a MEDIA event carries.
+/// MEDIA_STATE: what GET_MEDIA answers and a MEDIA notice carries.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct MediaState {
     pub state: PlayState,

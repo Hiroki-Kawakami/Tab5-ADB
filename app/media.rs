@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Hiroki Kawakami
  *
- * The device's playing media: the agent's MEDIA events, or `dumpsys
+ * The device's playing media: the agent's MEDIA notices, or `dumpsys
  * media_session` without the agent.
  */
 
@@ -102,16 +102,16 @@ async fn draw(link: &Link, size: DrawSize) -> Result<Drawn, String> {
     Ok(Drawn { title: Some(text(&render.title)?), subtitle: Some(text(&render.subtitle)?), art })
 }
 
-/// Follows the agent's MEDIA events into `apply`, drawing each new track at
+/// Follows the agent's MEDIA notices into `apply`, drawing each new track at
 /// `size`; ends when the component or the link goes.
 pub async fn follow<C: Component>(this: This<C>, link: Link, size: DrawSize, apply: fn(&mut C, Update, &mut Cx<C>)) {
-    let mut events = link.watch(MEDIA);
+    let mut notices = link.watch(MEDIA);
     let mut drawn: Option<(u32, bool)> = None;
     loop {
-        let payload = match events.next().await {
+        let payload = match notices.next().await {
             Ok(payload) => payload,
             Err(err) => {
-                error!(TAG, "events: {err}");
+                error!(TAG, "notices: {err}");
                 return;
             }
         };

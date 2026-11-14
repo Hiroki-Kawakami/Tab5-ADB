@@ -8,6 +8,7 @@ package com.tab5adb.agent;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -29,6 +30,8 @@ public final class Server {
     private static final int HEADER_BYTES = 8;
     private static final int MAX_MESSAGE = 64 * 1024;
     private static final long CONNECT_TIMEOUT_MS = 10_000;
+    private static final long SILENCE_TIMEOUT_MS = 5_000;
+    private static final long SILENCE_CHECK_MS = 250;
 
     private static final int HELLO = 0x01;
     private static final int SET_ROTATION = 0x10;
@@ -56,6 +59,7 @@ public final class Server {
     private static final int OK = 0x00;
     private static final int EINVAL = 0x01;
     private static final int ENOTSUP = 0x02;
+    private static final int EBUSY = 0x03;
     private static final int ESTATE = 0x04;
     private static final int EFAIL = 0xFF;
 
@@ -69,6 +73,9 @@ public final class Server {
 
     private static volatile boolean helloDone;
     private static volatile int videoMaxMessage;
+    private static volatile long receivedAt;
+    private static volatile Input input;
+    private static boolean inputFailed;
     private static AppInfo apps;
     private static MediaInfo media;
     private static Preview preview;
@@ -78,10 +85,8 @@ public final class Server {
     private volatile long replyMax = 0xFFFFFFFFL;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService previews = Executors.newSingleThreadExecutor();
-    private final Object events = new Object();
-    private byte[] mediaEvent;
-    private Input input;
-    private boolean inputFailed;
+    private final Object notices = new Object();
+    private byte[] mediaNotice;
     private final int[] touchIds = new int[MAX_POINTERS];
     private final float[] touchXs = new float[MAX_POINTERS];
     private final float[] touchYs = new float[MAX_POINTERS];
@@ -142,26 +147,26 @@ public final class Server {
             }
         }
         preview = new Preview(args[0]);
+        DisplayClaim.recover(args[0]);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (input != null) {
+                input.clear();
+            }
             RotationLock.release();
             DisplaySize.release();
+            DisplayClaim.save();
             preview.release();
         }));
         System.out.println("listening");
         System.out.flush();
-        Server server = null;
         try (LocalSocket socket = control.accept()) {
             watchdog.interrupt();
             control.close();
-            server = new Server(socket.getOutputStream());
-            server.serve(new DataInputStream(socket.getInputStream()));
+            new Server(socket.getOutputStream()).serve(new DataInputStream(socket.getInputStream()));
         } catch (EOFException e) {
             System.out.println("closed");
         } catch (IOException e) {
             System.out.println("control: " + e);
-        }
-        if (server != null && server.input != null) {
-            server.input.clear();
         }
         System.exit(0);
     }
@@ -172,6 +177,29 @@ public final class Server {
 
     static int videoMaxMessage() {
         return videoMaxMessage;
+    }
+
+    static void received() {
+        receivedAt = SystemClock.uptimeMillis();
+    }
+
+    // Ends the process once no stream has brought anything for a while; a
+    // dropped TCP link closes nothing on this side.
+    private static void watchSilence() {
+        received();
+        Thread thread = new Thread(() -> {
+            try {
+                while (SystemClock.uptimeMillis() - receivedAt < SILENCE_TIMEOUT_MS) {
+                    Thread.sleep(SILENCE_CHECK_MS);
+                }
+            } catch (InterruptedException e) {
+                return;
+            }
+            System.out.println("silent for " + SILENCE_TIMEOUT_MS + " ms");
+            System.exit(0);
+        }, "silence");
+        thread.setDaemon(true);
+        thread.start();
     }
 
     private void serve(DataInputStream in) throws IOException {
@@ -187,6 +215,7 @@ public final class Server {
             }
             byte[] payload = new byte[(int) length];
             in.readFully(payload);
+            received();
             if (!hello && kind != HELLO) {
                 throw new IOException("type " + kind + " before HELLO");
             }
@@ -235,8 +264,9 @@ public final class Server {
         reply(id, OK, result.array());
         hello = true;
         helloDone = true;
+        watchSilence();
         if (media != null) {
-            startEvents();
+            startNotices();
             media.setSink(this::sendMedia);
         }
         System.out.println("HELLO ok");
@@ -247,6 +277,7 @@ public final class Server {
         int rotation = payload.length >= 1 ? payload[0] & 0xFF : -1;
         if (rotation == ROTATION_RELEASE) {
             RotationLock.release();
+            DisplayClaim.save();
             reply(id, OK, new byte[0]);
             return;
         }
@@ -254,13 +285,20 @@ public final class Server {
             reply(id, EINVAL, new byte[0]);
             return;
         }
+        int status;
         try {
-            RotationLock.hold(rotation);
-            reply(id, OK, new byte[0]);
+            if (DisplayClaim.claim()) {
+                RotationLock.hold(rotation);
+                status = OK;
+            } else {
+                status = EBUSY;
+            }
         } catch (Throwable t) {
             System.out.println("rotation: " + t);
-            reply(id, EFAIL, new byte[0]);
+            status = EFAIL;
         }
+        DisplayClaim.save();
+        reply(id, status, new byte[0]);
     }
 
     private void onAdaptDisplay(int id, byte[] payload) throws IOException {
@@ -273,6 +311,7 @@ public final class Server {
         int height = p.getShort(2) & 0xFFFF;
         if (width == 0 && height == 0) {
             DisplaySize.release();
+            DisplayClaim.save();
             reply(id, OK, new byte[0]);
             return;
         }
@@ -280,12 +319,19 @@ public final class Server {
             reply(id, EINVAL, new byte[0]);
             return;
         }
+        int status;
         try {
-            reply(id, DisplaySize.adapt(width, height) ? OK : ESTATE, new byte[0]);
+            if (!DisplayClaim.claim()) {
+                status = EBUSY;
+            } else {
+                status = DisplaySize.adapt(width, height) ? OK : ESTATE;
+            }
         } catch (Throwable t) {
             System.out.println("adapt display: " + t);
-            reply(id, EFAIL, new byte[0]);
+            status = EFAIL;
         }
+        DisplayClaim.save();
+        reply(id, status, new byte[0]);
     }
 
     private void onGetAppInfo(int id, byte[] payload) {
@@ -388,31 +434,31 @@ public final class Server {
     }
 
     private void sendMedia(byte[] state) {
-        synchronized (events) {
-            mediaEvent = state;
-            events.notify();
+        synchronized (notices) {
+            mediaNotice = state;
+            notices.notify();
         }
     }
 
-    // Events wait here, so a stalled stream keeps only the newest of each type.
-    private void startEvents() {
+    // Notices wait here, so a stalled stream keeps only the newest of each type.
+    private void startNotices() {
         Thread thread = new Thread(() -> {
             try {
                 while (true) {
                     byte[] state;
-                    synchronized (events) {
-                        while (mediaEvent == null) {
-                            events.wait();
+                    synchronized (notices) {
+                        while (mediaNotice == null) {
+                            notices.wait();
                         }
-                        state = mediaEvent;
-                        mediaEvent = null;
+                        state = mediaNotice;
+                        mediaNotice = null;
                     }
                     write(MEDIA, 0, state);
                 }
             } catch (InterruptedException | IOException e) {
-                System.out.println("events: " + e);
+                System.out.println("notices: " + e);
             }
-        }, "events");
+        }, "notices");
         thread.setDaemon(true);
         thread.start();
     }

@@ -34,10 +34,26 @@ final class RotationLock {
             return;
         }
         held = false;
+        restore(wasFrozen, wasRotation);
+    }
+
+    static synchronized boolean held() {
+        return held;
+    }
+
+    static synchronized boolean wasFrozen() {
+        return wasFrozen;
+    }
+
+    static synchronized int wasRotation() {
+        return wasRotation;
+    }
+
+    static void restore(boolean frozen, int rotation) {
         try {
             Object wm = windowManager();
-            if (wasFrozen) {
-                freeze(wm, wasRotation);
+            if (frozen) {
+                freeze(wm, rotation);
             } else {
                 thaw(wm);
             }

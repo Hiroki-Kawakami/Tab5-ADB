@@ -193,6 +193,7 @@ final class VideoServer {
             }
             byte[] payload = new byte[(int) length];
             in.readFully(payload);
+            Server.received();
             ByteBuffer p = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
             int boxW = p.getShort(0) & 0xFFFF;
             int boxH = p.getShort(2) & 0xFFFF;
@@ -230,6 +231,7 @@ final class VideoServer {
                         }
                         byte[] payload = new byte[(int) length];
                         in.readFully(payload);
+                        Server.received();
                         if ((head[4] & 0xFF) == FRAME_ACK && length >= 4) {
                             long ack = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(0) & 0xFFFFFFFFL;
                             synchronized (this) {

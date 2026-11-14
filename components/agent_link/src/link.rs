@@ -13,14 +13,16 @@ use core::time::Duration;
 use adb::link::{Connection, StreamReader, StreamWriter};
 use idf::executor::{self, JoinHandle, Spawner, oneshot};
 use idf::sync::Mutex;
+use idf::time::Instant;
 
-use crate::protocol::{self, AppEntry, Rendered, RENDER_FILE, SCREENSHOT, SCREENSHOT_RELEASE, SCREENSHOT_RENDER, SCREENSHOT_SAVE, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, GET_MEDIA, GET_MEDIA_RENDER, HELLO, MEDIA_CONTROL, MediaAction, MediaRender, MediaState, Header, Hello, HelloReply, INPUT_CLEAR, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
+use crate::protocol::{self, AppEntry, Rendered, RENDER_FILE, SCREENSHOT, SCREENSHOT_RELEASE, SCREENSHOT_RENDER, SCREENSHOT_SAVE, Channel, CAP_INPUT, HEADER_BYTES, ADAPT_DISPLAY, GET_APP_INFO, GET_MEDIA, GET_MEDIA_RENDER, HELLO, MEDIA_CONTROL, MediaAction, MediaRender, MediaState, Header, Hello, HelloReply, INPUT_CLEAR, KEEPALIVE, KEY, OK, PROTO_VERSION, REPLY, SET_ROTATION, TOUCH, Touch, VideoStart};
 use crate::audio::Audio;
 use crate::protocol::{AudioCodec, AudioSource};
 use crate::video::Video;
 use crate::{Error, Result};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(3);
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(1);
 
 /// What the Tab5 takes, told to the agent in HELLO.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -38,28 +40,28 @@ pub struct AgentInfo {
     pub max_message: u32,
 }
 
-/// The newest event of one type, as new ones come.
-pub struct EventWatch {
+/// The newest notice of one type, as new ones come.
+pub struct NoticeWatch {
     shared: Arc<Shared>,
     kind: u8,
     seen: u64,
 }
 
-impl EventWatch {
-    /// The newest event of its type not taken yet; an error once the link
+impl NoticeWatch {
+    /// The newest notice of its type not taken yet; an error once the link
     /// closes.
     pub async fn next(&mut self) -> Result<Vec<u8>> {
         poll_fn(|cx| {
-            let mut events = self.shared.events.lock();
-            if let Some((_, count, payload)) = events.latest.iter().find(|(k, count, _)| *k == self.kind && *count > self.seen) {
+            let mut notices = self.shared.notices.lock();
+            if let Some((_, count, payload)) = notices.latest.iter().find(|(k, count, _)| *k == self.kind && *count > self.seen) {
                 self.seen = *count;
                 return Poll::Ready(Ok(payload.clone()));
             }
             if self.shared.closed.load(Ordering::Acquire) {
                 return Poll::Ready(Err(self.shared.error()));
             }
-            if !events.waiters.iter().any(|w| w.will_wake(cx.waker())) {
-                events.waiters.push(cx.waker().clone());
+            if !notices.waiters.iter().any(|w| w.will_wake(cx.waker())) {
+                notices.waiters.push(cx.waker().clone());
             }
             Poll::Pending
         })
@@ -102,6 +104,24 @@ impl AppInfoReply {
     }
 }
 
+/// When the Tab5 last wrote to any of the agent's streams.
+#[derive(Clone)]
+pub(crate) struct Activity(Arc<Mutex<Instant>>);
+
+impl Activity {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(Instant::now())))
+    }
+
+    pub(crate) fn wrote(&self) {
+        *self.0.lock() = Instant::now();
+    }
+
+    fn idle(&self) -> Duration {
+        self.0.lock().elapsed()
+    }
+}
+
 struct Outbox {
     queued: Vec<u8>,
     waker: Option<Waker>,
@@ -117,7 +137,7 @@ struct Status {
     waiters: Vec<Waker>,
 }
 
-struct Events {
+struct Notices {
     count: u64,
     /// The newest of each type: type, its number in `count`, payload.
     latest: Vec<(u8, u64, Vec<u8>)>,
@@ -130,7 +150,7 @@ struct Shared {
     outbox: Mutex<Outbox>,
     requests: Mutex<Requests>,
     status: Mutex<Status>,
-    events: Mutex<Events>,
+    notices: Mutex<Notices>,
 }
 
 impl Shared {
@@ -149,7 +169,7 @@ impl Shared {
         };
         waiters.into_iter().for_each(Waker::wake);
         drop(core::mem::take(&mut self.requests.lock().waiting));
-        let waiters = core::mem::take(&mut self.events.lock().waiters);
+        let waiters = core::mem::take(&mut self.notices.lock().waiters);
         waiters.into_iter().for_each(Waker::wake);
         if let Some(waker) = self.outbox.lock().waker.take() {
             waker.wake();
@@ -166,6 +186,25 @@ impl Shared {
                 return Err(self.error());
             }
             protocol::message(&mut outbox.queued, kind, id, payload);
+            outbox.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    /// Queues KEEPALIVE unless something is queued already.
+    fn keepalive(&self) -> Result<()> {
+        let waker = {
+            let mut outbox = self.outbox.lock();
+            if self.closed.load(Ordering::Acquire) {
+                return Err(self.error());
+            }
+            if !outbox.queued.is_empty() {
+                return Ok(());
+            }
+            protocol::message(&mut outbox.queued, KEEPALIVE, 0, &[]);
             outbox.waker.take()
         };
         if let Some(waker) = waker {
@@ -192,16 +231,16 @@ impl Shared {
         Ok((id, rx))
     }
 
-    fn event(&self, kind: u8, payload: Vec<u8>) {
+    fn notice(&self, kind: u8, payload: Vec<u8>) {
         let waiters = {
-            let mut events = self.events.lock();
-            events.count += 1;
-            let count = events.count;
-            match events.latest.iter_mut().find(|(k, _, _)| *k == kind) {
+            let mut notices = self.notices.lock();
+            notices.count += 1;
+            let count = notices.count;
+            match notices.latest.iter_mut().find(|(k, _, _)| *k == kind) {
                 Some(slot) => *slot = (kind, count, payload),
-                None => events.latest.push((kind, count, payload)),
+                None => notices.latest.push((kind, count, payload)),
             }
-            core::mem::take(&mut events.waiters)
+            core::mem::take(&mut notices.waiters)
         };
         waiters.into_iter().for_each(Waker::wake);
     }
@@ -249,14 +288,14 @@ async fn read_loop(shared: Arc<Shared>, mut reader: StreamReader, max: u32) {
         }
         if header.kind == REPLY {
             shared.answer(header.id, payload);
-        } else if protocol::is_event(header.kind) {
-            shared.event(header.kind, payload);
+        } else if protocol::is_notice(header.kind) {
+            shared.notice(header.kind, payload);
         }
     };
     shared.shut(error);
 }
 
-async fn write_loop(shared: Arc<Shared>, mut writer: StreamWriter) {
+async fn write_loop(shared: Arc<Shared>, mut writer: StreamWriter, activity: Activity) {
     let mut batch = Vec::new();
     loop {
         let more = poll_fn(|cx| {
@@ -279,18 +318,34 @@ async fn write_loop(shared: Arc<Shared>, mut writer: StreamWriter) {
             shared.shut(err.into());
             return;
         }
+        activity.wrote();
         batch.clear();
+    }
+}
+
+async fn keepalive_loop(shared: Arc<Shared>, activity: Activity) {
+    loop {
+        let idle = activity.idle();
+        if idle < KEEPALIVE_IDLE {
+            executor::sleep(KEEPALIVE_IDLE - idle).await;
+            continue;
+        }
+        if shared.keepalive().is_err() {
+            return;
+        }
+        executor::sleep(KEEPALIVE_IDLE).await;
     }
 }
 
 struct Tasks {
     reader: Mutex<Option<JoinHandle<()>>>,
     writer: Mutex<Option<JoinHandle<()>>>,
+    keepalive: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Tasks {
     fn abort(&self) {
-        for task in [self.reader.lock().take(), self.writer.lock().take()].into_iter().flatten() {
+        for task in [self.reader.lock().take(), self.writer.lock().take(), self.keepalive.lock().take()].into_iter().flatten() {
             task.abort();
         }
     }
@@ -309,6 +364,7 @@ pub struct Link {
     shared: Arc<Shared>,
     tasks: Arc<Tasks>,
     info: AgentInfo,
+    activity: Activity,
     conn: Connection,
     id: Arc<str>,
     config: HelloConfig,
@@ -327,13 +383,15 @@ impl Link {
             outbox: Mutex::new(Outbox { queued: Vec::new(), waker: None }),
             requests: Mutex::new(Requests { last: 0, waiting: Vec::new() }),
             status: Mutex::new(Status { error: None, waiters: Vec::new() }),
-            events: Mutex::new(Events { count: 0, latest: Vec::new(), waiters: Vec::new() }),
+            notices: Mutex::new(Notices { count: 0, latest: Vec::new(), waiters: Vec::new() }),
         });
+        let activity = Activity::new();
         let tasks = Arc::new(Tasks {
             reader: Mutex::new(Some(spawner.spawn(read_loop(shared.clone(), reader, config.max_message[0])))),
-            writer: Mutex::new(Some(spawner.spawn(write_loop(shared.clone(), writer)))),
+            writer: Mutex::new(Some(spawner.spawn(write_loop(shared.clone(), writer, activity.clone())))),
+            keepalive: Mutex::new(None),
         });
-        let mut link = Self { shared, tasks, info: AgentInfo::default(), conn: conn.clone(), id: Arc::from(id), config, spawner: spawner.clone() };
+        let mut link = Self { shared, tasks, info: AgentInfo::default(), activity, conn: conn.clone(), id: Arc::from(id), config, spawner: spawner.clone() };
         let hello = Hello { proto_version: PROTO_VERSION, capabilities: config.capabilities, max_message: config.max_message };
         let reply = link.request(HELLO, &hello.encode(), HELLO_TIMEOUT).await?;
         let reply = HelloReply::parse(&reply).ok_or(Error::Protocol)?;
@@ -342,6 +400,7 @@ impl Link {
         }
         link.shared.max_send.store(reply.max_message, Ordering::Release);
         link.info = AgentInfo { version: reply.version, capabilities: reply.capabilities, max_message: reply.max_message };
+        *link.tasks.keepalive.lock() = Some(spawner.spawn(keepalive_loop(link.shared.clone(), link.activity.clone())));
         Ok(link)
     }
 
@@ -402,7 +461,7 @@ impl Link {
         if self.is_closed() {
             return Err(self.shared.error());
         }
-        Video::open(&self.conn, &self.spawner, &Channel::Video.service(&self.id), start, self.config.max_message[1], timeout).await
+        Video::open(&self.conn, &self.spawner, &Channel::Video.service(&self.id), start, self.config.max_message[1], self.activity.clone(), timeout).await
     }
 
     /// The device's sound from `source`, which it stops playing itself while
@@ -411,7 +470,7 @@ impl Link {
         if self.is_closed() {
             return Err(self.shared.error());
         }
-        Audio::open(&self.conn, &Channel::Audio.service(&self.id), codec, source, self.config.max_message[2], timeout).await
+        Audio::open(&self.conn, &Channel::Audio.service(&self.id), codec, source, self.config.max_message[2], &self.activity, timeout).await
     }
 
     /// Holds the device's screen at `rotation`, or gives it back with
@@ -435,9 +494,9 @@ impl Link {
         Ok(AppInfoReply { payload, count: packages.len() })
     }
 
-    /// Events of type `kind`, starting with the newest that came before.
-    pub fn watch(&self, kind: u8) -> EventWatch {
-        EventWatch { shared: self.shared.clone(), kind, seen: 0 }
+    /// Notices of type `kind`, starting with the newest that came before.
+    pub fn watch(&self, kind: u8) -> NoticeWatch {
+        NoticeWatch { shared: self.shared.clone(), kind, seen: 0 }
     }
 
     pub async fn media_state(&self, timeout: Duration) -> Result<MediaState> {
