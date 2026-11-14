@@ -59,9 +59,10 @@ fn services() {
 
 #[test]
 fn video_start_bytes() {
-    let start = VideoStart { box_width: 720, box_height: 1280, swap: true, quality: 60, max_fps: 30, strips: 4, fill: false };
-    assert_eq!(start.encode(), [0xd0, 0x02, 0x00, 0x05, 1, 60, 30, 4]);
+    let start = VideoStart { box_width: 720, box_height: 1280, swap: true, quality: 60, max_fps: 30, strips: 4, fill: false, adapt: false, max_rate: 10_000_000 };
+    assert_eq!(start.encode(), [0xd0, 0x02, 0x00, 0x05, 1, 60, 30, 4, 0x80, 0x96, 0x98, 0x00]);
     assert_eq!(VideoStart { swap: false, fill: true, ..start }.encode()[4], 2);
+    assert_eq!(VideoStart { swap: false, adapt: true, ..start }.encode()[4], 4);
 }
 
 #[test]

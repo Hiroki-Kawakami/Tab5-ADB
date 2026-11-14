@@ -312,6 +312,7 @@ pub struct Link {
     conn: Connection,
     id: Arc<str>,
     config: HelloConfig,
+    spawner: Spawner,
 }
 
 impl Link {
@@ -332,7 +333,7 @@ impl Link {
             reader: Mutex::new(Some(spawner.spawn(read_loop(shared.clone(), reader, config.max_message[0])))),
             writer: Mutex::new(Some(spawner.spawn(write_loop(shared.clone(), writer)))),
         });
-        let mut link = Self { shared, tasks, info: AgentInfo::default(), conn: conn.clone(), id: Arc::from(id), config };
+        let mut link = Self { shared, tasks, info: AgentInfo::default(), conn: conn.clone(), id: Arc::from(id), config, spawner: spawner.clone() };
         let hello = Hello { proto_version: PROTO_VERSION, capabilities: config.capabilities, max_message: config.max_message };
         let reply = link.request(HELLO, &hello.encode(), HELLO_TIMEOUT).await?;
         let reply = HelloReply::parse(&reply).ok_or(Error::Protocol)?;
@@ -401,7 +402,7 @@ impl Link {
         if self.is_closed() {
             return Err(self.shared.error());
         }
-        Video::open(&self.conn, &Channel::Video.service(&self.id), start, self.config.max_message[1], timeout).await
+        Video::open(&self.conn, &self.spawner, &Channel::Video.service(&self.id), start, self.config.max_message[1], timeout).await
     }
 
     /// The device's sound from `source`, which it stops playing itself while

@@ -12,15 +12,18 @@ import android.net.LocalSocket;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
+import java.io.EOFException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Locale;
 
 final class VideoServer {
     private static final int HEADER_BYTES = 8;
     private static final int VIDEO_START = 0x01;
+    private static final int FRAME_ACK = 0xC0;
     private static final int REPLY = 0x80;
     private static final int FRAME = 0x81;
     private static final int FRAME_HEAD = 12;
@@ -31,10 +34,13 @@ final class VideoServer {
     private static final int CODEC_JPEG = 1;
     private static final int FLAG_SWAP = 0x01;
     private static final int FLAG_FILL = 0x02;
+    private static final int FLAG_ADAPT = 0x04;
+    private static final int MAX_IN = 1024;
     private static final int DEFAULT_QUALITY = 80;
     private static final int MIN_QUALITY = 10;
     private static final int QUALITY_STEP = 15;
     private static final long IDLE_MS = 5;
+    private static final long STATS_NS = 5_000_000_000L;
 
     private static Session current;
     private static volatile Sent sent;
@@ -107,14 +113,32 @@ final class VideoServer {
         }
     }
 
+    private static final class Frame {
+        final ArrayList<byte[]> strips = new ArrayList<>();
+        // Every strip is in, or the rest were dropped.
+        boolean done;
+        boolean taken;
+    }
+
     private static final class Session {
         private final LocalSocket socket;
         private final Thread thread;
+        private final Thread sender;
         private volatile boolean stopped;
+        private VideoPacer pacer;
+        private VideoRate rate;
+        // The frame to send next, replaced by a newer one until the sender takes it.
+        private Frame pending;
+        private int frames;
+        private int statsFrames;
+        private int replaced;
+        private long statsBytes;
+        private long statsAt;
 
         Session(LocalSocket socket) {
             this.socket = socket;
             this.thread = new Thread(this::run, "video");
+            this.sender = new Thread(this::send, "video-send");
         }
 
         void start() {
@@ -122,12 +146,17 @@ final class VideoServer {
         }
 
         void stop() {
-            stopped = true;
+            halt();
             closeQuietly(socket);
             try {
                 thread.join();
             } catch (InterruptedException ignored) {
             }
+        }
+
+        private synchronized void halt() {
+            stopped = true;
+            notifyAll();
         }
 
         private void run() {
@@ -140,8 +169,14 @@ final class VideoServer {
             } catch (Exception e) {
                 System.out.println("video: " + e);
             } finally {
-                stopped = true;
+                halt();
                 closeQuietly(socket);
+                if (sender.isAlive()) {
+                    try {
+                        sender.join();
+                    } catch (InterruptedException ignored) {
+                    }
+                }
             }
         }
 
@@ -153,7 +188,7 @@ final class VideoServer {
             ByteBuffer h = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN);
             long length = h.getInt(0) & 0xFFFFFFFFL;
             int kind = head[4] & 0xFF;
-            if (kind != VIDEO_START || length < 8 || length > 1024) {
+            if (kind != VIDEO_START || length < 8 || length > MAX_IN) {
                 throw new IOException("video stream opened with type " + kind);
             }
             byte[] payload = new byte[(int) length];
@@ -163,41 +198,63 @@ final class VideoServer {
             int boxH = p.getShort(2) & 0xFFFF;
             boolean swap = (payload[4] & FLAG_SWAP) != 0;
             boolean fill = (payload[4] & FLAG_FILL) != 0;
+            boolean adapt = (payload[4] & FLAG_ADAPT) != 0;
             int quality = payload[5] & 0xFF;
             int maxFps = payload[6] & 0xFF;
             int strips = Math.max(1, payload[7] & 0xFF);
+            long maxRate = length >= 12 ? p.getInt(8) & 0xFFFFFFFFL : 0;
             if (boxW < 4 || boxH < 4) {
                 reply(out, EINVAL);
                 return;
             }
             quality = quality == 0 ? DEFAULT_QUALITY : Math.min(quality, 100);
+            pacer = new VideoPacer();
+            rate = new VideoRate(quality, maxFps, maxRate, adapt);
             reply(out, OK);
-            System.out.println("video: box " + boxW + "x" + boxH + (swap ? " swap" : "") + (fill ? " fill" : "") + " q" + quality + " fps " + maxFps + " strips " + strips);
-            watchClose(in);
-            stream(out, boxW, boxH, swap, fill, quality, maxFps, strips);
+            System.out.println("video: box " + boxW + "x" + boxH + (swap ? " swap" : "") + (fill ? " fill" : "") + (adapt ? " adapt" : "")
+                    + " q" + quality + " fps " + maxFps + " strips " + strips + (maxRate > 0 ? " max " + maxRate + " B/s" : ""));
+            readAcks(in);
+            sender.start();
+            stream(boxW, boxH, swap, fill, strips);
         }
 
-        private void watchClose(InputStream in) {
-            Thread thread = new Thread(() -> {
+        private void readAcks(DataInputStream in) {
+            Thread reader = new Thread(() -> {
+                byte[] head = new byte[HEADER_BYTES];
                 try {
-                    while (in.read() >= 0) {
+                    while (true) {
+                        in.readFully(head);
+                        long length = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN).getInt(0) & 0xFFFFFFFFL;
+                        if (length > MAX_IN) {
+                            throw new IOException("video message of " + length + " bytes");
+                        }
+                        byte[] payload = new byte[(int) length];
+                        in.readFully(payload);
+                        if ((head[4] & 0xFF) == FRAME_ACK && length >= 4) {
+                            long ack = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(0) & 0xFFFFFFFFL;
+                            synchronized (this) {
+                                pacer.acked(ack, System.nanoTime());
+                                notifyAll();
+                            }
+                        }
                     }
-                } catch (IOException ignored) {
+                } catch (IOException e) {
+                    if (!stopped && !(e instanceof EOFException)) {
+                        System.out.println("video: " + e);
+                    }
                 }
-                stopped = true;
-            }, "video-watch");
-            thread.setDaemon(true);
-            thread.start();
+                halt();
+            }, "video-ack");
+            reader.setDaemon(true);
+            reader.start();
         }
 
-        private void stream(OutputStream out, int boxW, int boxH, boolean swap, boolean fill, int quality, int maxFps, int strips) throws Exception {
-            long frameNs = maxFps > 0 ? 1_000_000_000L / maxFps : 0;
+        private void stream(int boxW, int boxH, boolean swap, boolean fill, int strips) throws Exception {
             int max = Server.videoMaxMessage();
             ScreenCapture capture = null;
             int rotation = -1;
             Point logical = null;
             int[] shape = null;
-            int frames = 0;
             try {
                 while (!stopped) {
                     long t0 = System.nanoTime();
@@ -225,14 +282,21 @@ final class VideoServer {
                         bitmap.recycle();
                         bitmap = cropped;
                     }
+                    int quality;
+                    int fps;
+                    synchronized (this) {
+                        rate.update(t0, pacer.bytesPerSecond());
+                        rate.encoded(t0);
+                        quality = rate.quality();
+                        fps = rate.fps();
+                    }
                     try {
-                        sendFrame(out, bitmap, rotation, quality, max, strips);
+                        encodeFrame(bitmap, rotation, quality, max, strips);
                     } finally {
                         bitmap.recycle();
                     }
-                    frames++;
-                    if (frameNs > 0) {
-                        long left = frameNs - (System.nanoTime() - t0);
+                    if (fps > 0) {
+                        long left = 1_000_000_000L / fps - (System.nanoTime() - t0);
                         if (left > 0) {
                             Thread.sleep(left / 1_000_000L, (int) (left % 1_000_000L));
                         }
@@ -245,6 +309,121 @@ final class VideoServer {
                 }
                 System.out.println("video: ended after " + frames + " frames");
             }
+        }
+
+        private void encodeFrame(Bitmap frame, int rotation, int quality, int max, int strips) {
+            int width = frame.getWidth();
+            int height = frame.getHeight();
+            int rows = Math.max(STRIP_ALIGN, height / strips / STRIP_ALIGN * STRIP_ALIGN);
+            int count = Math.max(1, Math.min(strips, height / rows));
+            Frame f = new Frame();
+            for (int i = 0; i < count; i++) {
+                int y = i * rows;
+                boolean last = i == count - 1;
+                int band = last ? height - y : rows;
+                Bitmap strip = band == height ? frame : Bitmap.createBitmap(frame, 0, y, width, band);
+                byte[] message;
+                try {
+                    message = encode(strip, width, height, y, rotation, last, quality, max);
+                } finally {
+                    if (strip != frame) {
+                        strip.recycle();
+                    }
+                }
+                synchronized (this) {
+                    if (message == null) {
+                        f.done = true;
+                        if (pending == f) {
+                            pending = null;
+                        }
+                        notifyAll();
+                        return;
+                    }
+                    f.strips.add(message);
+                    f.done = last;
+                    if (!f.taken && (pending == null || f.done) && pending != f) {
+                        if (pending != null) {
+                            replaced++;
+                        }
+                        pending = f;
+                    }
+                    notifyAll();
+                }
+            }
+        }
+
+        private void send() {
+            try {
+                OutputStream out = socket.getOutputStream();
+                while (true) {
+                    Frame f;
+                    synchronized (this) {
+                        while (!stopped && (pending == null || !pacer.mayStart())) {
+                            wait();
+                        }
+                        if (stopped) {
+                            return;
+                        }
+                        f = pending;
+                        pending = null;
+                        f.taken = true;
+                    }
+                    int bytes = 0;
+                    for (int i = 0; ; i++) {
+                        byte[] message;
+                        synchronized (this) {
+                            while (!stopped && i >= f.strips.size() && !f.done) {
+                                wait();
+                            }
+                            if (stopped) {
+                                return;
+                            }
+                            if (i >= f.strips.size()) {
+                                break;
+                            }
+                            message = f.strips.get(i);
+                        }
+                        out.write(message);
+                        out.flush();
+                        bytes += message.length;
+                        synchronized (this) {
+                            pacer.wrote(message.length, System.nanoTime());
+                        }
+                    }
+                    synchronized (this) {
+                        long now = System.nanoTime();
+                        rate.sent(bytes, now);
+                        frames++;
+                        stats(bytes, now);
+                    }
+                }
+            } catch (IOException e) {
+                if (!stopped) {
+                    System.out.println("video: " + e);
+                }
+            } catch (InterruptedException ignored) {
+            } finally {
+                halt();
+            }
+        }
+
+        private void stats(int bytes, long now) {
+            statsFrames++;
+            statsBytes += bytes;
+            if (statsAt == 0) {
+                statsAt = now;
+            }
+            long span = now - statsAt;
+            if (span < STATS_NS) {
+                return;
+            }
+            System.out.println(String.format(Locale.ROOT, "video: %.1f fps (%d replaced), %.2f MB/s, q%d, fps limit %d, link %.2f MB/s, latency %.1f ms",
+                    statsFrames * 1e9 / span, replaced, statsBytes * 1e3 / span, rate.quality(), rate.fps(),
+                    pacer.bytesPerSecond() / 1e6, pacer.latencyNs() / 1e6));
+            statsAt = now;
+            statsBytes = 0;
+            statsFrames = 0;
+            replaced = 0;
         }
     }
 
@@ -263,32 +442,6 @@ final class VideoServer {
         int cw = Math.max(w, (int) Math.ceil(srcW * s));
         int ch = Math.max(h, (int) Math.ceil(srcH * s));
         return new int[]{w, h, cw, ch, (cw - w) / 2, (ch - h) / 2};
-    }
-
-    private static void sendFrame(OutputStream out, Bitmap frame, int rotation, int quality, int max, int strips) throws IOException {
-        int width = frame.getWidth();
-        int height = frame.getHeight();
-        int rows = Math.max(STRIP_ALIGN, height / strips / STRIP_ALIGN * STRIP_ALIGN);
-        int count = Math.max(1, Math.min(strips, height / rows));
-        for (int i = 0; i < count; i++) {
-            int y = i * rows;
-            boolean last = i == count - 1;
-            int band = last ? height - y : rows;
-            Bitmap strip = band == height ? frame : Bitmap.createBitmap(frame, 0, y, width, band);
-            byte[] message;
-            try {
-                message = encode(strip, width, height, y, rotation, last, quality, max);
-            } finally {
-                if (strip != frame) {
-                    strip.recycle();
-                }
-            }
-            if (message == null) {
-                return;
-            }
-            out.write(message);
-            out.flush();
-        }
     }
 
     // null when even the lowest quality does not fit in max.

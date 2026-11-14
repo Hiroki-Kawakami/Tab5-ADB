@@ -31,6 +31,7 @@ pub const INPUT_CLEAR: u8 = 0xC2;
 pub const MEDIA: u8 = 0xB0;
 
 pub const VIDEO_START: u8 = 0x01;
+pub const FRAME_ACK: u8 = 0xC0;
 pub const FRAME: u8 = 0x81;
 
 pub const AUDIO_START: u8 = 0x01;
@@ -174,13 +175,19 @@ pub struct VideoStart {
     pub strips: u8,
     /// Covers the box and sends its middle, instead of fitting in it.
     pub fill: bool,
+    /// Lowers quality, then frame rate, to what the link carries.
+    pub adapt: bool,
+    /// Bytes/s the video keeps under by lowering quality; 0 for no limit.
+    pub max_rate: u32,
 }
 
 impl VideoStart {
-    pub fn encode(&self) -> [u8; 8] {
+    pub fn encode(&self) -> [u8; 12] {
         let [w0, w1] = self.box_width.to_le_bytes();
         let [h0, h1] = self.box_height.to_le_bytes();
-        [w0, w1, h0, h1, u8::from(self.swap) | u8::from(self.fill) << 1, self.quality, self.max_fps, self.strips]
+        let [r0, r1, r2, r3] = self.max_rate.to_le_bytes();
+        let flags = u8::from(self.swap) | u8::from(self.fill) << 1 | u8::from(self.adapt) << 2;
+        [w0, w1, h0, h1, flags, self.quality, self.max_fps, self.strips, r0, r1, r2, r3]
     }
 }
 

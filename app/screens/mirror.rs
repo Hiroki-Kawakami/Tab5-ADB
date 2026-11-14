@@ -42,6 +42,10 @@ const ADAPT_TIMEOUT: Duration = Duration::from_secs(3);
 const FILLS_PERCENT: u32 = 98;
 const IDLE: Duration = Duration::from_millis(20);
 const STRIPS: u8 = 4;
+const USB_MAX_FPS: u8 = 60;
+const USB_MAX_RATE: u32 = 10_000_000;
+const TCP_QUALITY: u8 = 70;
+const TCP_MAX_FPS: u8 = 30;
 /// How long a frame being drawn waits for its next strip.
 const STRIP_TIMEOUT: Duration = Duration::from_millis(200);
 const MAX_QUEUED_STRIPS: usize = 64;
@@ -243,11 +247,14 @@ impl Geometry {
     fn of(frame: &ExternalFrame, mode: MirrorOrientation, fill: bool) -> Self {
         let area = frame.area;
         let (w, h) = (area.w as u16, area.h as u16);
+        let tcp = matches!(adb_link::route(), Some(adb_link::Route::Tcp(_)));
+        let (quality, max_fps, max_rate) = if tcp { (TCP_QUALITY, TCP_MAX_FPS, 0) } else { (0, USB_MAX_FPS, USB_MAX_RATE) };
+        let start = VideoStart { box_width: w, box_height: h, swap: false, quality, max_fps, strips: STRIPS, fill, adapt: tcp, max_rate };
         let start = match mode {
-            MirrorOrientation::Fit => VideoStart { box_width: w, box_height: h, swap: false, quality: 0, max_fps: 0, strips: STRIPS, fill },
+            MirrorOrientation::Fit => start,
             MirrorOrientation::Device | MirrorOrientation::Rotate => {
                 let (w, h) = if frame.rotation.swaps_axes() { (h, w) } else { (w, h) };
-                VideoStart { box_width: w, box_height: h, swap: true, quality: 0, max_fps: 0, strips: STRIPS, fill }
+                VideoStart { box_width: w, box_height: h, swap: true, ..start }
             }
         };
         Self { start, area, ui: frame.rotation }
