@@ -50,9 +50,10 @@ const TCP_MAX_FPS: u8 = 30;
 const STRIP_TIMEOUT: Duration = Duration::from_millis(200);
 const MAX_QUEUED_STRIPS: usize = 64;
 const STATS_PERIOD: Duration = Duration::from_secs(1);
-// Above the ADB executor, which decrypts over TCP, so the player runs as soon
-// as a decode finishes; below the phone audio threads.
-const PLAYER_PRIORITY: u32 = 11;
+// On core 1 with the phone audio: above its decoder, which has a second of
+// buffer, and below its player.
+const PLAYER_PRIORITY: u32 = 13;
+const PLAYER_CORE: u32 = 1;
 const MAX_FRAME_BUFFERS: usize = 4;
 const BLACK: Color = Color::rgb(0, 0, 0);
 const BAR_THICKNESS: i16 = 72;
@@ -701,7 +702,7 @@ impl MirrorScreen {
             handle,
             fills: None,
         };
-        let spawned = thread::Builder::new().name("mirror").stack_size(8192).priority(PLAYER_PRIORITY).spawn(move || {
+        let spawned = thread::Builder::new().name("mirror").stack_size(8192).priority(PLAYER_PRIORITY).core(Some(PLAYER_CORE)).spawn(move || {
             player.run(&mut sram);
             sram
         });

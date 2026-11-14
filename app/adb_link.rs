@@ -28,6 +28,9 @@ const TAG: &CStr = c"adb_link";
 const KEY_NAMESPACE: &CStr = c"adb";
 const DEFAULT_HOST_ID: &str = "00000000";
 const IPV4_TIMEOUT: Duration = Duration::from_secs(10);
+// Pinned: IDF pins a free task to whichever core it first uses the FPU on, and
+// on core 1 the mirror player and the phone audio outrank it.
+const EXECUTOR_CORE: u32 = 0;
 const PAIR_TIMEOUT: Duration = Duration::from_secs(30);
 const PAIR_STACK: usize = 24 * 1024;
 static SPAWNER: OnceLock<Spawner> = OnceLock::new();
@@ -47,7 +50,7 @@ pub fn start(power: &bsp_rs::power::Power) {
         Ok(()) | Err(idf::Error::NOT_SUPPORTED) => {}
         Err(err) => error!(TAG, "USB 5V: {err}"),
     }
-    let spawner = match Builder::new().name("adb").stack_size(16384).spawn_local_executor(|_| {}) {
+    let spawner = match Builder::new().name("adb").stack_size(16384).core(Some(EXECUTOR_CORE)).spawn_local_executor(|_| {}) {
         Ok(spawner) => spawner,
         Err(err) => {
             error!(TAG, "executor: {err}");

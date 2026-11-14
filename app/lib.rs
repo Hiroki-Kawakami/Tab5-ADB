@@ -49,8 +49,12 @@ use status_bar::StatusBar;
 
 const TAG: &CStr = c"tab5-adb";
 pub(crate) const STRIP_LANES: usize = 2;
+// Above the ADB executor on core 0, so the UI and the overlay on the mirror
+// keep up while it receives; below the strip lanes.
+const APP_PRIORITY: u32 = 9;
 
 pub fn run() {
+    idf::thread::current().set_priority(APP_PRIORITY);
     settings::init();
     clock::init();
     let mut bsp_config = bsp_rs::Config::default();
