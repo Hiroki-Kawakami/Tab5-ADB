@@ -23,7 +23,7 @@ use idf::log::error;
 use term_emu::{Cell, Key, Terminal, attr};
 
 use crate::fonts::{MONO, icon};
-use crate::resources::{TOUCH_TERMINAL_LANDSCAPE_KEYBOARD, TOUCH_TERMINAL_PORTRAIT_KEYBOARD, icons};
+use crate::resources::{TOUCH_TERMINAL_KEYBOARD, icons};
 
 const TAG: &CStr = c"terminal";
 const TERM: &str = "xterm-256color";
@@ -496,8 +496,6 @@ impl Component for TerminalScreen {
     }
 
     fn view<'a>(&'a self, ui: &'a Ui<Msg>) -> Element<'a, Msg> {
-        let (width, height) = ui.screen_size();
-        let keyboard = if width > height { &TOUCH_TERMINAL_LANDSCAPE_KEYBOARD } else { &TOUCH_TERMINAL_PORTRAIT_KEYBOARD };
         let insets = ui.insets();
         let toggle = if insets.bottom > 0 { icon_button(ui, icon(icons::KEYBOARD_HIDE), Msg::HideKeyboard) } else { icon_button(ui, icon(icons::KEYBOARD), Msg::ShowKeyboard) };
         let term = ui
@@ -505,7 +503,7 @@ impl Component for TerminalScreen {
             .grow(1)
             .on_size(Msg::Resized)
             .on_input(Msg::Input)
-            .keyboard(keyboard)
+            .keyboard(&TOUCH_TERMINAL_KEYBOARD)
             .gestures(Gestures::PAN, pan)
             .task(|this: This<Self>| blink(this))
             .id(id!("term"));
