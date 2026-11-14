@@ -22,6 +22,7 @@ use crate::wifi;
 use crate::STRIP_LANES;
 use crate::sram::{Sram, UI_BYTES};
 
+use super::acknowledgements::AcknowledgementsScreen;
 use super::wifi::WifiScreen;
 
 const TAG: &CStr = c"settings";
@@ -40,7 +41,7 @@ pub fn set_rotation(rotation: AutoRotation) {
 #[derive(Clone, Copy)]
 pub enum SettingsMsg {
     Back,
-    Open,
+    Acknowledgements,
     Wifi,
     Brightness(u8),
     ColorDepth(usize),
@@ -127,7 +128,7 @@ impl Component for SettingsScreen {
     fn update(&mut self, msg: SettingsMsg, cx: &mut Cx<Self>) {
         match msg {
             SettingsMsg::Back => cx.nav().pop(),
-            SettingsMsg::Open => {}
+            SettingsMsg::Acknowledgements => cx.nav().push(AcknowledgementsScreen::new()),
             SettingsMsg::Wifi => cx.nav().push(WifiScreen::new()),
             SettingsMsg::Brightness(value) => settings::set_brightness((u32::from(value) * 100 / 255) as u8),
             SettingsMsg::ColorDepth(index) => self.switch_color_depth(COLOR_DEPTHS[index], cx),
@@ -226,7 +227,7 @@ impl Component for SettingsScreen {
                         ui,
                         [
                             table_row(ui, [table_label(ui, "Version"), table_value(ui, idf::system::app_description().version())]),
-                            table_row(ui, [table_label(ui, "Acknowledgements"), table_chevron(ui)]).on_tap(SettingsMsg::Open).id(id!("acknowledgements")),
+                            table_row(ui, [table_label(ui, "Acknowledgements"), table_chevron(ui)]).on_tap(SettingsMsg::Acknowledgements).id(id!("acknowledgements")),
                         ],
                     ),
                 ],

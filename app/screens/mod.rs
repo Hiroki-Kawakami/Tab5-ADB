@@ -3,6 +3,7 @@
  * Copyright (c) 2026 Hiroki Kawakami
  */
 
+mod acknowledgements;
 mod adb_dashboard;
 mod apk_preview;
 mod apps;
